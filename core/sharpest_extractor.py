@@ -13,7 +13,7 @@ pass populates ``lavfi.scene_score`` for free.  When a score exceeds
 ``scene_threshold``, the interval chunk is split so both sides of the
 transition get a representative sharp frame.
 
-Algorithm (adapted from github.com/Kotohibi/Extract_sharpest_frame):
+Algorithm (Normal/Maximum modes):
   1. Run ffmpeg blurdetect + scene scoring -> per-frame metadata
   2. Divide frames into interval chunks; split at scene boundaries
   3. Pick lowest-blur frame per (sub-)chunk
