@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Alex Gee
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""360 Camera plugin for LichtFeld Studio."""
+
+try:
+    from .plugin import on_load, on_unload
+
+    __all__ = ["on_load", "on_unload"]
+except ImportError:
+    # Allow importing sub-packages (e.g. core) outside the LichtFeld
+    # plugin runtime — needed for standalone tests.
+    pass

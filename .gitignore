@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+uv.lock
+.pytest_cache/
+settings.json
+*.egg-info/
+masking_setup_debug.txt
