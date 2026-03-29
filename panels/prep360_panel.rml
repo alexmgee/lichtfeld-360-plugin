@@ -1,0 +1,162 @@
+<rml>
+<head>
+  <link type="text/template" href="docked_panel.rml"/>
+  <link type="text/rcss" href="prep360_panel.rcss"/>
+</head>
+<body template="docked-panel" data-model="lichtfeld_360_camera">
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- Error banner (shown when pipeline fails)                  -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div data-if="show_error">
+    <span class="status-text status-error">{{error_text}}</span>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- Processing state (shown during pipeline run)              -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div data-if="show_processing">
+    <div class="processing-block">
+      <span class="status-text status-muted">{{processing_stage_text}}</span>
+      <span class="status-text">{{processing_status_text}}</span>
+      <div class="progress-row">
+        <progress max="1" data-attr-value="processing_progress_value"></progress>
+        <span class="progress__text">{{processing_progress_pct}}</span>
+      </div>
+      <button class="btn btn--error btn--full" data-event-click="cancel_pipeline">Cancel</button>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- Idle state (main configuration UI)                        -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div data-if="show_idle">
+
+    <!-- ── Section 1: Video Input ──────────────────────────── -->
+    <div class="section-header text-accent" id="hdr-video" data-event-click="toggle_section('video')">
+      <span class="section-arrow text-accent is-expanded" id="arrow-video">&#x25B6;</span>
+      <span class="text-accent">Video Input</span>
+    </div>
+    <div class="section-content" id="sec-video">
+      <div data-if="show_no_video">
+        <button class="btn btn--primary btn--full" data-event-click="select_video">Select 360&#xb0; Video</button>
+      </div>
+      <div data-if="show_video_loaded">
+        <div class="path-box">{{video_path_text}}</div>
+        <span class="status-text status-muted">{{video_info_text}}</span>
+        <button class="btn btn--secondary btn--full" data-event-click="clear_video">Clear</button>
+      </div>
+    </div>
+
+    <!-- ── Section 2: Frame Extraction ─────────────────────── -->
+    <div class="section-header text-accent" id="hdr-extraction" data-event-click="toggle_section('extraction')">
+      <span class="section-arrow text-accent is-expanded" id="arrow-extraction">&#x25B6;</span>
+      <span class="text-accent">Frame Extraction</span>
+    </div>
+    <div class="section-content" id="sec-extraction">
+      <div class="setting-row setting-row--aligned">
+        <span class="setting-row__label-col">FPS</span>
+        <div class="setting-row__control-col setting-row__control-col--slider">
+          <input type="range" class="setting-slider" data-value="extract_fps_str" min="0.1" max="5.0" step="0.1" />
+          <span class="slider-value">{{extract_fps_str}}</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <span class="prop-label">Quality</span>
+        <select data-value="extract_quality_idx">
+          <option value="0">None</option>
+          <option value="1">Fast</option>
+          <option value="2">Normal</option>
+          <option value="3">Maximum</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <span class="prop-label">Est. Frames</span>
+        <span class="status-text status-muted">{{est_frames_text}}</span>
+      </div>
+    </div>
+
+    <!-- Operator Masking section hidden pending SAM 3.1 integration -->
+
+    <!-- ── Section 4: Reframe & Alignment ──────────────────── -->
+    <div class="section-header text-accent" id="hdr-reframe" data-event-click="toggle_section('reframe')">
+      <span class="section-arrow text-accent is-expanded" id="arrow-reframe">&#x25B6;</span>
+      <span class="text-accent">Reframe &amp; Alignment</span>
+    </div>
+    <div class="section-content" id="sec-reframe">
+      <div class="setting-row">
+        <span class="prop-label">Preset</span>
+        <select data-value="preset_idx">
+          <option value="0">Cubemap (6 views)</option>
+          <option value="1">Balanced (9 views)</option>
+          <option value="2">Standard (13 views)</option>
+          <option value="3">Dense (17 views)</option>
+          <option value="4">Full (26 views)</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <span class="prop-label">Coverage</span>
+        <span class="status-text status-muted">{{coverage_text}}</span>
+      </div>
+      <div class="setting-row">
+        <span class="prop-label">Total Output</span>
+        <span class="status-text status-muted">{{total_output_text}}</span>
+      </div>
+      <div class="setting-row">
+        <span class="prop-label">Crop Size</span>
+        <select data-value="output_size_idx">
+          <option value="0">960 px</option>
+          <option value="1">1280 px</option>
+          <option value="2">1536 px</option>
+          <option value="3">1920 px</option>
+        </select>
+      </div>
+      <div class="setting-row setting-row--aligned">
+        <span class="setting-row__label-col">JPEG Quality</span>
+        <div class="setting-row__control-col setting-row__control-col--slider">
+          <input type="range" class="setting-slider" data-value="jpeg_quality_str" min="50" max="100" step="1" />
+          <span class="slider-value">{{jpeg_quality_str}}</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <span class="prop-label">COLMAP</span>
+        <select data-value="colmap_preset_idx">
+          <option value="0">Sequential</option>
+          <option value="1">Exhaustive</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- ── Section 5: Output ───────────────────────────────── -->
+    <div class="section-header text-accent" id="hdr-output" data-event-click="toggle_section('output')">
+      <span class="section-arrow text-accent is-expanded" id="arrow-output">&#x25B6;</span>
+      <span class="text-accent">Output</span>
+    </div>
+    <div class="section-content" id="sec-output">
+      <div class="setting-row">
+        <span class="prop-label">Mode</span>
+        <select data-value="output_mode_idx">
+          <option value="0">Pinhole</option>
+          <option value="1">Equirectangular</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <span class="prop-label">Output Path</span>
+        <div class="path-browse-row">
+          <div class="path-box path-box--small">{{output_path_display}}</div>
+          <button class="btn btn--secondary btn--compact" data-event-click="browse_output">Choose</button>
+        </div>
+      </div>
+      <div class="setting-row">
+        <span class="prop-label">Summary</span>
+        <span class="status-text status-muted">{{dataset_summary_text}}</span>
+      </div>
+
+      <button class="btn btn--success btn--full" data-event-click="run_pipeline">Process &amp; Import</button>
+      <button class="btn btn--secondary btn--full" data-event-click="run_pipeline_only">Process Only</button>
+    </div>
+
+  </div>
+
+</body>
+</rml>
