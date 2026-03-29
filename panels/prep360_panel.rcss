@@ -1,0 +1,154 @@
+/* 360 Camera panel — layout only.
+ * All colors provided by LichtFeld theme system.
+ * #content-wrap and #content are provided by the docked-panel template. */
+
+body {
+    font-family: Inter;
+    padding: 0;
+    bottom: 0;
+}
+
+/* ── Collapsible sections ───────────────────────────────── */
+
+.section-content.collapsed {
+    display: none;
+}
+
+.section-content {
+    padding: 4dp 0dp 8dp 0dp;
+    overflow: hidden;
+}
+
+/* ── Path display box ───────────────────────────────────── */
+
+.path-box {
+    padding: 4dp 6dp;
+    margin: 4dp 0dp;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: 12dp;
+}
+
+.path-box--small {
+    flex: 1;
+    margin: 0dp;
+}
+
+/* ── Path + browse button row ───────────────────────────── */
+
+.path-browse-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 4dp;
+    width: 100%;
+}
+
+.btn--compact {
+    min-width: 28dp;
+    padding: 2dp 6dp;
+}
+
+/* ── Processing block ───────────────────────────────────── */
+
+.processing-block {
+    padding: 4dp 0dp;
+}
+
+.progress-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6dp;
+    margin: 4dp 0dp;
+}
+
+.progress-row progress {
+    flex: 1;
+}
+
+.progress__text {
+    min-width: 40dp;
+    text-align: right;
+    font-size: 12dp;
+}
+
+/* ── Text input (for mask prompts) ──────────────────────── */
+
+.text-input {
+    flex: 1;
+    padding: 2dp 4dp;
+}
+
+/* ── Scrub fields (layout only — visuals from theme) ───── */
+
+.setting-row > .scrub-field {
+    flex: 1;
+    min-width: 0;
+}
+
+.scrub-field {
+    position: relative;
+    min-width: 0;
+    height: 24dp;
+    border-radius: 6dp;
+    background: rgba(255, 255, 255, 0.05);
+    cursor: ew-resize;
+    overflow: hidden;
+}
+
+.scrub-field-fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 0%;
+    background: linear-gradient(90deg, rgba(84, 170, 255, 0.34), rgba(84, 170, 255, 0.14));
+}
+
+.scrub-field-display {
+    display: block;
+    position: absolute;
+    left: 8dp;
+    right: 8dp;
+    top: 4dp;
+    bottom: 4dp;
+    font-size: 9dp;
+    line-height: 16dp;
+    color: #d7dde5;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.scrub-field-input {
+    position: absolute;
+    left: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    padding: 4dp 8dp;
+    background: transparent;
+    color: #d7dde5;
+    opacity: 0;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.scrub-field.is-dragging {
+    background: rgba(84, 170, 255, 0.16);
+}
+
+.scrub-field.is-editing {
+    background: rgba(84, 170, 255, 0.10);
+    cursor: text;
+}
+
+.scrub-field.is-editing .scrub-field-display {
+    opacity: 0;
+}
+
+.scrub-field.is-editing .scrub-field-input {
+    opacity: 1;
+}

@@ -1,0 +1,399 @@
+# SPDX-FileCopyrightText: 2026 Alex Gee
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""
+Pipeline Orchestrator — wires all core modules into a single processing flow.
+
+Stages and progress allocation:
+  1. Sharpest frame extraction      (0-20%)
+  2. Operator masking via SAM 3.1   (20-35%, skipped if disabled)
+  3. Reframe ERP to pinhole         (35-50%)
+  4. Generate rig config            (50-51%)
+  5. COLMAP alignment               (51-85%)
+  6. Write output dataset           (85-95%)
+  7. Return result                   (95-100%)
+
+The actual import into LichtFeld (lf.load_file) happens in the panel UI,
+not here.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Optional
+
+from .colmap_runner import ColmapConfig, ColmapResult, ColmapRunner
+from .masker import Masker, MaskConfig, is_masking_available
+from .presets import VIEW_PRESETS, ViewConfig
+from .reframer import Reframer
+from .rig_config import write_rig_config
+from .sharpest_extractor import SharpestConfig, SharpestExtractor
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Configuration and result data classes
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PipelineConfig:
+    """Full configuration for the 360-camera pipeline."""
+
+    video_path: str = ""
+    output_dir: str = ""
+
+    # Extraction
+    interval: float = 2.0
+    extraction_quality: str = "normal"   # none, fast, normal, maximum
+    scene_threshold: float = 0.3
+    blur_scale_width: int = 640
+    quality: int = 95
+    start_sec: Optional[float] = None
+    end_sec: Optional[float] = None
+
+    # Masking
+    enable_masking: bool = False
+    mask_prompts: list[str] = field(default_factory=lambda: ["person"])
+
+    # Reframe
+    preset_name: str = "cubemap"
+    output_size: int = 1920
+    jpeg_quality: int = 95
+
+    # COLMAP
+    colmap_preset: str = "normal"
+
+    # Output mode: "pinhole" = COLMAP dataset, "erp" = transforms.json
+    output_mode: str = "pinhole"
+
+
+@dataclass
+class PipelineResult:
+    """Result of a completed (or failed) pipeline run."""
+
+    success: bool
+    dataset_path: str = ""
+    output_mode: str = ""
+    num_source_frames: int = 0
+    num_output_images: int = 0
+    num_aligned_cameras: int = 0
+    elapsed_sec: float = 0.0
+    error: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Pipeline job
+# ---------------------------------------------------------------------------
+
+
+class PipelineJob:
+    """Runs the full 360-camera pipeline on a background thread.
+
+    Usage::
+
+        job = PipelineJob(config, on_progress=..., on_complete=...)
+        job.start()
+        # ... poll job.stage / job.progress / job.status ...
+        # ... or wait for on_complete callback ...
+        job.cancel()  # request graceful cancellation
+
+    Args:
+        config: Pipeline configuration.
+        on_progress: Called with ``(stage, progress_pct, status_msg)``
+            whenever progress changes.  *progress_pct* is 0-100.
+        on_complete: Called with a ``PipelineResult`` when the pipeline
+            finishes (success or failure).
+    """
+
+    def __init__(
+        self,
+        config: PipelineConfig,
+        on_progress: Optional[Callable[[str, float, str], None]] = None,
+        on_complete: Optional[Callable[[PipelineResult], None]] = None,
+    ) -> None:
+        self._config = config
+        self._on_progress = on_progress
+        self._on_complete = on_complete
+        self._cancelled = False
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._stage = ""
+        self._progress = 0.0
+        self._status = ""
+
+    # -- public interface ---------------------------------------------------
+
+    def start(self) -> None:
+        """Launch the pipeline on a daemon thread."""
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def cancel(self) -> None:
+        """Request graceful cancellation."""
+        with self._lock:
+            self._cancelled = True
+
+    @property
+    def stage(self) -> str:
+        with self._lock:
+            return self._stage
+
+    @property
+    def progress(self) -> float:
+        with self._lock:
+            return self._progress
+
+    @property
+    def status(self) -> str:
+        with self._lock:
+            return self._status
+
+    @property
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    # -- internal helpers ---------------------------------------------------
+
+    def _check_cancel(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def _update(self, stage: str, progress: float, status: str) -> None:
+        with self._lock:
+            self._stage = stage
+            self._progress = progress
+            self._status = status
+        if self._on_progress:
+            try:
+                self._on_progress(stage, progress, status)
+            except Exception:
+                pass
+
+    # -- main pipeline ------------------------------------------------------
+
+    def _run(self) -> None:
+        t0 = time.time()
+        cfg = self._config
+        result: PipelineResult
+
+        try:
+            result = self._run_stages(cfg, t0)
+        except Exception as exc:
+            logger.exception("Pipeline failed")
+            result = PipelineResult(
+                success=False,
+                error=str(exc),
+                elapsed_sec=time.time() - t0,
+            )
+
+        if self._on_complete:
+            try:
+                self._on_complete(result)
+            except Exception:
+                logger.exception("on_complete callback raised")
+
+    def _run_stages(self, cfg: PipelineConfig, t0: float) -> PipelineResult:
+        out = Path(cfg.output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+
+        # Sub-directories
+        extracted_dir = out / "extracted"
+        frames_dir = extracted_dir / "frames"
+        erp_masks_dir = extracted_dir / "masks"
+        images_dir = out / "images"
+        sparse_dir = out / "sparse"
+
+        # ===================================================================
+        # Stage 1: Sharpest Frame Extraction (0-20%)
+        # ===================================================================
+        self._update("extraction", 0.0, "Extracting sharpest frames...")
+
+        extractor = SharpestExtractor()
+        extract_config = SharpestConfig(
+            interval=cfg.interval,
+            extraction_quality=cfg.extraction_quality,
+            scene_threshold=cfg.scene_threshold,
+            scale_width=cfg.blur_scale_width,
+            quality=cfg.quality,
+            start_sec=cfg.start_sec,
+            end_sec=cfg.end_sec,
+        )
+
+        def _extract_progress(cur: int, total: int, msg: str) -> None:
+            pct = (cur / max(total, 1)) * 20
+            self._update("extraction", pct, msg)
+
+        extract_result = extractor.extract(
+            cfg.video_path,
+            str(frames_dir),
+            extract_config,
+            progress_callback=_extract_progress,
+            cancel_check=self._check_cancel,
+        )
+
+        if not extract_result.success:
+            raise RuntimeError(
+                f"Frame extraction failed: {extract_result.error}"
+            )
+
+        num_source_frames = extract_result.frames_extracted
+
+        if self._check_cancel():
+            raise RuntimeError("Cancelled")
+
+        # ===================================================================
+        # Stage 2: Operator Masking (20-35%, skipped if disabled)
+        # ===================================================================
+        reframe_mask_dir: Optional[str] = None
+        if cfg.enable_masking and is_masking_available():
+            self._update("masking", 20.0, "Initializing SAM 3.1...")
+
+            masker = Masker(MaskConfig(prompts=cfg.mask_prompts))
+            masker.initialize()
+
+            try:
+                def _mask_progress(cur: int, total: int, msg: str) -> None:
+                    pct = 20 + (cur / max(total, 1)) * 15
+                    self._update("masking", pct, msg)
+
+                mask_result = masker.process_frames(
+                    str(frames_dir),
+                    str(erp_masks_dir),
+                    progress_callback=_mask_progress,
+                )
+
+                if mask_result.success and mask_result.masked_frames > 0:
+                    reframe_mask_dir = str(erp_masks_dir)
+            finally:
+                masker.cleanup()
+
+            if self._check_cancel():
+                raise RuntimeError("Cancelled")
+
+        # ===================================================================
+        # Stage 3: Reframe ERP -> Pinhole (35-50%)
+        # ===================================================================
+        self._update("reframe", 35.0, "Reframing to pinhole views...")
+
+        from .presets import DEFAULT_PRESET
+        view_config = VIEW_PRESETS.get(
+            cfg.preset_name, VIEW_PRESETS[DEFAULT_PRESET]
+        )
+        # Override output settings from pipeline config
+        view_config = ViewConfig(
+            rings=view_config.rings,
+            include_zenith=view_config.include_zenith,
+            include_nadir=view_config.include_nadir,
+            zenith_fov=view_config.zenith_fov,
+            output_size=cfg.output_size,
+            jpeg_quality=cfg.jpeg_quality,
+        )
+
+        reframer = Reframer(view_config)
+
+        # reframe_mask_dir is set by Stage 2 if masking succeeded
+
+        def _reframe_progress(cur: int, total: int, filename: str) -> None:
+            pct = 35 + (cur / max(total, 1)) * 15
+            self._update("reframe", pct, f"Reframing {cur}/{total}: {filename}")
+
+        reframe_result = reframer.reframe_batch(
+            input_dir=str(frames_dir),
+            output_dir=str(images_dir),
+            mask_dir=reframe_mask_dir,
+            progress_callback=_reframe_progress,
+        )
+
+        if not reframe_result.success and reframe_result.output_count == 0:
+            errors = "; ".join(reframe_result.errors) if reframe_result.errors else "unknown"
+            raise RuntimeError(f"Reframing failed: {errors}")
+
+        num_output_images = reframe_result.output_count
+
+        if self._check_cancel():
+            raise RuntimeError("Cancelled")
+
+        # ===================================================================
+        # Stage 4: Generate Rig Config (50-51%)
+        # ===================================================================
+        self._update("rig_config", 50.0, "Generating rig configuration...")
+
+        rig_config_path = str(out / "rig_config.json")
+        write_rig_config(view_config, rig_config_path)
+
+        # ===================================================================
+        # Stage 5: COLMAP Alignment (51-85%)
+        # ===================================================================
+        self._update("colmap", 51.0, "Running COLMAP alignment...")
+
+        colmap_config = ColmapConfig(preset=cfg.colmap_preset)
+
+        def _colmap_progress(stage: str, pct: float, msg: str) -> None:
+            # ColmapRunner reports pct as 0.0-1.0 per sub-stage
+            self._update("colmap", 51 + pct * 34, msg)
+
+        # Pass mask directory to COLMAP if masks were generated
+        colmap_mask_path = out / "masks"
+        runner = ColmapRunner(
+            images_dir=str(images_dir),
+            output_dir=str(out),
+            rig_config_path=rig_config_path,
+            mask_path=str(colmap_mask_path) if colmap_mask_path.is_dir() else None,
+            config=colmap_config,
+            on_progress=_colmap_progress,
+            cancel_check=self._check_cancel,
+        )
+
+        colmap_result = runner.run()
+
+        if not colmap_result.success:
+            raise RuntimeError(f"COLMAP failed: {colmap_result.error}")
+
+        # ===================================================================
+        # Stage 6: Write Output (85-95%)
+        # ===================================================================
+        if cfg.output_mode == "erp":
+            # ERP mode: write transforms.json with original ERP images
+            # and camera-to-world poses derived from the COLMAP reconstruction.
+            #
+            # This requires:
+            #   1. Reading the COLMAP sparse reconstruction
+            #   2. Identifying reference sensor images (first view per station)
+            #   3. Extracting their poses as the station pose
+            #   4. Writing transforms.json with EQUIRECTANGULAR camera model
+            #      pointing to the original ERP frames
+            #
+            # TODO: Implement ERP output mode.  For now, the COLMAP dataset
+            #       (pinhole mode) is always available as a fallback.
+            self._update("output", 85.0, "ERP output mode not yet implemented — using COLMAP dataset")
+            logger.warning(
+                "ERP output mode is not yet implemented. "
+                "Falling back to COLMAP dataset (pinhole mode)."
+            )
+            dataset_path = colmap_result.reconstruction_path
+
+        else:
+            # Pinhole mode: COLMAP dataset already written by ColmapRunner
+            self._update("output", 85.0, "COLMAP dataset ready")
+            dataset_path = colmap_result.reconstruction_path
+
+        # ===================================================================
+        # Stage 7: Done (95-100%)
+        # ===================================================================
+        self._update("complete", 100.0, "Pipeline complete")
+
+        elapsed = time.time() - t0
+        return PipelineResult(
+            success=True,
+            dataset_path=dataset_path,
+            output_mode=cfg.output_mode if cfg.output_mode != "erp" else "pinhole",
+            num_source_frames=num_source_frames,
+            num_output_images=num_output_images,
+            num_aligned_cameras=colmap_result.num_registered_images,
+            elapsed_sec=elapsed,
+        )
