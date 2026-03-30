@@ -53,8 +53,7 @@ PRESET_LABELS = [
 ]
 
 COLMAP_MATCHERS = ["sequential", "exhaustive"]
-MATCH_BUDGET_TIERS = ["efficient", "balanced", "high", "maximum", "custom"]
-OUTPUT_MODES = ["pinhole", "erp"]
+MATCH_BUDGET_TIERS = ["fast", "balanced", "default", "high", "custom"]
 
 OUTPUT_SIZES = [960, 1280, 1536, 1920]
 
@@ -67,16 +66,16 @@ SCRUB_FIELD_SPECS = {
         min_value=50.0, max_value=100.0, step=1.0, fmt="%d", data_type=int,
     ),
     "colmap_max_matches_str": ScrubFieldSpec(
-        min_value=1024.0, max_value=131072.0, step=1024.0, fmt="%d", data_type=int,
+        min_value=1024.0, max_value=80000.0, step=128.0, fmt="%d", data_type=int,
     ),
 }
 
-# Extraction quality presets: (label, use_blur, scale_width, scene_threshold)
+# Extraction sharpness presets: (label, use_blur, scale_width, scene_threshold)
 # - Interval: no blur analysis, just extract at FPS rate
 # - Sharp: fast blur check at very low res, no scene splitting
 # - Sharpest: full blur analysis with scene-aware chunking
 # - Sharpest+: thorough analysis at higher resolution
-EXTRACT_QUALITY_PRESETS = [
+EXTRACT_SHARPNESS_PRESETS = [
     {"label": "None",    "use_blur": False, "scale_width": 0,    "scene_threshold": 0.0},
     {"label": "Fast",    "use_blur": True,  "scale_width": 480,  "scene_threshold": 0.0},
     {"label": "Normal",  "use_blur": True,  "scale_width": 640,  "scene_threshold": 0.5},
@@ -96,7 +95,7 @@ COVERAGE_DESCRIPTIONS = {
 # Section management
 # ---------------------------------------------------------------------------
 
-SECTIONS = ["video", "extraction", "masking", "reframe", "output"]
+SECTIONS = ["extraction", "masking", "reframe", "quality"]
 
 
 class Prep360Panel(lf.ui.Panel):
@@ -126,7 +125,7 @@ class Prep360Panel(lf.ui.Panel):
 
         # Extraction
         self._extract_fps: float = 1.0
-        self._extract_quality_idx: int = 2  # default: Sharpest (standard)
+        self._extract_sharpness_idx: int = 2  # default: Sharpest (standard)
 
         # Masking (coming soon — setup UI disabled pending python3.dll fix)
         self._enable_masking: bool = False
@@ -145,11 +144,10 @@ class Prep360Panel(lf.ui.Panel):
         self._output_size: int = OUTPUT_SIZES[3]
         self._jpeg_quality: int = 95
         self._colmap_matcher_idx: int = 0
-        self._match_budget_idx: int = 2  # high
-        self._colmap_max_num_matches: int = MATCH_BUDGETS["high"]
+        self._match_budget_idx: int = 2  # default
+        self._colmap_max_num_matches: int = MATCH_BUDGETS["default"]
 
         # Output
-        self._output_mode_idx: int = 0
         self._output_path: str = ""
 
         # Processing state
@@ -204,7 +202,7 @@ class Prep360Panel(lf.ui.Panel):
 
         # -- Extraction (range sliders need two-way bindings for data-value) --
         model.bind("extract_fps_str", lambda: f"{self._extract_fps:.1f}", self._set_extract_fps)
-        model.bind("extract_quality_idx", lambda: str(self._extract_quality_idx), self._set_extract_quality)
+        model.bind("extract_sharpness_idx", lambda: str(self._extract_sharpness_idx), self._set_extract_sharpness)
         model.bind_func("est_frames_text", self._get_est_frames_text)
 
         # -- Masking (coming soon — setup UI disabled) --
@@ -223,7 +221,6 @@ class Prep360Panel(lf.ui.Panel):
         model.bind_func("match_budget_text", self._get_match_budget_text)
 
         # -- Output --
-        model.bind("output_mode_idx", lambda: str(self._output_mode_idx), self._set_output_mode)
         model.bind_func("output_path_display", lambda: self._output_path or "(not set)")
         model.bind_func("dataset_summary_text", self._get_dataset_summary)
 
@@ -294,7 +291,7 @@ class Prep360Panel(lf.ui.Panel):
             self._video_loaded,
             self._video_path,
             self._extract_fps,
-            self._extract_quality_idx,
+            self._extract_sharpness_idx,
             self._enable_masking,
             self._mask_prompts_str,
             self._preset_idx,
@@ -303,7 +300,6 @@ class Prep360Panel(lf.ui.Panel):
             self._colmap_matcher_idx,
             self._match_budget_idx,
             self._colmap_max_num_matches,
-            self._output_mode_idx,
             self._output_path,
             self._is_processing,
             self._processing_stage,
@@ -324,7 +320,7 @@ class Prep360Panel(lf.ui.Panel):
             return "Load a video first"
         interval = 1.0 / max(0.1, self._extract_fps)
         base = VideoAnalyzer.estimate_frame_count(self._video_info, interval)
-        preset = EXTRACT_QUALITY_PRESETS[self._extract_quality_idx]
+        preset = EXTRACT_SHARPNESS_PRESETS[self._extract_sharpness_idx]
         if preset["scene_threshold"] > 0:
             extra = int(base * 0.2)
             return f"~{base}\u2013{base + extra} frames"
@@ -347,14 +343,12 @@ class Prep360Panel(lf.ui.Panel):
     def _get_dataset_summary(self) -> str:
         if not self._video_loaded:
             return "No video loaded"
-        mode = OUTPUT_MODES[self._output_mode_idx] if 0 <= self._output_mode_idx < len(OUTPUT_MODES) else "pinhole"
         vc = self._get_current_view_config()
         views = vc.total_views()
         interval = 1.0 / max(0.1, self._extract_fps)
         frames = VideoAnalyzer.estimate_frame_count(self._video_info, interval) if self._video_info else 0
         total = views * frames
-        mode_label = "Pinhole (COLMAP)" if mode == "pinhole" else "ERP"
-        return f"{mode_label} | {total:,} images | {self._output_size}px"
+        return f"Pinhole (COLMAP) | {total:,} images | {self._output_size}px"
 
     def _get_match_budget_text(self) -> str:
         matcher = (
@@ -369,13 +363,13 @@ class Prep360Panel(lf.ui.Panel):
         )
         tier_label = tier.title()
         return (
-            f"{tier_label} budget on {matcher} matching: "
+            f"{tier_label} match limit on {matcher} matching: "
             f"keeps up to {self._colmap_max_num_matches:,} matches per image pair. "
-            "Higher budgets preserve more correspondences but cost more time and memory."
+            "Higher limits preserve more correspondences but cost more time and memory."
         )
 
     def _get_completion_summary_text(self) -> str:
-        return self._completion_summary or "No completed runs yet."
+        return self._completion_summary or "No diagnostics yet."
 
     def _get_completion_report_text(self) -> str:
         return self._completion_report or "Run Process Only or Process & Import to capture timing and registration diagnostics."
@@ -438,9 +432,8 @@ class Prep360Panel(lf.ui.Panel):
         parts, lines = self._build_stage_timing_lines(stage_names, timing_dict, total)
         matcher, tier = self._get_matcher_and_tier()
         lines.append(f"Matcher: {matcher}")
-        lines.append(
-            f"Match budget: {tier} ({self._colmap_max_num_matches:,} max matches per pair)"
-        )
+        lines.append(f"Match limit: {tier}")
+        lines.append(f"Max. matches: {self._colmap_max_num_matches:,} per pair")
 
         output_root = Path(self._output_path) if self._output_path else None
         if output_root:
@@ -476,9 +469,8 @@ class Prep360Panel(lf.ui.Panel):
 
         matcher, tier = self._get_matcher_and_tier()
         lines.append(f"Matcher: {matcher}")
-        lines.append(
-            f"Match budget: {tier} ({self._colmap_max_num_matches:,} max matches per pair)"
-        )
+        lines.append(f"Match limit: {tier}")
+        lines.append(f"Max. matches: {self._colmap_max_num_matches:,} per pair")
 
         output_root = Path(self._output_path) if self._output_path else None
         if output_root:
@@ -555,9 +547,8 @@ class Prep360Panel(lf.ui.Panel):
         parts, lines = self._build_stage_timing_lines(stage_names, timing_dict, total)
         matcher, tier = self._get_matcher_and_tier()
         lines.append(f"Matcher: {matcher}")
-        lines.append(
-            f"Match budget: {tier} ({self._colmap_max_num_matches:,} max matches per pair)"
-        )
+        lines.append(f"Match limit: {tier}")
+        lines.append(f"Max. matches: {self._colmap_max_num_matches:,} per pair")
 
         if result.views_per_frame > 0:
             dropped_frames = max(result.num_source_frames - result.num_registered_frames, 0)
@@ -604,11 +595,11 @@ class Prep360Panel(lf.ui.Panel):
         except (ValueError, TypeError):
             pass
 
-    def _set_extract_quality(self, val):
+    def _set_extract_sharpness(self, val):
         try:
             v = int(float(val))
-            if 0 <= v < len(EXTRACT_QUALITY_PRESETS):
-                self._extract_quality_idx = v
+            if 0 <= v < len(EXTRACT_SHARPNESS_PRESETS):
+                self._extract_sharpness_idx = v
         except (ValueError, TypeError):
             pass
 
@@ -749,7 +740,7 @@ class Prep360Panel(lf.ui.Panel):
     def _set_colmap_max_matches(self, val):
         try:
             max_matches = int(float(val))
-            max_matches = max(1024, min(131072, max_matches))
+            max_matches = max(1024, min(80000, max_matches))
             self._colmap_max_num_matches = max_matches
 
             matched_tier = None
@@ -764,14 +755,6 @@ class Prep360Panel(lf.ui.Panel):
                 self._match_budget_idx = len(MATCH_BUDGET_TIERS) - 1
             else:
                 self._match_budget_idx = matched_tier
-        except (ValueError, TypeError):
-            pass
-
-    def _set_output_mode(self, val):
-        try:
-            idx = int(val)
-            if 0 <= idx < len(OUTPUT_MODES):
-                self._output_mode_idx = idx
         except (ValueError, TypeError):
             pass
 
@@ -921,19 +904,18 @@ class Prep360Panel(lf.ui.Panel):
         preset_name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "cubemap"
         colmap_matcher = COLMAP_MATCHERS[self._colmap_matcher_idx] if 0 <= self._colmap_matcher_idx < len(COLMAP_MATCHERS) else "sequential"
         match_budget_tier = MATCH_BUDGET_TIERS[self._match_budget_idx] if 0 <= self._match_budget_idx < len(MATCH_BUDGET_TIERS) else "custom"
-        output_mode = OUTPUT_MODES[self._output_mode_idx] if 0 <= self._output_mode_idx < len(OUTPUT_MODES) else "pinhole"
 
         prompts = [p.strip() for p in self._mask_prompts_str.split(",") if p.strip()]
-        quality_preset = EXTRACT_QUALITY_PRESETS[self._extract_quality_idx]
-        quality_names = ["none", "fast", "normal", "maximum"]
+        sharpness_preset = EXTRACT_SHARPNESS_PRESETS[self._extract_sharpness_idx]
+        sharpness_modes = ["none", "fast", "normal", "maximum"]
 
         config = PipelineConfig(
             video_path=self._video_path,
             output_dir=self._output_path,
             interval=1.0 / max(0.1, self._extract_fps),
-            extraction_quality=quality_names[self._extract_quality_idx],
-            scene_threshold=quality_preset["scene_threshold"],
-            blur_scale_width=quality_preset["scale_width"],
+            extraction_sharpness=sharpness_modes[self._extract_sharpness_idx],
+            scene_threshold=sharpness_preset["scene_threshold"],
+            blur_scale_width=sharpness_preset["scale_width"],
             quality=self._jpeg_quality,
             enable_masking=self._enable_masking and self._masking_available,
             mask_prompts=prompts if prompts else ["person"],
@@ -943,7 +925,7 @@ class Prep360Panel(lf.ui.Panel):
             colmap_matcher=colmap_matcher,
             colmap_match_budget_tier=match_budget_tier,
             colmap_max_num_matches=self._colmap_max_num_matches,
-            output_mode=output_mode,
+            output_mode="pinhole",
         )
 
         self._is_processing = True

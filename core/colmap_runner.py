@@ -44,10 +44,10 @@ _RE_MATCHING_BLOCK = re.compile(r"Processing block \[(\d+)/(\d+),\s*(\d+)/(\d+)\
 
 _IMAGE_EXTENSIONS = frozenset((".jpg", ".jpeg", ".png"))
 MATCH_BUDGETS = {
-    "efficient": 8192,
+    "fast": 8192,
     "balanced": 16384,
-    "high": 32768,
-    "maximum": 65536,
+    "default": 32768,
+    "high": 65536,
 }
 
 
@@ -75,13 +75,13 @@ def _trim_process_memory() -> None:
 
 
 def resolve_match_budget(
-    tier: str = "high",
+    tier: str = "default",
     override: Optional[int] = None,
 ) -> int:
     """Resolve a user-facing match budget tier into COLMAP's max_num_matches."""
     if override is not None:
         return max(1024, int(override))
-    return MATCH_BUDGETS.get(tier, MATCH_BUDGETS["high"])
+    return MATCH_BUDGETS.get(tier, MATCH_BUDGETS["default"])
 
 
 def infer_shared_pinhole_camera_params(
@@ -131,7 +131,7 @@ class ColmapConfig:
     camera_params: Optional[str] = None
     default_focal_length_factor: Optional[float] = None
     matcher: str = "sequential"  # "sequential", "exhaustive", or "vocab_tree"
-    match_budget_tier: str = "high"
+    match_budget_tier: str = "default"
     max_num_matches_override: Optional[int] = None
     refine_focal_length: bool = True
 

@@ -56,14 +56,14 @@ MANIFEST_FILENAME = "extraction_manifest.json"
 class SharpestConfig:
     """Configuration for sharpest-frame extraction.
 
-    Extraction quality levels (``extraction_quality``):
+    Extraction sharpness levels (``extraction_sharpness``):
       - ``"none"``:    extract at fixed intervals, no analysis
       - ``"fast"``:    extract 3× candidates, Laplacian score, keep sharpest
       - ``"normal"``:  blurdetect on subsampled candidates (~5× FPS)
       - ``"maximum"``: blurdetect on every frame in the video
     """
     interval: float = 2.0            # seconds between selections
-    extraction_quality: str = "normal"  # none, fast, normal, maximum
+    extraction_sharpness: str = "normal"  # none, fast, normal, maximum
     scene_threshold: float = 0.3     # scene-change score to split chunks
     scale_width: int = 640           # resolution for blur analysis
     block_size: int = 32             # blurdetect block dimensions
@@ -136,7 +136,7 @@ class SharpestExtractor:
             if progress_callback:
                 progress_callback(cur, tot, msg)
 
-        eq = config.extraction_quality
+        eq = config.extraction_sharpness
 
         # None: extract at fixed intervals, no analysis
         if eq == "none":
