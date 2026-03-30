@@ -33,15 +33,18 @@ Then restart LichtFeld Studio.
 
 1. Open the **360 Camera** tab in the right panel
 2. Click **Select 360° Video** and choose your equirectangular video file
-3. Adjust settings:
-   - **FPS** — Controls how often frames are extracted from the video; higher values create denser datasets but take longer to process
-   - **Sharpness** — Controls how carefully the plugin searches for the sharpest frame in each interval; see **Extraction Sharpness** below for the differences
-   - **Preset** — Controls how many pinhole views are generated from each 360 frame and how much of the sphere they cover
-   - **Crop Size** — Sets the output resolution of each pinhole view; larger sizes preserve more detail but increase runtime
-   - **Matcher** — Sequential matches nearby frames in order and is usually faster for normal video motion; Exhaustive tries all candidate image pairs and can recover harder scenes at the cost of more time
-   - **Match Limit** — Chooses one of the built-in COLMAP matching tiers, from faster/lighter to slower/more thorough
-   - **Max. Matches** — Sets the actual per-pair correspondence cap COLMAP may keep; higher values can improve difficult alignments but increase time and memory use
-4. Click **Process & Import** to process and load the result, or **Process Only** to just create the dataset
+3. Choose an **Output Path**
+4. Adjust settings by section:
+
+   **Frame Extraction**
+   `FPS` controls how often frames are extracted from the video, and `Sharpness` controls how carefully the plugin searches each interval for the best frame.
+
+   **Reframe & Alignment**
+   `Preset` controls how many pinhole views are generated from each 360 frame, and `Matcher` controls how COLMAP searches for matching image pairs across the sequence.
+
+   **Output Quality**
+   `Crop Size` sets the resolution of each pinhole view, `Match Limit` chooses one of the built-in COLMAP matching tiers, and `Max. Matches` sets the actual per-pair correspondence cap COLMAP may keep.
+5. Click **Process & Import** to process and load the result, or **Process Only** to just create the dataset
 
 After every run, the panel's **Run Diagnostics** block shows:
 
