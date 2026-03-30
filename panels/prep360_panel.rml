@@ -119,11 +119,32 @@
         </div>
       </div>
       <div class="setting-row">
-        <span class="prop-label">COLMAP</span>
-        <select data-value="colmap_preset_idx">
+        <span class="prop-label">Matcher</span>
+        <select data-value="colmap_matcher_idx">
           <option value="0">Sequential</option>
           <option value="1">Exhaustive</option>
         </select>
+      </div>
+      <div class="setting-row">
+        <span class="prop-label">Match Budget</span>
+        <select data-value="match_budget_idx">
+          <option value="0">Efficient</option>
+          <option value="1">Balanced</option>
+          <option value="2">High</option>
+          <option value="3">Maximum</option>
+          <option value="4">Custom</option>
+        </select>
+      </div>
+      <div class="setting-row setting-row--aligned">
+        <span class="setting-row__label-col">Max Matches</span>
+        <div class="setting-row__control-col setting-row__control-col--slider">
+          <input type="range" class="setting-slider" data-value="colmap_max_matches_str" min="1024" max="131072" step="1024" />
+          <span class="slider-value">{{colmap_max_matches_str}}</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <span class="prop-label">Budget Info</span>
+        <span class="status-text status-muted">{{match_budget_text}}</span>
       </div>
     </div>
 
@@ -150,6 +171,12 @@
       <div class="setting-row">
         <span class="prop-label">Summary</span>
         <span class="status-text status-muted">{{dataset_summary_text}}</span>
+      </div>
+
+      <div class="completion-block">
+        <span class="status-text text-accent">Last Run</span>
+        <span class="status-text status-muted">{{completion_summary_text}}</span>
+        <div class="completion-report">{{completion_report_text}}</div>
       </div>
 
       <button class="btn btn--success btn--full" data-event-click="run_pipeline">Process &amp; Import</button>

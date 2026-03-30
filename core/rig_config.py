@@ -75,10 +75,29 @@ def rotation_matrix_to_quaternion(R: np.ndarray) -> list[float]:
 def generate_rig_config(view_config: ViewConfig) -> list[dict]:
     """Generate COLMAP rig config JSON from a ViewConfig.
 
-    Returns a list with one rig dict containing all cameras.
-    The first view is the reference sensor (identity rotation).
-    All other views have quaternion rotations relative to the reference
-    and zero translation (views share the same optical center).
+    Image layout (camera-first, produced by the reframer):
+        images/{view_name}/{station}.jpg
+
+    COLMAP stores these as ``{view_name}/{station}.jpg`` in its database.
+    Each camera is identified by a literal folder prefix such as
+    ``"00_00/"`` and the remaining filename ``"{station}.jpg"`` becomes
+    the frame key shared across all virtual cameras for the same panorama.
+
+    Rotation convention:
+        ``create_rotation_matrix()`` returns ``world_from_cam`` for each
+        virtual view because the reframer rotates camera-space rays into
+        world-space before sampling the ERP image. COLMAP's
+        ``cam_from_rig_rotation`` expects the inverse relationship:
+        a transform from rig coordinates into each camera's coordinates.
+
+        With the reference sensor defining the rig coordinate system, the
+        correct relative rotation for camera ``i`` is therefore::
+
+            cam_i_from_rig = cam_i_from_world * world_from_rig
+                           = R_i.T * R_ref
+
+        Writing the forward rotation ``R_i * R_ref.T`` mirrors the rig and
+        causes COLMAP to assemble geometrically inconsistent reconstructions.
 
     Args:
         view_config: The view configuration defining all perspective views.
@@ -91,27 +110,26 @@ def generate_rig_config(view_config: ViewConfig) -> list[dict]:
     if not views:
         return [{"cameras": []}]
 
-    # Reference view rotation
     ref_yaw, ref_pitch, _ref_fov, _ref_name = views[0]
     R_ref = create_rotation_matrix(ref_yaw, ref_pitch)
 
     cameras: List[dict] = []
     for i, (yaw, pitch, fov, name) in enumerate(views):
-        if i == 0:
-            cameras.append({
-                "image_prefix": f"frame_*_view_{name}",
-                "ref_sensor": True,
-            })
-        else:
-            R = create_rotation_matrix(yaw, pitch)
-            R_relative = R @ R_ref.T
-            q = rotation_matrix_to_quaternion(R_relative)
+        R = create_rotation_matrix(yaw, pitch)
 
-            cameras.append({
-                "image_prefix": f"frame_*_view_{name}",
-                "cam_from_rig_rotation": q,
-                "cam_from_rig_translation": [0, 0, 0],
-            })
+        cam_entry: dict = {
+            "image_prefix": f"{name}/",
+        }
+
+        if i == 0:
+            cam_entry["ref_sensor"] = True
+        else:
+            R_relative = R.T @ R_ref
+            qw, qx, qy, qz = rotation_matrix_to_quaternion(R_relative)
+            cam_entry["cam_from_rig_rotation"] = [qw, qx, qy, qz]
+            cam_entry["cam_from_rig_translation"] = [0.0, 0.0, 0.0]
+
+        cameras.append(cam_entry)
 
     return [{"cameras": cameras}]
 
