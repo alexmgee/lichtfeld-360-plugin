@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .colmap_runner import ColmapConfig, ColmapResult, ColmapRunner
+from .colmap_runner import infer_shared_pinhole_camera_params
 from .masker import Masker, MaskConfig, is_masking_available
 from .presets import VIEW_PRESETS, ViewConfig
 from .reframer import Reframer
@@ -67,6 +68,9 @@ class PipelineConfig:
 
     # COLMAP
     colmap_preset: str = "normal"
+    colmap_matcher: str = "sequential"  # "sequential", "exhaustive", "vocab_tree"
+    colmap_match_budget_tier: str = "high"
+    colmap_max_num_matches: Optional[int] = None
 
     # Output mode: "pinhole" = COLMAP dataset, "erp" = transforms.json
     output_mode: str = "pinhole"
@@ -82,6 +86,14 @@ class PipelineResult:
     num_source_frames: int = 0
     num_output_images: int = 0
     num_aligned_cameras: int = 0
+    num_registered_frames: int = 0
+    num_complete_frames: int = 0
+    num_partial_frames: int = 0
+    views_per_frame: int = 0
+    expected_images_by_view: dict[str, int] = field(default_factory=dict)
+    registered_images_by_view: dict[str, int] = field(default_factory=dict)
+    partial_frame_examples: list[str] = field(default_factory=list)
+    dropped_frame_examples: list[str] = field(default_factory=list)
     elapsed_sec: float = 0.0
     error: str = ""
 
@@ -314,6 +326,7 @@ class PipelineJob:
             raise RuntimeError(f"Reframing failed: {errors}")
 
         num_output_images = reframe_result.output_count
+        print(f"[DEBUG] Reframe: input_count={reframe_result.input_count}, output_count={reframe_result.output_count}")
 
         if self._check_cancel():
             raise RuntimeError("Cancelled")
@@ -331,7 +344,20 @@ class PipelineJob:
         # ===================================================================
         self._update("colmap", 51.0, "Running COLMAP alignment...")
 
-        colmap_config = ColmapConfig(preset=cfg.colmap_preset)
+        view_fovs = [fov for _yaw, _pitch, fov, _name in view_config.get_all_views()]
+        camera_params, default_focal_length_factor, _shared_fov_deg = (
+            infer_shared_pinhole_camera_params(view_fovs, cfg.output_size)
+        )
+
+        colmap_config = ColmapConfig(
+            preset=cfg.colmap_preset,
+            camera_params=camera_params,
+            default_focal_length_factor=default_focal_length_factor,
+            matcher=cfg.colmap_matcher,
+            match_budget_tier=cfg.colmap_match_budget_tier,
+            max_num_matches_override=cfg.colmap_max_num_matches,
+            refine_focal_length=True,
+        )
 
         def _colmap_progress(stage: str, pct: float, msg: str) -> None:
             # ColmapRunner reports pct as 0.0-1.0 per sub-stage
@@ -395,5 +421,13 @@ class PipelineJob:
             num_source_frames=num_source_frames,
             num_output_images=num_output_images,
             num_aligned_cameras=colmap_result.num_registered_images,
+            num_registered_frames=colmap_result.num_registered_frames,
+            num_complete_frames=colmap_result.num_complete_frames,
+            num_partial_frames=colmap_result.num_partial_frames,
+            views_per_frame=colmap_result.views_per_frame,
+            expected_images_by_view=colmap_result.expected_images_by_view,
+            registered_images_by_view=colmap_result.registered_images_by_view,
+            partial_frame_examples=colmap_result.partial_frame_examples,
+            dropped_frame_examples=colmap_result.dropped_frame_examples,
             elapsed_sec=elapsed,
         )

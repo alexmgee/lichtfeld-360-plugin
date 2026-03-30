@@ -11,6 +11,7 @@ pixel-grid ray casting, spherical coordinate mapping) and a high-level
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -178,7 +179,6 @@ class Reframer:
         image_path: str,
         output_dir: str,
         mask_path: Optional[str] = None,
-        station_dirs: bool = False,
     ) -> Tuple[List[str], Optional[str]]:
         """Reframe a single equirectangular image.
 
@@ -186,7 +186,7 @@ class Reframer:
             (list_of_output_filenames, error_message_or_None)
         """
         return _process_single_image(
-            image_path, output_dir, self.config, mask_path, station_dirs
+            image_path, output_dir, self.config, mask_path
         )
 
     def reframe_batch(
@@ -195,7 +195,6 @@ class Reframer:
         output_dir: str,
         mask_dir: Optional[str] = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
-        station_dirs: bool = False,
     ) -> ReframeResult:
         """Reframe all equirectangular images in *input_dir*.
 
@@ -204,7 +203,6 @@ class Reframer:
             output_dir: Destination for perspective views.
             mask_dir: Optional directory with masks (matched by stem).
             progress_callback: Called with (current, total, filename).
-            station_dirs: Write per-source subdirectories + metadata.
 
         Returns:
             ReframeResult summarising the operation.
@@ -213,11 +211,7 @@ class Reframer:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        extensions = ["*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG"]
-        images: List[Path] = []
-        for ext in extensions:
-            images.extend(input_path.glob(ext))
-        images = sorted(images)
+        images = _collect_image_files(input_path)
 
         if not images:
             return ReframeResult(
@@ -232,9 +226,8 @@ class Reframer:
         mask_map: dict[str, str] = {}
         if mask_dir:
             mask_path_obj = Path(mask_dir)
-            for ext in extensions:
-                for m in mask_path_obj.glob(ext):
-                    mask_map[m.stem] = str(m)
+            for m in _collect_image_files(mask_path_obj):
+                mask_map[m.stem] = str(m)
 
         errors: List[str] = []
         total_outputs = 0
@@ -242,7 +235,7 @@ class Reframer:
         for i, img in enumerate(images):
             m_path = mask_map.get(img.stem) if mask_dir else None
             outputs, error = _process_single_image(
-                str(img), str(output_path), self.config, m_path, station_dirs
+                str(img), str(output_path), self.config, m_path
             )
             if error:
                 errors.append(error)
@@ -285,12 +278,34 @@ class Reframer:
 # ---------------------------------------------------------------------------
 
 
+def _collect_image_files(directory: Path) -> List[Path]:
+    """Collect image files once, even on case-insensitive filesystems.
+
+    Windows globbing is case-insensitive, so querying both ``*.jpg`` and
+    ``*.JPG`` can return the same file twice. Deduplicating here keeps the
+    reframe counts honest and avoids processing the same panorama multiple
+    times.
+    """
+    extensions = ["*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG"]
+    seen: set[str] = set()
+    files: List[Path] = []
+
+    for ext in extensions:
+        for path in directory.glob(ext):
+            norm = os.path.normcase(str(path.resolve()))
+            if norm in seen:
+                continue
+            seen.add(norm)
+            files.append(path)
+
+    return sorted(files, key=lambda p: os.path.normcase(str(p)))
+
+
 def _process_single_image(
     image_path: str,
     output_dir: str,
     config: ViewConfig,
     mask_path: Optional[str] = None,
-    station_dirs: bool = False,
 ) -> Tuple[List[str], Optional[str]]:
     """Process one equirectangular image into all configured views."""
     equirect = cv2.imread(image_path)
@@ -311,21 +326,7 @@ def _process_single_image(
     stem = Path(image_path).stem
     out_root = Path(output_dir)
     output_files: List[str] = []
-
-    if station_dirs:
-        image_out_dir = out_root / "images" / stem
-        image_out_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        image_out_dir = out_root
-
-    mask_dir: Optional[Path] = None
-    if mask is not None:
-        if station_dirs:
-            mask_dir = out_root / "masks" / stem
-            mask_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            mask_dir = out_root.parent / "masks"
-            mask_dir.mkdir(parents=True, exist_ok=True)
+    mask_root = out_root.parent / "masks" if mask is not None else None
 
     views = config.get_all_views()
     for yaw, pitch, fov, view_name in views:
@@ -337,15 +338,18 @@ def _process_single_image(
             out_size=config.output_size,
         )
 
-        out_name = f"{stem}_{view_name}.jpg"
-        out_path = image_out_dir / out_name
+        view_dir = out_root / view_name
+        view_dir.mkdir(parents=True, exist_ok=True)
+
+        out_name = f"{stem}.jpg"
+        out_path = view_dir / out_name
 
         cv2.imwrite(
             str(out_path), persp, [cv2.IMWRITE_JPEG_QUALITY, config.jpeg_quality]
         )
-        output_files.append(out_name)
+        output_files.append(f"{view_name}/{out_name}")
 
-        if mask is not None and mask_dir is not None:
+        if mask is not None and mask_root is not None:
             mask_persp = reframe_view(
                 mask,
                 fov_deg=fov,
@@ -355,10 +359,9 @@ def _process_single_image(
                 mode="nearest",
             )
             mask_persp = (mask_persp > 0).astype(np.uint8) * 255
-            if station_dirs:
-                mask_out = f"{stem}_{view_name}_mask.png"
-            else:
-                mask_out = f"{stem}_{view_name}.png"
+            mask_dir = mask_root / view_name
+            mask_dir.mkdir(parents=True, exist_ok=True)
+            mask_out = f"{stem}.png"
             cv2.imwrite(str(mask_dir / mask_out), mask_persp)
 
     return output_files, None

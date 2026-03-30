@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +20,7 @@ except ImportError:
     from lfs_plugins.scrub_fields import ScrubFieldController, ScrubFieldSpec
 
 from ..core.analyzer import VideoAnalyzer, VideoInfo
+from ..core.colmap_runner import MATCH_BUDGETS
 from ..core.masker import is_masking_available
 # Masking setup UI — disabled pending python3.dll fix (see plugin_masking_blocker.md)
 # from ..core.setup_checks import (
@@ -48,7 +52,8 @@ PRESET_LABELS = [
     "Full (26 views)",
 ]
 
-COLMAP_PRESETS = ["sequential", "exhaustive"]
+COLMAP_MATCHERS = ["sequential", "exhaustive"]
+MATCH_BUDGET_TIERS = ["efficient", "balanced", "high", "maximum", "custom"]
 OUTPUT_MODES = ["pinhole", "erp"]
 
 OUTPUT_SIZES = [960, 1280, 1536, 1920]
@@ -60,6 +65,9 @@ SCRUB_FIELD_SPECS = {
     ),
     "jpeg_quality_str": ScrubFieldSpec(
         min_value=50.0, max_value=100.0, step=1.0, fmt="%d", data_type=int,
+    ),
+    "colmap_max_matches_str": ScrubFieldSpec(
+        min_value=1024.0, max_value=131072.0, step=1024.0, fmt="%d", data_type=int,
     ),
 }
 
@@ -136,7 +144,9 @@ class Prep360Panel(lf.ui.Panel):
         self._output_size_idx: int = 3  # index into OUTPUT_SIZES, default 1920
         self._output_size: int = OUTPUT_SIZES[3]
         self._jpeg_quality: int = 95
-        self._colmap_preset_idx: int = 0
+        self._colmap_matcher_idx: int = 0
+        self._match_budget_idx: int = 2  # high
+        self._colmap_max_num_matches: int = MATCH_BUDGETS["high"]
 
         # Output
         self._output_mode_idx: int = 0
@@ -148,7 +158,16 @@ class Prep360Panel(lf.ui.Panel):
         self._processing_status: str = ""
         self._processing_progress: float = 0.0
         self._error_message: str = ""
+        self._completion_summary: str = ""
+        self._completion_report: str = ""
         self._import_after: bool = False
+
+        # Timing accumulator (tracks stage transitions from progress callbacks)
+        self._timing_stages: dict[str, dict] = {}
+        self._timing_current_stage: str = ""
+        self._timing_t0: float = 0.0
+        self._timing_colmap_substage: str = ""
+        self._timing_colmap_substage_t0: float = 0.0
 
         # Threading
         self._job: Optional[PipelineJob] = None
@@ -198,7 +217,10 @@ class Prep360Panel(lf.ui.Panel):
         model.bind_func("total_output_text", self._get_total_output_text)
         model.bind("output_size_idx", lambda: str(self._output_size_idx), self._set_output_size_idx)
         model.bind("jpeg_quality_str", lambda: str(self._jpeg_quality), self._set_jpeg_quality)
-        model.bind("colmap_preset_idx", lambda: str(self._colmap_preset_idx), self._set_colmap_preset)
+        model.bind("colmap_matcher_idx", lambda: str(self._colmap_matcher_idx), self._set_colmap_matcher)
+        model.bind("match_budget_idx", lambda: str(self._match_budget_idx), self._set_match_budget_idx)
+        model.bind("colmap_max_matches_str", lambda: str(self._colmap_max_num_matches), self._set_colmap_max_matches)
+        model.bind_func("match_budget_text", self._get_match_budget_text)
 
         # -- Output --
         model.bind("output_mode_idx", lambda: str(self._output_mode_idx), self._set_output_mode)
@@ -214,6 +236,8 @@ class Prep360Panel(lf.ui.Panel):
         model.bind_func("processing_progress_pct", lambda: f"{self._processing_progress:.1f}%")
         model.bind_func("show_error", lambda: bool(self._error_message))
         model.bind_func("error_text", lambda: self._error_message)
+        model.bind_func("completion_summary_text", self._get_completion_summary_text)
+        model.bind_func("completion_report_text", self._get_completion_report_text)
 
         # -- Events --
         model.bind_event("select_video", self._on_select_video)
@@ -276,13 +300,17 @@ class Prep360Panel(lf.ui.Panel):
             self._preset_idx,
             self._output_size_idx,
             self._jpeg_quality,
-            self._colmap_preset_idx,
+            self._colmap_matcher_idx,
+            self._match_budget_idx,
+            self._colmap_max_num_matches,
             self._output_mode_idx,
             self._output_path,
             self._is_processing,
             self._processing_stage,
             self._processing_progress,
             self._error_message,
+            self._completion_summary,
+            self._completion_report,
         )
 
     # ── Computed text helpers ─────────────────────────────────
@@ -327,6 +355,244 @@ class Prep360Panel(lf.ui.Panel):
         total = views * frames
         mode_label = "Pinhole (COLMAP)" if mode == "pinhole" else "ERP"
         return f"{mode_label} | {total:,} images | {self._output_size}px"
+
+    def _get_match_budget_text(self) -> str:
+        matcher = (
+            COLMAP_MATCHERS[self._colmap_matcher_idx]
+            if 0 <= self._colmap_matcher_idx < len(COLMAP_MATCHERS)
+            else "sequential"
+        )
+        tier = (
+            MATCH_BUDGET_TIERS[self._match_budget_idx]
+            if 0 <= self._match_budget_idx < len(MATCH_BUDGET_TIERS)
+            else "custom"
+        )
+        tier_label = tier.title()
+        return (
+            f"{tier_label} budget on {matcher} matching: "
+            f"keeps up to {self._colmap_max_num_matches:,} matches per image pair. "
+            "Higher budgets preserve more correspondences but cost more time and memory."
+        )
+
+    def _get_completion_summary_text(self) -> str:
+        return self._completion_summary or "No completed runs yet."
+
+    def _get_completion_report_text(self) -> str:
+        return self._completion_report or "Run Process Only or Process & Import to capture timing and registration diagnostics."
+
+    def _get_matcher_and_tier(self) -> tuple[str, str]:
+        matcher = (
+            COLMAP_MATCHERS[self._colmap_matcher_idx]
+            if 0 <= self._colmap_matcher_idx < len(COLMAP_MATCHERS)
+            else "sequential"
+        )
+        tier = (
+            MATCH_BUDGET_TIERS[self._match_budget_idx]
+            if 0 <= self._match_budget_idx < len(MATCH_BUDGET_TIERS)
+            else "custom"
+        )
+        return matcher, tier
+
+    def _build_stage_timing_lines(
+        self,
+        stage_names: dict[str, str],
+        timing_dict: dict[str, dict],
+        total: float,
+    ) -> tuple[list[str], list[str]]:
+        parts: list[str] = []
+        lines: list[str] = []
+
+        for key, entry in timing_dict.items():
+            label = stage_names.get(key, key)
+            elapsed = entry["elapsed_sec"]
+            pct = (elapsed / total * 100) if total > 0 else 0
+            rate_str = ""
+            if "rate_per_sec" in entry:
+                rate_str = f" | {entry['rate_per_sec']:.1f} items/sec"
+            parts.append(f"{label} {elapsed:.1f}s")
+            lines.append(f"{label:<16s} {elapsed:7.1f}s  ({pct:4.0f}%){rate_str}")
+
+            for sub, sub_elapsed in entry.get("substeps", {}).items():
+                sub_pct = (sub_elapsed / elapsed * 100) if elapsed > 0 else 0
+                lines.append(f"  {sub:<14s} {sub_elapsed:7.1f}s  ({sub_pct:4.0f}%)")
+
+        lines.append(f"{'TOTAL':<16s} {total:7.1f}s")
+        return parts, lines
+
+    def _count_output_images(self, directory: Path) -> int:
+        if not directory.is_dir():
+            return 0
+        return sum(
+            1
+            for path in directory.rglob("*")
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}
+        )
+
+    def _build_failure_report(
+        self,
+        result: PipelineResult,
+        stage_names: dict[str, str],
+        timing_dict: dict[str, dict],
+        total: float,
+    ) -> tuple[str, str]:
+        parts, lines = self._build_stage_timing_lines(stage_names, timing_dict, total)
+        matcher, tier = self._get_matcher_and_tier()
+        lines.append(f"Matcher: {matcher}")
+        lines.append(
+            f"Match budget: {tier} ({self._colmap_max_num_matches:,} max matches per pair)"
+        )
+
+        output_root = Path(self._output_path) if self._output_path else None
+        if output_root:
+            source_frames = self._count_output_images(output_root / "extracted" / "frames")
+            output_images = self._count_output_images(output_root / "images")
+            if source_frames > 0:
+                lines.append(f"Frames extracted: {source_frames}")
+            if output_images > 0:
+                lines.append(f"Images written: {output_images}")
+            lines.append(f"Output path: {output_root}")
+            log_path = output_root / "colmap_debug.log"
+            if log_path.is_file():
+                lines.append(f"COLMAP log: {log_path}")
+
+        error_text = result.error or "Pipeline failed"
+        lines.append(f"Error: {error_text}")
+
+        summary = f"Failed after {total:.1f}s - {error_text}"
+        if parts:
+            summary += f" ({', '.join(parts)})"
+        return summary, "\n".join(lines)
+
+    def _build_minimal_failure_report(
+        self,
+        result: PipelineResult,
+        total: float,
+        report_error: str = "",
+    ) -> tuple[str, str]:
+        error_text = result.error or "Pipeline failed"
+        lines = [
+            f"TOTAL            {total:7.1f}s",
+        ]
+
+        matcher, tier = self._get_matcher_and_tier()
+        lines.append(f"Matcher: {matcher}")
+        lines.append(
+            f"Match budget: {tier} ({self._colmap_max_num_matches:,} max matches per pair)"
+        )
+
+        output_root = Path(self._output_path) if self._output_path else None
+        if output_root:
+            try:
+                source_frames = self._count_output_images(output_root / "extracted" / "frames")
+                output_images = self._count_output_images(output_root / "images")
+                if source_frames > 0:
+                    lines.append(f"Frames extracted: {source_frames}")
+                if output_images > 0:
+                    lines.append(f"Images written: {output_images}")
+                lines.append(f"Output path: {output_root}")
+                log_path = output_root / "colmap_debug.log"
+                if log_path.is_file():
+                    lines.append(f"COLMAP log: {log_path}")
+            except Exception as exc:
+                lines.append(f"Diagnostics scan failed: {exc}")
+
+        lines.append(f"Error: {error_text}")
+        if report_error:
+            lines.append(f"Report generation error: {report_error}")
+
+        summary = f"Failed after {total:.1f}s - {error_text}"
+        return summary, "\n".join(lines)
+
+    def _write_failure_timing_json(
+        self,
+        result: PipelineResult,
+        total: float,
+        timing_dict: dict[str, dict],
+        matcher: str,
+        tier: str,
+        report_error: str = "",
+    ) -> None:
+        if not self._output_path:
+            return
+
+        timing_path = Path(self._output_path) / "timing.json"
+        timing_output = {
+            "success": False,
+            "total_sec": round(total, 3),
+            "stages": timing_dict,
+            "result": {
+                "source_frames": result.num_source_frames,
+                "output_images": result.num_output_images,
+                "aligned_cameras": result.num_aligned_cameras,
+                "matcher": matcher,
+                "match_budget_tier": tier,
+                "max_num_matches": self._colmap_max_num_matches,
+                "views_per_frame": result.views_per_frame,
+                "registered_frames": result.num_registered_frames,
+                "complete_rig_frames": result.num_complete_frames,
+                "partial_rig_frames": result.num_partial_frames,
+                "dropped_rig_frames": max(
+                    result.num_source_frames - result.num_registered_frames, 0
+                ),
+                "registered_images_by_view": result.registered_images_by_view,
+                "expected_images_by_view": result.expected_images_by_view,
+                "partial_frame_examples": result.partial_frame_examples,
+                "dropped_frame_examples": result.dropped_frame_examples,
+                "error": self._error_message,
+            },
+        }
+        if report_error:
+            timing_output["report_error"] = report_error
+        timing_path.write_text(json.dumps(timing_output, indent=2))
+
+    def _build_completion_report(
+        self,
+        result: PipelineResult,
+        stage_names: dict[str, str],
+        timing_dict: dict[str, dict],
+        total: float,
+    ) -> tuple[str, str]:
+        parts, lines = self._build_stage_timing_lines(stage_names, timing_dict, total)
+        matcher, tier = self._get_matcher_and_tier()
+        lines.append(f"Matcher: {matcher}")
+        lines.append(
+            f"Match budget: {tier} ({self._colmap_max_num_matches:,} max matches per pair)"
+        )
+
+        if result.views_per_frame > 0:
+            dropped_frames = max(result.num_source_frames - result.num_registered_frames, 0)
+            lines.append(f"Frames extracted: {result.num_source_frames}")
+            lines.append(f"Views per frame: {result.views_per_frame}")
+            lines.append(f"Images written: {result.num_output_images}")
+            lines.append(
+                f"Registered frames: {result.num_registered_frames}/{result.num_source_frames}"
+            )
+            lines.append(f"Complete rig frames: {result.num_complete_frames}")
+            lines.append(f"Dropped rig frames: {dropped_frames}")
+            if result.dropped_frame_examples:
+                lines.append(
+                    f"Dropped examples: {', '.join(result.dropped_frame_examples)}"
+                )
+            if result.num_partial_frames > 0:
+                lines.append(f"Partial rig frames: {result.num_partial_frames}")
+                if result.partial_frame_examples:
+                    lines.append(
+                        f"Examples: {', '.join(result.partial_frame_examples)}"
+                    )
+            lines.append(f"Registered images: {result.num_aligned_cameras}")
+            if result.expected_images_by_view:
+                lines.append("Per-view registration:")
+                for view_name, expected in result.expected_images_by_view.items():
+                    registered = result.registered_images_by_view.get(view_name, 0)
+                    lines.append(f"  {view_name:<14s} {registered:>3d}/{expected:<3d}")
+        else:
+            lines.append(
+                f"Frames: {result.num_source_frames} -> Images: "
+                f"{result.num_output_images} -> Aligned: {result.num_aligned_cameras}"
+            )
+
+        summary = f"Completed in {total:.1f}s - {', '.join(parts)}"
+        return summary, "\n".join(lines)
 
     # ── Setters (called by data model on user input) ──────────
 
@@ -461,11 +727,43 @@ class Prep360Panel(lf.ui.Panel):
         except (ValueError, TypeError):
             pass
 
-    def _set_colmap_preset(self, val):
+    def _set_colmap_matcher(self, val):
         try:
             idx = int(val)
-            if 0 <= idx < len(COLMAP_PRESETS):
-                self._colmap_preset_idx = idx
+            if 0 <= idx < len(COLMAP_MATCHERS):
+                self._colmap_matcher_idx = idx
+        except (ValueError, TypeError):
+            pass
+
+    def _set_match_budget_idx(self, val):
+        try:
+            idx = int(val)
+            if 0 <= idx < len(MATCH_BUDGET_TIERS):
+                self._match_budget_idx = idx
+                tier = MATCH_BUDGET_TIERS[idx]
+                if tier != "custom":
+                    self._colmap_max_num_matches = MATCH_BUDGETS[tier]
+        except (ValueError, TypeError):
+            pass
+
+    def _set_colmap_max_matches(self, val):
+        try:
+            max_matches = int(float(val))
+            max_matches = max(1024, min(131072, max_matches))
+            self._colmap_max_num_matches = max_matches
+
+            matched_tier = None
+            for idx, tier in enumerate(MATCH_BUDGET_TIERS):
+                if tier == "custom":
+                    continue
+                if MATCH_BUDGETS[tier] == max_matches:
+                    matched_tier = idx
+                    break
+
+            if matched_tier is None:
+                self._match_budget_idx = len(MATCH_BUDGET_TIERS) - 1
+            else:
+                self._match_budget_idx = matched_tier
         except (ValueError, TypeError):
             pass
 
@@ -512,8 +810,10 @@ class Prep360Panel(lf.ui.Panel):
     def _get_scrub_value(self, prop: str) -> float:
         if prop == "extract_fps_str":
             return float(self._extract_fps)
-        elif prop == "jpeg_quality_str":
+        if prop == "jpeg_quality_str":
             return float(self._jpeg_quality)
+        if prop == "colmap_max_matches_str":
+            return float(self._colmap_max_num_matches)
         raise KeyError(prop)
 
     def _set_scrub_value(self, prop: str, value: float) -> None:
@@ -521,6 +821,8 @@ class Prep360Panel(lf.ui.Panel):
             self._extract_fps = max(0.1, min(5.0, float(value)))
         elif prop == "jpeg_quality_str":
             self._jpeg_quality = max(50, min(100, int(value)))
+        elif prop == "colmap_max_matches_str":
+            self._set_colmap_max_matches(value)
         else:
             raise KeyError(prop)
 
@@ -617,7 +919,8 @@ class Prep360Panel(lf.ui.Panel):
 
         self._error_message = ""
         preset_name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "cubemap"
-        colmap_preset = COLMAP_PRESETS[self._colmap_preset_idx] if 0 <= self._colmap_preset_idx < len(COLMAP_PRESETS) else "normal"
+        colmap_matcher = COLMAP_MATCHERS[self._colmap_matcher_idx] if 0 <= self._colmap_matcher_idx < len(COLMAP_MATCHERS) else "sequential"
+        match_budget_tier = MATCH_BUDGET_TIERS[self._match_budget_idx] if 0 <= self._match_budget_idx < len(MATCH_BUDGET_TIERS) else "custom"
         output_mode = OUTPUT_MODES[self._output_mode_idx] if 0 <= self._output_mode_idx < len(OUTPUT_MODES) else "pinhole"
 
         prompts = [p.strip() for p in self._mask_prompts_str.split(",") if p.strip()]
@@ -637,7 +940,9 @@ class Prep360Panel(lf.ui.Panel):
             preset_name=preset_name,
             output_size=self._output_size,
             jpeg_quality=self._jpeg_quality,
-            colmap_preset=colmap_preset,
+            colmap_matcher=colmap_matcher,
+            colmap_match_budget_tier=match_budget_tier,
+            colmap_max_num_matches=self._colmap_max_num_matches,
             output_mode=output_mode,
         )
 
@@ -645,6 +950,8 @@ class Prep360Panel(lf.ui.Panel):
         self._processing_stage = "Starting..."
         self._processing_status = ""
         self._processing_progress = 0.0
+        self._completion_summary = ""
+        self._completion_report = ""
 
         self._job = PipelineJob(
             config,
@@ -677,14 +984,92 @@ class Prep360Panel(lf.ui.Panel):
         "complete":    "Complete",
     }
 
+    # Item count patterns for throughput tracking
+    _RE_REFRAME = re.compile(r"Reframing (\d+)/(\d+)")
+    _RE_EXTRACT = re.compile(r"Extracting (\d+)/(\d+)")
+    _RE_SCORING = re.compile(r"Scoring (\d+)/(\d+)")
+
+    # COLMAP substage detection
+    _COLMAP_SUBSTAGES = {
+        "feature": "feature_extraction",
+        "sift": "feature_extraction",
+        "match": "matching",
+        "map": "mapping",
+        "incremental": "mapping",
+    }
+
     def _on_pipeline_progress(self, stage: str, percent: float, message: str):
+        now = time.time()
+
         with self._pending_lock:
             self._processing_stage = self._STAGE_LABELS.get(stage, stage)
             self._processing_progress = percent
             self._processing_status = message
 
+            # -- Timing accumulation --
+
+            # Initialize on first call
+            if self._timing_t0 == 0:
+                self._timing_t0 = now
+
+            # Detect stage transition
+            if stage != self._timing_current_stage:
+                # Close previous stage
+                if self._timing_current_stage and self._timing_current_stage in self._timing_stages:
+                    prev = self._timing_stages[self._timing_current_stage]
+                    prev["ended"] = now
+                    # Close last COLMAP substage
+                    if self._timing_current_stage == "colmap" and self._timing_colmap_substage:
+                        prev["substeps"][self._timing_colmap_substage] = now - self._timing_colmap_substage_t0
+                        self._timing_colmap_substage = ""
+
+                # Open new stage
+                self._timing_stages[stage] = {
+                    "started": now,
+                    "ended": 0.0,
+                    "items": 0,
+                    "substeps": {},
+                }
+                self._timing_current_stage = stage
+
+            # Parse item counts
+            if stage in self._timing_stages:
+                rec = self._timing_stages[stage]
+                if stage == "reframe":
+                    m = self._RE_REFRAME.search(message)
+                    if m:
+                        rec["items"] = int(m.group(1))
+                elif stage == "extraction":
+                    m = self._RE_EXTRACT.search(message) or self._RE_SCORING.search(message)
+                    if m:
+                        rec["items"] = int(m.group(1))
+
+            # Track COLMAP substeps
+            if stage == "colmap":
+                msg_lower = message.lower()
+                for keyword, substage_name in self._COLMAP_SUBSTAGES.items():
+                    if keyword in msg_lower:
+                        if substage_name != self._timing_colmap_substage:
+                            # Close previous substep
+                            if self._timing_colmap_substage and stage in self._timing_stages:
+                                self._timing_stages[stage]["substeps"][self._timing_colmap_substage] = (
+                                    now - self._timing_colmap_substage_t0
+                                )
+                            self._timing_colmap_substage = substage_name
+                            self._timing_colmap_substage_t0 = now
+                        break
+
     def _on_pipeline_complete(self, result: PipelineResult):
         with self._pending_lock:
+            # Close last open stage
+            now = time.time()
+            if self._timing_current_stage and self._timing_current_stage in self._timing_stages:
+                s = self._timing_stages[self._timing_current_stage]
+                if s["ended"] == 0:
+                    s["ended"] = now
+                if self._timing_current_stage == "colmap" and self._timing_colmap_substage:
+                    s["substeps"][self._timing_colmap_substage] = now - self._timing_colmap_substage_t0
+
             self._pending_result = result
 
     # ── Main-thread result consumption ────────────────────────
@@ -695,7 +1080,36 @@ class Prep360Panel(lf.ui.Panel):
             self._pending_result = None
         if result is None:
             return False
-        self._apply_result(result)
+        try:
+            self._apply_result(result)
+        except Exception as exc:
+            logger.exception("Failed to apply pipeline result")
+            self._job = None
+            self._is_processing = False
+            self._processing_stage = ""
+            self._processing_status = ""
+            self._processing_progress = 0.0
+            self._error_message = result.error or f"Failed to render diagnostics: {exc}"
+            summary, report = self._build_minimal_failure_report(
+                result,
+                result.elapsed_sec,
+                report_error=f"{type(exc).__name__}: {exc}",
+            )
+            self._completion_summary = summary
+            self._completion_report = report
+
+            try:
+                matcher, tier = self._get_matcher_and_tier()
+                self._write_failure_timing_json(
+                    result,
+                    result.elapsed_sec,
+                    {},
+                    matcher,
+                    tier,
+                    report_error=f"{type(exc).__name__}: {exc}",
+                )
+            except Exception:
+                logger.exception("Failed to write minimal failure timing.json")
         return True
 
     def _apply_result(self, result: PipelineResult):
@@ -705,17 +1119,90 @@ class Prep360Panel(lf.ui.Panel):
         self._processing_status = ""
         self._processing_progress = 0.0
 
+        # -- Build timing summary --
+        stage_names = {
+            "extraction": "Extraction",
+            "reframe": "Reframe",
+            "rig_config": "Rig Config",
+            "colmap": "COLMAP",
+            "output": "Output",
+            "masking": "Masking",
+        }
+        timing_dict = {}
+        for key, data in self._timing_stages.items():
+            if key == "complete":
+                continue
+            elapsed = data["ended"] - data["started"] if data["ended"] > 0 else 0
+
+            entry: dict = {"elapsed_sec": round(elapsed, 3)}
+            if data["items"] > 0:
+                rate = data["items"] / elapsed if elapsed > 0 else 0
+                entry["items"] = data["items"]
+                entry["rate_per_sec"] = round(rate, 2)
+            if data["substeps"]:
+                entry["substeps"] = {k: round(v, 3) for k, v in data["substeps"].items()}
+            timing_dict[key] = entry
+
+        total = result.elapsed_sec
+        matcher, tier = self._get_matcher_and_tier()
+
         if result.success:
-            elapsed_str = f"{result.elapsed_sec:.1f}s"
+            self._error_message = ""
+
+            summary, report = self._build_completion_report(
+                result, stage_names, timing_dict, total
+            )
+            self._completion_summary = summary
+            self._completion_report = report
+
+            # Print to Python console
+            print(f"\n{'=' * 60}")
+            print(f"360 Camera Pipeline \u2014 Timing Report")
+            print(f"{'=' * 60}")
+            print(self._completion_report)
+            print(f"{'=' * 60}\n")
+
+            # Write timing.json
+            try:
+                timing_path = Path(self._output_path) / "timing.json"
+                timing_output = {
+                    "success": True,
+                    "total_sec": round(total, 3),
+                    "stages": timing_dict,
+                    "result": {
+                        "source_frames": result.num_source_frames,
+                        "output_images": result.num_output_images,
+                        "aligned_cameras": result.num_aligned_cameras,
+                        "matcher": matcher,
+                        "match_budget_tier": tier,
+                        "max_num_matches": self._colmap_max_num_matches,
+                        "views_per_frame": result.views_per_frame,
+                        "registered_frames": result.num_registered_frames,
+                        "complete_rig_frames": result.num_complete_frames,
+                        "partial_rig_frames": result.num_partial_frames,
+                        "dropped_rig_frames": max(
+                            result.num_source_frames - result.num_registered_frames, 0
+                        ),
+                        "registered_images_by_view": result.registered_images_by_view,
+                        "expected_images_by_view": result.expected_images_by_view,
+                        "partial_frame_examples": result.partial_frame_examples,
+                        "dropped_frame_examples": result.dropped_frame_examples,
+                    },
+                }
+                timing_path.write_text(json.dumps(timing_output, indent=2))
+            except Exception as exc:
+                logger.warning("Failed to write timing.json: %s", exc)
+
+            # Log summary
             logger.info(
                 "Pipeline complete: %d source frames -> %d output images, "
-                "%d aligned cameras in %s",
+                "%d registered frames, %d aligned images in %.1fs",
                 result.num_source_frames,
                 result.num_output_images,
+                result.num_registered_frames,
                 result.num_aligned_cameras,
-                elapsed_str,
+                total,
             )
-            self._error_message = ""
 
             if self._import_after and result.dataset_path:
                 try:
@@ -729,4 +1216,44 @@ class Prep360Panel(lf.ui.Panel):
                     self._error_message = f"Import failed: {exc}"
         else:
             self._error_message = result.error or "Pipeline failed"
+            report_error = ""
+            try:
+                summary, report = self._build_failure_report(
+                    result, stage_names, timing_dict, total
+                )
+            except Exception as exc:
+                report_error = f"{type(exc).__name__}: {exc}"
+                logger.exception("Failed to build detailed failure report")
+                summary, report = self._build_minimal_failure_report(
+                    result,
+                    total,
+                    report_error=report_error,
+                )
+            self._completion_summary = summary
+            self._completion_report = report
             logger.error("Pipeline failed: %s", self._error_message)
+
+            print(f"\n{'=' * 60}")
+            print("360 Camera Pipeline — Failure Report")
+            print(f"{'=' * 60}")
+            print(self._completion_report)
+            print(f"{'=' * 60}\n")
+
+            try:
+                self._write_failure_timing_json(
+                    result,
+                    total,
+                    timing_dict,
+                    matcher,
+                    tier,
+                    report_error=report_error,
+                )
+            except Exception as exc:
+                logger.warning("Failed to write failure timing.json: %s", exc)
+
+        # Reset timing state for next run
+        self._timing_stages = {}
+        self._timing_current_stage = ""
+        self._timing_t0 = 0.0
+        self._timing_colmap_substage = ""
+        self._timing_colmap_substage_t0 = 0.0

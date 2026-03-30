@@ -6,3 +6,6 @@ uv.lock
 settings.json
 *.egg-info/
 masking_setup_debug.txt
+dev/
+.lichtfeld-source.json
+.tmp-dll/

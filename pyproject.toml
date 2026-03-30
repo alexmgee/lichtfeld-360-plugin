@@ -2,12 +2,24 @@
 name = "lichtfeld-360-plugin"
 version = "0.1.0"
 description = "360° camera to Gaussian Splat — one-click pipeline with rig-aware COLMAP alignment"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "GPL-3.0-or-later" }
 authors = [{name = "Alex Gee"}]
 dependencies = [
     "opencv-python-headless",
     "numpy",
     "pycolmap",
     "static-ffmpeg",
+]
+
+[project.urls]
+Repository = "https://github.com/alexmgee/lichtfeld-360-plugin"
+Issues = "https://github.com/alexmgee/lichtfeld-360-plugin/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
 ]
 
 [tool.uv.sources]
@@ -18,6 +30,7 @@ pycolmap = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
 [tool.lichtfeld]
 hot_reload = true
 plugin_api = ">=1,<2"
