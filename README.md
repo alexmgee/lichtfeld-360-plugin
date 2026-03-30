@@ -90,21 +90,21 @@ folders to group the images into rig frames.
 
 Sharpness controls how much work the plugin does to choose the best frame from each time interval.
 
-In every mode except **None**, the plugin looks at candidate frames first and only saves the winner. Higher tiers do more analysis before deciding which frame to keep.
+In every mode except **None**, the plugin looks at candidate frames first and only saves the winner. Higher tiers inspect more frames before deciding which one to keep, and the scene-aware tiers can also split an interval around a cut so both sides get a representative frame.
 
-| Sharpness | Analysis | Extraction |
-|---------|----------|------------|
-| None | No sharpness analysis | Saves one frame per interval directly |
-| Fast | Checks a few nearby candidates in each interval | Saves the sharpest of those candidates |
-| Normal | Scans more of the video on a lighter analysis pass | Saves the best frame found in each interval |
-| Maximum | Examines the video most thoroughly, with scene-aware analysis | Saves the strongest frame choice it can find |
+| Sharpness | Analysis Method | Extraction Result |
+|---------|-----------------|-------------------|
+| None | No sharpness analysis | Saves exactly 1 frame per interval |
+| Fast | Tests 3 candidate frames per interval with a lightweight Laplacian sharpness score at 480 px | Saves the sharpest of those 3 candidates |
+| Normal | Runs FFmpeg `blurdetect` plus scene scoring on a subsampled analysis stream at about 5× the target extraction rate, using a 640 px analysis width | Saves the sharpest frame per interval, with possible extra splits at scene changes |
+| Maximum | Runs FFmpeg `blurdetect` plus scene scoring on every source frame, using a 1280 px analysis width | Saves the strongest frame choice it can find, with possible extra splits at scene changes |
 
 ### What Each Tier Means
 
-- **None** — The plugin does not try to judge sharpness. It simply grabs one frame at each interval and moves on. This is the fastest option, but it is also the most likely to keep a blurry frame if the camera is moving.
-- **Fast** — The plugin checks a small number of nearby frames around each interval and picks the sharpest one. This gives you a quick sharpness boost over **None** without adding too much extra processing time.
-- **Normal** — The plugin does a broader sharpness search across the clip and makes a more informed choice for each interval. This is the best all-around setting for most videos because it balances sharpness and speed well.
-- **Maximum** — The plugin analyzes the clip as thoroughly as it can, including scene-aware handling for more difficult footage. This is the slowest option, but it gives the plugin the best chance of avoiding weak or blurry selections when motion, cuts, or changing content make the video harder to sample cleanly.
+- **None** — The plugin saves exactly 1 frame at each target interval and does no sharpness analysis at all. This is the fastest option, but it is also the most likely to keep a blurry frame if the camera is moving.
+- **Fast** — The plugin checks 3 candidate frames around each interval and scores them with a lightweight Laplacian sharpness check at 480 px, then keeps the sharpest one. This gives you a quick sharpness boost over **None** without adding much extra processing time.
+- **Normal** — The plugin runs FFmpeg `blurdetect` plus scene scoring on a lighter analysis stream at about 5× your target extraction rate, using a 640 px analysis width. It then picks the sharpest frame in each interval, and it can split intervals at scene changes, so difficult footage may produce slightly more than 1 saved frame per target interval.
+- **Maximum** — The plugin runs FFmpeg `blurdetect` plus scene scoring on every source frame in the clip, using a 1280 px analysis width. It then picks the sharpest frame from each interval or scene-split sub-interval. This is the slowest option, but it gives the plugin the best chance of avoiding weak or blurry selections when motion, cuts, or changing content make the video harder to sample cleanly.
 
 ## Dependencies
 
