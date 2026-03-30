@@ -102,12 +102,7 @@ In every mode except **None**, the plugin looks at candidate frames first and on
 | Normal | Runs FFmpeg `blurdetect` plus scene scoring on a subsampled analysis stream at about 5× the target extraction rate, using a 640 px analysis width | Saves the sharpest frame per interval, with possible extra splits at scene changes |
 | Maximum | Runs FFmpeg `blurdetect` plus scene scoring on every source frame, using a 1280 px analysis width | Saves the strongest frame choice it can find, with possible extra splits at scene changes |
 
-### What Each Tier Means
-
-- **None** — The plugin saves exactly 1 frame at each target interval and does no sharpness analysis at all. This is the fastest option, but it is also the most likely to keep a blurry frame if the camera is moving.
-- **Fast** — The plugin checks 3 candidate frames around each interval and scores them with a lightweight Laplacian sharpness check at 480 px, then keeps the sharpest one. This gives you a quick sharpness boost over **None** without adding much extra processing time.
-- **Normal** — The plugin runs FFmpeg `blurdetect` plus scene scoring on a lighter analysis stream at about 5× your target extraction rate, using a 640 px analysis width. It then picks the sharpest frame in each interval, and it can split intervals at scene changes, so difficult footage may produce slightly more than 1 saved frame per target interval.
-- **Maximum** — The plugin runs FFmpeg `blurdetect` plus scene scoring on every source frame in the clip, using a 1280 px analysis width. It then picks the sharpest frame from each interval or scene-split sub-interval. This is the slowest option, but it gives the plugin the best chance of avoiding weak or blurry selections when motion, cuts, or changing content make the video harder to sample cleanly.
+For most videos, start with **Normal**. Drop to **Fast** or **None** if you need faster extraction, and move up to **Maximum** when the footage is difficult enough that cleaner frame selection matters more than runtime.
 
 ## Dependencies
 
