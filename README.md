@@ -104,13 +104,17 @@ In every mode except **None**, the plugin looks at candidate frames first and on
 
 For most videos, start with **Normal**. Drop to **Fast** or **None** if you need faster extraction, and move up to **Maximum** when the footage is difficult enough that cleaner frame selection matters more than runtime.
 
-## Dependencies
+## COLMAP Matching
 
-- opencv, numpy, pycolmap, static-ffmpeg (installed automatically)
-- On Windows, pycolmap is GPU-accelerated via [build_gpu_colmap](https://github.com/lyehe/build_gpu_colmap) (CUDA 12.8, installed automatically)
-- On Linux, pycolmap falls back to the CPU version from PyPI
+The **Matcher** setting controls which image pairs COLMAP attempts to compare
+before mapping begins.
 
-## COLMAP Match Limit
+- **Sequential** matches nearby frames in order. It is usually faster and works
+  well for normal video-like motion where each frame mostly overlaps with the
+  next few frames.
+- **Exhaustive** tries all candidate image pairs. It is much slower, but it can
+  recover harder scenes where nearby-frame matching is not enough to keep the
+  reconstruction connected.
 
 The plugin exposes COLMAP's matching cap in two linked controls:
 
@@ -140,6 +144,14 @@ Guidance:
 - Try **High** if COLMAP logs repeated `Clamping features...` warnings or
   drops too many whole rig frames.
 - Lower the match limit if you need to save time or memory.
+
+
+## Dependencies
+
+- opencv, numpy, pycolmap, static-ffmpeg (installed automatically)
+- On Windows, pycolmap is GPU-accelerated via [build_gpu_colmap](https://github.com/lyehe/build_gpu_colmap) (CUDA 12.8, installed automatically)
+- On Linux, pycolmap falls back to the CPU version from PyPI
+
 
 ## Diagnostics
 
