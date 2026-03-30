@@ -3,7 +3,7 @@
   <link type="text/template" href="docked_panel.rml"/>
   <link type="text/rcss" href="prep360_panel.rcss"/>
 </head>
-<body template="docked-panel" data-model="lichtfeld_360_camera">
+<body template="docked-panel" data-model="lichtfeld_360_plugin">
 
   <!-- ══════════════════════════════════════════════════════════ -->
   <!-- Error banner (shown when pipeline fails)                  -->

@@ -92,7 +92,7 @@ SECTIONS = ["video", "extraction", "masking", "reframe", "output"]
 
 
 class Prep360Panel(lf.ui.Panel):
-    id = "lichtfeld_360_camera.prep360"
+    id = "lichtfeld_360_plugin.prep360"
     label = "360 Camera"
     space = lf.ui.PanelSpace.MAIN_PANEL_TAB
     order = 10100
@@ -173,7 +173,7 @@ class Prep360Panel(lf.ui.Panel):
     # ── Data model binding ────────────────────────────────────
 
     def on_bind_model(self, ctx):
-        model = ctx.create_data_model("lichtfeld_360_camera")
+        model = ctx.create_data_model("lichtfeld_360_plugin")
         if model is None:
             return
 

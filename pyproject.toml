@@ -1,5 +1,5 @@
 [project]
-name = "lichtfeld_360_camera"
+name = "lichtfeld-360-plugin"
 version = "0.1.0"
 description = "360° camera to Gaussian Splat — one-click pipeline with rig-aware COLMAP alignment"
 authors = [{name = "Alex Gee"}]
