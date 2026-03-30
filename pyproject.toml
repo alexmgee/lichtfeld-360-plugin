@@ -10,6 +10,11 @@ dependencies = [
     "static-ffmpeg",
 ]
 
+[tool.uv.sources]
+pycolmap = [
+  { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.0.2/pycolmap-4.0.2%2Bcuda-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
