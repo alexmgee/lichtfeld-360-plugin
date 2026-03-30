@@ -16,7 +16,43 @@ body {
 
 .section-content {
     padding: 4dp 0dp 8dp 0dp;
-    overflow: hidden;
+    overflow: visible;
+}
+
+.setting-row {
+    position: relative;
+    z-index: 0;
+}
+
+.setting-row--dropdown {
+    z-index: 10;
+}
+
+.setting-row--dropdown-high {
+    z-index: 40;
+}
+
+.setting-row--dropdown-medium {
+    z-index: 30;
+}
+
+.setting-row select {
+    position: relative;
+    z-index: 20;
+}
+
+.setting-row--dropdown-high select {
+    z-index: 50;
+}
+
+.setting-row--dropdown-medium select {
+    z-index: 40;
+}
+
+.setting-row__control-col--slider,
+.setting-slider {
+    position: relative;
+    z-index: 1;
 }
 
 /* ── Path display box ───────────────────────────────────── */
@@ -53,6 +89,10 @@ body {
 
 .processing-block {
     padding: 4dp 0dp;
+}
+
+.process-section {
+    padding: 4dp 0dp 8dp 0dp;
 }
 
 .progress-row {

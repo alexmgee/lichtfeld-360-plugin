@@ -50,7 +50,7 @@ class PipelineConfig:
 
     # Extraction
     interval: float = 2.0
-    extraction_quality: str = "normal"   # none, fast, normal, maximum
+    extraction_sharpness: str = "normal"   # none, fast, normal, maximum
     scene_threshold: float = 0.3
     blur_scale_width: int = 640
     quality: int = 95
@@ -69,7 +69,7 @@ class PipelineConfig:
     # COLMAP
     colmap_preset: str = "normal"
     colmap_matcher: str = "sequential"  # "sequential", "exhaustive", "vocab_tree"
-    colmap_match_budget_tier: str = "high"
+    colmap_match_budget_tier: str = "default"
     colmap_max_num_matches: Optional[int] = None
 
     # Output mode: "pinhole" = COLMAP dataset, "erp" = transforms.json
@@ -228,7 +228,7 @@ class PipelineJob:
         extractor = SharpestExtractor()
         extract_config = SharpestConfig(
             interval=cfg.interval,
-            extraction_quality=cfg.extraction_quality,
+            extraction_sharpness=cfg.extraction_sharpness,
             scene_threshold=cfg.scene_threshold,
             scale_width=cfg.blur_scale_width,
             quality=cfg.quality,

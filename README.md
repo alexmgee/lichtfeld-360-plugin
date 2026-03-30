@@ -6,12 +6,10 @@ Process 360° video into COLMAP-aligned datasets ready for Gaussian Splatting �
 
 Takes a 360° equirectangular video and produces a complete COLMAP dataset:
 
-1. **Extract** the sharpest frames from your video — four quality levels from instant (interval-only) to thorough (full blur analysis with scene detection)
+1. **Extract** frames from your video — four sharpness levels from instant (interval-only) to thorough (full blur analysis with scene detection)
 2. **Reframe** each equirectangular frame into pinhole perspective views — five presets from Cubemap (6 views) to Full Sphere (26 views per frame)
 3. **Align** all views using COLMAP — sequential or exhaustive matching with rig-aware constraints
 4. **Import** the result directly into LichtFeld Studio for training
-
-No command line. No manual COLMAP setup. One panel, one click.
 
 ## Installation
 
@@ -36,18 +34,19 @@ Then restart LichtFeld Studio.
 1. Open the **360 Camera** tab in the right panel
 2. Click **Select 360° Video** and choose your equirectangular video file
 3. Adjust settings:
-   - **FPS** — how many frames per second to extract (0.1–5.0)
-   - **Quality** — extraction sharpness level (None / Fast / Normal / Maximum)
-   - **Preset** — reframing coverage (Cubemap 6 views → Full 26 views)
-   - **Crop Size** — output resolution per pinhole view (960–1920 px)
-   - **Matcher** — sequential for video-like motion, exhaustive for harder connectivity
-   - **Match Budget** — how many feature correspondences COLMAP may keep per image pair
+   - **FPS** — Controls how often frames are extracted from the video; higher values create denser datasets but take longer to process
+   - **Sharpness** — Controls how carefully the plugin searches for the sharpest frame in each interval; see **Extraction Sharpness** below for the differences
+   - **Preset** — Controls how many pinhole views are generated from each 360 frame and how much of the sphere they cover
+   - **Crop Size** — Sets the output resolution of each pinhole view; larger sizes preserve more detail but increase runtime
+   - **Matcher** — Sequential matches nearby frames in order and is usually faster for normal video motion; Exhaustive tries all candidate image pairs and can recover harder scenes at the cost of more time
+   - **Match Limit** — Chooses one of the built-in COLMAP matching tiers, from faster/lighter to slower/more thorough
+   - **Max. Matches** — Sets the actual per-pair correspondence cap COLMAP may keep; higher values can improve difficult alignments but increase time and memory use
 4. Click **Process & Import** to process and load the result, or **Process Only** to just create the dataset
 
-After every run, the panel's **Last Run** block shows:
+After every run, the panel's **Run Diagnostics** block shows:
 
 - stage timings
-- matcher and match-budget settings
+- matcher, match-limit tier, and max-match setting
 - extracted frames vs written images
 - registered rig frames and images
 - per-view registration counts
@@ -87,16 +86,25 @@ folders to group the images into rig frames.
 | Dense | 17 | 8 horizon, 8 below, zenith |
 | Full | 26 | 8 above, 8 horizon, 8 below, zenith, nadir |
 
-## Extraction Quality
+## Extraction Sharpness
 
-All quality levels analyze the video *before* extracting — only the winning frames are saved to disk.
+Sharpness controls how much work the plugin does to choose the best frame from each time interval.
 
-| Quality | Analysis | Extraction |
+In every mode except **None**, the plugin looks at candidate frames first and only saves the winner. Higher tiers do more analysis before deciding which frame to keep.
+
+| Sharpness | Analysis | Extraction |
 |---------|----------|------------|
-| None | No analysis | Saves one frame per interval directly |
-| Fast | Reads 3 candidates per interval into memory, scores sharpness (Laplacian) | Saves only the sharpest candidate |
-| Normal | Runs blur analysis on a subsampled stream (~5 candidates/interval) | Extracts only the winners |
-| Maximum | Runs blur analysis on every frame at native FPS with scene-aware chunking | Extracts only the winners |
+| None | No sharpness analysis | Saves one frame per interval directly |
+| Fast | Checks a few nearby candidates in each interval | Saves the sharpest of those candidates |
+| Normal | Scans more of the video on a lighter analysis pass | Saves the best frame found in each interval |
+| Maximum | Examines the video most thoroughly, with scene-aware analysis | Saves the strongest frame choice it can find |
+
+### What Each Tier Means
+
+- **None** — The plugin does not try to judge sharpness. It simply grabs one frame at each interval and moves on. This is the fastest option, but it is also the most likely to keep a blurry frame if the camera is moving.
+- **Fast** — The plugin checks a small number of nearby frames around each interval and picks the sharpest one. This gives you a quick sharpness boost over **None** without adding too much extra processing time.
+- **Normal** — The plugin does a broader sharpness search across the clip and makes a more informed choice for each interval. This is the best all-around setting for most videos because it balances sharpness and speed well.
+- **Maximum** — The plugin analyzes the clip as thoroughly as it can, including scene-aware handling for more difficult footage. This is the slowest option, but it gives the plugin the best chance of avoiding weak or blurry selections when motion, cuts, or changing content make the video harder to sample cleanly.
 
 ## Dependencies
 
@@ -104,9 +112,15 @@ All quality levels analyze the video *before* extracting — only the winning fr
 - On Windows, pycolmap is GPU-accelerated via [build_gpu_colmap](https://github.com/lyehe/build_gpu_colmap) (CUDA 12.8, installed automatically)
 - On Linux, pycolmap falls back to the CPU version from PyPI
 
-## COLMAP Match Budget
+## COLMAP Match Limit
 
-The plugin exposes COLMAP's `max_num_matches` limit as a user-facing control.
+The plugin exposes COLMAP's matching cap in two linked controls:
+
+- **Match Limit** chooses a preset tier
+- **Max. Matches** shows the actual `max_num_matches` value COLMAP will use
+
+Choosing a built-in tier updates **Max. Matches** automatically. Selecting
+**Custom** lets you tune the numeric limit directly.
 
 This matters because COLMAP will otherwise clamp feature correspondences per
 image pair. On reframed 360 datasets, overly small limits can starve the
@@ -114,20 +128,20 @@ reconstruction graph and cause entire rig frames to drop out.
 
 Available tiers:
 
-| Tier | Max Matches / Pair | Intended Use |
+| Match Limit | Max. Matches / Pair | Intended Use |
 |------|---------------------|--------------|
-| Efficient | 8,192 | Faster runs on easier scenes |
+| Fast | 8,192 | Faster runs on easier scenes |
 | Balanced | 16,384 | Middle ground for general use |
-| High | 32,768 | Default for 360 cubemap alignment |
-| Maximum | 65,536 | Harder scenes, more VRAM / RAM / time |
+| Default | 32,768 | COLMAP's default and the best starting point for most scenes |
+| High | 65,536 | Harder scenes that need more match coverage |
 | Custom | User defined | Manual tuning |
 
 Guidance:
 
-- Start with **High** for 360 video.
-- Try **Maximum** if COLMAP logs repeated `Clamping features...` warnings or
+- Start with **Default** for most 360 video.
+- Try **High** if COLMAP logs repeated `Clamping features...` warnings or
   drops too many whole rig frames.
-- Lower the budget if you need to save time or memory.
+- Lower the match limit if you need to save time or memory.
 
 ## Diagnostics
 

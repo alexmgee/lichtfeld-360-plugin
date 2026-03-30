@@ -32,12 +32,8 @@
   <!-- ══════════════════════════════════════════════════════════ -->
   <div data-if="show_idle">
 
-    <!-- ── Section 1: Video Input ──────────────────────────── -->
-    <div class="section-header text-accent" id="hdr-video" data-event-click="toggle_section('video')">
-      <span class="section-arrow text-accent is-expanded" id="arrow-video">&#x25B6;</span>
-      <span class="text-accent">Video Input</span>
-    </div>
-    <div class="section-content" id="sec-video">
+    <!-- ── Always-visible input/output setup ───────────────── -->
+    <div class="section-content">
       <div data-if="show_no_video">
         <button class="btn btn--primary btn--full" data-event-click="select_video">Select 360&#xb0; Video</button>
       </div>
@@ -46,9 +42,20 @@
         <span class="status-text status-muted">{{video_info_text}}</span>
         <button class="btn btn--secondary btn--full" data-event-click="clear_video">Clear</button>
       </div>
+      <div class="setting-row">
+        <span class="prop-label">Output Path</span>
+        <div class="path-browse-row">
+          <div class="path-box path-box--small">{{output_path_display}}</div>
+          <button class="btn btn--secondary btn--compact" data-event-click="browse_output">Choose</button>
+        </div>
+      </div>
+      <div class="setting-row">
+        <span class="prop-label">Summary</span>
+        <span class="status-text status-muted">{{dataset_summary_text}}</span>
+      </div>
     </div>
 
-    <!-- ── Section 2: Frame Extraction ─────────────────────── -->
+    <!-- ── Section 1: Frame Extraction ─────────────────────── -->
     <div class="section-header text-accent" id="hdr-extraction" data-event-click="toggle_section('extraction')">
       <span class="section-arrow text-accent is-expanded" id="arrow-extraction">&#x25B6;</span>
       <span class="text-accent">Frame Extraction</span>
@@ -62,8 +69,8 @@
         </div>
       </div>
       <div class="setting-row">
-        <span class="prop-label">Quality</span>
-        <select data-value="extract_quality_idx">
+        <span class="prop-label">Sharpness</span>
+        <select data-value="extract_sharpness_idx">
           <option value="0">None</option>
           <option value="1">Fast</option>
           <option value="2">Normal</option>
@@ -84,7 +91,7 @@
       <span class="text-accent">Reframe &amp; Alignment</span>
     </div>
     <div class="section-content" id="sec-reframe">
-      <div class="setting-row">
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-high">
         <span class="prop-label">Preset</span>
         <select data-value="preset_idx">
           <option value="0">Cubemap (6 views)</option>
@@ -102,7 +109,22 @@
         <span class="prop-label">Total Output</span>
         <span class="status-text status-muted">{{total_output_text}}</span>
       </div>
-      <div class="setting-row">
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
+        <span class="prop-label">Matcher</span>
+        <select data-value="colmap_matcher_idx">
+          <option value="0">Sequential</option>
+          <option value="1">Exhaustive</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- ── Section 5: Output Quality ───────────────────────── -->
+    <div class="section-header text-accent" id="hdr-quality" data-event-click="toggle_section('quality')">
+      <span class="section-arrow text-accent is-expanded" id="arrow-quality">&#x25B6;</span>
+      <span class="text-accent">Output Quality</span>
+    </div>
+    <div class="section-content" id="sec-quality">
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-high">
         <span class="prop-label">Crop Size</span>
         <select data-value="output_size_idx">
           <option value="0">960 px</option>
@@ -118,69 +140,39 @@
           <span class="slider-value">{{jpeg_quality_str}}</span>
         </div>
       </div>
-      <div class="setting-row">
-        <span class="prop-label">Matcher</span>
-        <select data-value="colmap_matcher_idx">
-          <option value="0">Sequential</option>
-          <option value="1">Exhaustive</option>
-        </select>
-      </div>
-      <div class="setting-row">
-        <span class="prop-label">Match Budget</span>
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
+        <span class="prop-label">Match Limit</span>
         <select data-value="match_budget_idx">
-          <option value="0">Efficient</option>
+          <option value="0">Fast</option>
           <option value="1">Balanced</option>
-          <option value="2">High</option>
-          <option value="3">Maximum</option>
+          <option value="2">Default</option>
+          <option value="3">High</option>
           <option value="4">Custom</option>
         </select>
       </div>
       <div class="setting-row setting-row--aligned">
-        <span class="setting-row__label-col">Max Matches</span>
+        <span class="setting-row__label-col">Max. Matches</span>
         <div class="setting-row__control-col setting-row__control-col--slider">
-          <input type="range" class="setting-slider" data-value="colmap_max_matches_str" min="1024" max="131072" step="1024" />
+          <input type="range" class="setting-slider" data-value="colmap_max_matches_str" min="1024" max="80000" step="128" />
           <span class="slider-value">{{colmap_max_matches_str}}</span>
         </div>
       </div>
       <div class="setting-row">
-        <span class="prop-label">Budget Info</span>
+        <span class="prop-label">Match Limit Info</span>
         <span class="status-text status-muted">{{match_budget_text}}</span>
       </div>
     </div>
 
-    <!-- ── Section 5: Output ───────────────────────────────── -->
-    <div class="section-header text-accent" id="hdr-output" data-event-click="toggle_section('output')">
-      <span class="section-arrow text-accent is-expanded" id="arrow-output">&#x25B6;</span>
-      <span class="text-accent">Output</span>
-    </div>
-    <div class="section-content" id="sec-output">
-      <div class="setting-row">
-        <span class="prop-label">Mode</span>
-        <select data-value="output_mode_idx">
-          <option value="0">Pinhole</option>
-          <option value="1">Equirectangular</option>
-        </select>
-      </div>
-      <div class="setting-row">
-        <span class="prop-label">Output Path</span>
-        <div class="path-browse-row">
-          <div class="path-box path-box--small">{{output_path_display}}</div>
-          <button class="btn btn--secondary btn--compact" data-event-click="browse_output">Choose</button>
-        </div>
-      </div>
-      <div class="setting-row">
-        <span class="prop-label">Summary</span>
-        <span class="status-text status-muted">{{dataset_summary_text}}</span>
-      </div>
+    <!-- ── Process actions and diagnostics ─────────────────── -->
+    <div class="process-section">
+      <button class="btn btn--success btn--full" data-event-click="run_pipeline">Process &amp; Import</button>
+      <button class="btn btn--secondary btn--full" data-event-click="run_pipeline_only">Process Only</button>
 
       <div class="completion-block">
-        <span class="status-text text-accent">Last Run</span>
+        <span class="status-text text-accent">Run Diagnostics</span>
         <span class="status-text status-muted">{{completion_summary_text}}</span>
         <div class="completion-report">{{completion_report_text}}</div>
       </div>
-
-      <button class="btn btn--success btn--full" data-event-click="run_pipeline">Process &amp; Import</button>
-      <button class="btn btn--secondary btn--full" data-event-click="run_pipeline_only">Process Only</button>
     </div>
 
   </div>
