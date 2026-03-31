@@ -7,7 +7,7 @@ Process 360° video into COLMAP-aligned datasets ready for Gaussian Splatting �
 Takes a 360° equirectangular video and produces a complete COLMAP dataset:
 
 1. **Extract** frames from your video — four sharpness levels from instant (interval-only) to thorough (full blur analysis with scene detection)
-2. **Reframe** each equirectangular frame into pinhole perspective views — five presets from Cubemap (6 views) to Full Sphere (26 views per frame)
+2. **Reframe** each equirectangular frame into pinhole perspective views — four presets from Cubemap (6 views) to Dense (17 views per frame)
 3. **Align** all views using COLMAP — sequential or exhaustive matching with rig-aware constraints
 4. **Import** the result directly into LichtFeld Studio for training
 
@@ -84,10 +84,9 @@ folders to group the images into rig frames.
 | Preset | Views | Coverage |
 |--------|-------|----------|
 | Cubemap | 6 | 4 horizon, 1 top, 1 bottom |
-| Balanced | 9 | 6 horizon, 2 below, zenith |
-| Standard | 13 | 8 horizon, 4 below, zenith |
-| Dense | 17 | 8 horizon, 8 below, zenith |
-| Full | 26 | 8 above, 8 horizon, 8 below, zenith, nadir |
+| Balanced | 9 | 6 horizon, 1 above, 1 below, zenith |
+| Standard | 13 | 8 horizon, 2 above, 2 below, zenith |
+| Dense | 17 | 8 horizon, 4 above, 4 below, zenith |
 
 ## Extraction Sharpness
 
@@ -160,7 +159,7 @@ Successful and failed runs both write debug artifacts into the output folder:
 - `timing.json` — structured timing and registration summary
 - `colmap_debug.log` — detailed COLMAP stage log
 
-These same results are surfaced in the panel's **Last Run** summary so you can
+These same results are surfaced in the panel's **Run Diagnostics** summary so you can
 inspect registration behavior without digging through the Python console.
 
 ## Credits

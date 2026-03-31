@@ -41,7 +41,6 @@ PRESET_NAMES = [
     "balanced",
     "standard",
     "dense",
-    "full",
 ]
 
 PRESET_LABELS = [
@@ -49,7 +48,6 @@ PRESET_LABELS = [
     "Balanced (9 views)",
     "Standard (13 views)",
     "Dense (17 views)",
-    "Full (26 views)",
 ]
 
 COLMAP_MATCHERS = ["sequential", "exhaustive"]
@@ -85,10 +83,9 @@ EXTRACT_SHARPNESS_PRESETS = [
 # Human-readable coverage descriptions per preset
 COVERAGE_DESCRIPTIONS = {
     "cubemap": "4 horizon, 1 top, 1 bottom",
-    "balanced": "6 horizon, 2 below, zenith",
-    "standard": "8 horizon, 4 below, zenith",
+    "balanced": "6 horizon, 1 above, 1 below, zenith",
+    "standard": "8 horizon, 2 above, 2 below, zenith",
     "dense": "8 horizon, 4 above, 4 below, zenith",
-    "full": "8 horizon, 8 above, 8 below, zenith, nadir",
 }
 
 # ---------------------------------------------------------------------------
@@ -387,6 +384,33 @@ class Prep360Panel(lf.ui.Panel):
         )
         return matcher, tier
 
+    def _resolve_import_target(self, dataset_path: str) -> tuple[str, str]:
+        """Normalize a finished dataset path for LichtFeld's import flow.
+
+        LichtFeld's own retained import panel first runs ``detect_dataset_info``
+        and then imports the detected dataset base path with an output folder at
+        ``base_path/output``. Mirroring that here avoids relying on the raw
+        pipeline return path and keeps Process & Import aligned with the app's
+        normal dataset workflow.
+        """
+        info = lf.detect_dataset_info(dataset_path)
+        if not info:
+            raise RuntimeError(f"Could not detect dataset info for: {dataset_path}")
+
+        base_path = str(info.base_path).strip()
+        images_path = str(info.images_path).strip()
+        sparse_path = str(info.sparse_path).strip()
+
+        if not base_path:
+            raise RuntimeError(f"Dataset base path is empty for: {dataset_path}")
+        if not images_path:
+            raise RuntimeError(f"Dataset images path is missing for: {dataset_path}")
+        if not sparse_path:
+            raise RuntimeError(f"Dataset sparse path is missing for: {dataset_path}")
+
+        output_path = str(Path(base_path) / "output")
+        return base_path, output_path
+
     def _build_stage_timing_lines(
         self,
         stage_names: dict[str, str],
@@ -434,6 +458,8 @@ class Prep360Panel(lf.ui.Panel):
         lines.append(f"Matcher: {matcher}")
         lines.append(f"Match limit: {tier}")
         lines.append(f"Max. matches: {self._colmap_max_num_matches:,} per pair")
+        if result.preset_signature:
+            lines.append(f"Preset geometry: {result.preset_signature}")
 
         output_root = Path(self._output_path) if self._output_path else None
         if output_root:
@@ -471,6 +497,8 @@ class Prep360Panel(lf.ui.Panel):
         lines.append(f"Matcher: {matcher}")
         lines.append(f"Match limit: {tier}")
         lines.append(f"Max. matches: {self._colmap_max_num_matches:,} per pair")
+        if result.preset_signature:
+            lines.append(f"Preset geometry: {result.preset_signature}")
 
         output_root = Path(self._output_path) if self._output_path else None
         if output_root:
@@ -519,6 +547,7 @@ class Prep360Panel(lf.ui.Panel):
                 "matcher": matcher,
                 "match_budget_tier": tier,
                 "max_num_matches": self._colmap_max_num_matches,
+                "preset_geometry": result.preset_signature,
                 "views_per_frame": result.views_per_frame,
                 "registered_frames": result.num_registered_frames,
                 "complete_rig_frames": result.num_complete_frames,
@@ -549,6 +578,8 @@ class Prep360Panel(lf.ui.Panel):
         lines.append(f"Matcher: {matcher}")
         lines.append(f"Match limit: {tier}")
         lines.append(f"Max. matches: {self._colmap_max_num_matches:,} per pair")
+        if result.preset_signature:
+            lines.append(f"Preset geometry: {result.preset_signature}")
 
         if result.views_per_frame > 0:
             dropped_frames = max(result.num_source_frames - result.num_registered_frames, 0)
@@ -1158,6 +1189,7 @@ class Prep360Panel(lf.ui.Panel):
                         "matcher": matcher,
                         "match_budget_tier": tier,
                         "max_num_matches": self._colmap_max_num_matches,
+                        "preset_geometry": result.preset_signature,
                         "views_per_frame": result.views_per_frame,
                         "registered_frames": result.num_registered_frames,
                         "complete_rig_frames": result.num_complete_frames,
@@ -1188,10 +1220,21 @@ class Prep360Panel(lf.ui.Panel):
 
             if self._import_after and result.dataset_path:
                 try:
+                    dataset_base_path, import_output_path = self._resolve_import_target(
+                        result.dataset_path
+                    )
                     lf.load_file(
-                        result.dataset_path,
+                        dataset_base_path,
                         is_dataset=True,
-                        output_path=self._output_path,
+                        output_path=import_output_path,
+                    )
+                    self._processing_status = (
+                        f"Import requested: {Path(dataset_base_path).name}"
+                    )
+                    logger.info(
+                        "Requested dataset import: base_path=%s output_path=%s",
+                        dataset_base_path,
+                        import_output_path,
                     )
                 except Exception as exc:
                     logger.error("Failed to import dataset: %s", exc)
