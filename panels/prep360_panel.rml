@@ -68,7 +68,7 @@
           <span class="slider-value">{{extract_fps_str}}</span>
         </div>
       </div>
-      <div class="setting-row">
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-high">
         <span class="prop-label">Sharpness</span>
         <select data-value="extract_sharpness_idx">
           <option value="0">None</option>
@@ -98,7 +98,6 @@
           <option value="1">Balanced (9 views)</option>
           <option value="2">Standard (13 views)</option>
           <option value="3">Dense (17 views)</option>
-          <option value="4">Full (26 views)</option>
         </select>
       </div>
       <div class="setting-row">

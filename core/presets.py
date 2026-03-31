@@ -126,7 +126,7 @@ class ViewConfig:
 
 
 # ---------------------------------------------------------------------------
-# Built-in presets (from convert_360_to_colmap.py — tested in production)
+# Built-in presets
 # ---------------------------------------------------------------------------
 
 VIEW_PRESETS: dict[str, ViewConfig] = {
@@ -142,35 +142,28 @@ VIEW_PRESETS: dict[str, ViewConfig] = {
     "balanced": ViewConfig(
         rings=[
             Ring(pitch=0, count=6, fov=75),
-            Ring(pitch=-25, count=2, fov=75),
+            Ring(pitch=40, count=1, fov=75, start_yaw=30),
+            Ring(pitch=-40, count=1, fov=75, start_yaw=210),
         ],
         include_zenith=True,
+        zenith_fov=75,
     ),
     "standard": ViewConfig(
         rings=[
             Ring(pitch=0, count=8, fov=65),
-            Ring(pitch=-20, count=4, fov=65),
+            Ring(pitch=25, count=2, fov=65, start_yaw=22.5),
+            Ring(pitch=-25, count=2, fov=65, start_yaw=112.5),
         ],
         include_zenith=True,
+        zenith_fov=65,
     ),
     "dense": ViewConfig(
         rings=[
             Ring(pitch=0, count=8, fov=65),
-            Ring(pitch=-25, count=4, fov=65),
-            Ring(pitch=25, count=4, fov=65),
+            Ring(pitch=30, count=4, fov=65, start_yaw=22.5),
+            Ring(pitch=-30, count=4, fov=65, start_yaw=67.5),
         ],
         include_zenith=True,
-    ),
-    "full": ViewConfig(
-        rings=[
-            Ring(pitch=0, count=8, fov=65),
-            Ring(pitch=-20, count=4, fov=65),
-            Ring(pitch=20, count=4, fov=65),
-            Ring(pitch=-40, count=4, fov=65),
-            Ring(pitch=40, count=4, fov=65),
-        ],
-        include_zenith=True,
-        include_nadir=True,
     ),
 }
 
