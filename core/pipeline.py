@@ -94,8 +94,39 @@ class PipelineResult:
     registered_images_by_view: dict[str, int] = field(default_factory=dict)
     partial_frame_examples: list[str] = field(default_factory=list)
     dropped_frame_examples: list[str] = field(default_factory=list)
+    preset_signature: str = ""
     elapsed_sec: float = 0.0
     error: str = ""
+
+
+def _build_runtime_view_config(cfg: PipelineConfig) -> ViewConfig:
+    """Resolve the active preset and apply runtime output overrides."""
+    from .presets import DEFAULT_PRESET
+
+    base = VIEW_PRESETS.get(cfg.preset_name, VIEW_PRESETS[DEFAULT_PRESET])
+    return ViewConfig(
+        rings=base.rings,
+        include_zenith=base.include_zenith,
+        include_nadir=base.include_nadir,
+        zenith_fov=base.zenith_fov,
+        output_size=cfg.output_size,
+        jpeg_quality=cfg.jpeg_quality,
+    )
+
+
+def _format_preset_signature(preset_name: str, view_config: ViewConfig) -> str:
+    """Summarize the effective preset geometry used for this run."""
+    parts: list[str] = []
+    for ring_idx, ring in enumerate(view_config.rings):
+        parts.append(
+            f"{ring_idx:02d}:{ring.count}x@{ring.pitch:g}"
+            f"/f{ring.fov:g}/start{ring.start_yaw:g}"
+        )
+    if view_config.include_zenith:
+        parts.append(f"ZN@90/f{view_config.zenith_fov:g}")
+    if view_config.include_nadir:
+        parts.append(f"ND@-90/f{view_config.zenith_fov:g}")
+    return f"{preset_name} | " + "; ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -197,8 +228,13 @@ class PipelineJob:
             result = self._run_stages(cfg, t0)
         except Exception as exc:
             logger.exception("Pipeline failed")
+            preset_signature = _format_preset_signature(
+                cfg.preset_name,
+                _build_runtime_view_config(cfg),
+            )
             result = PipelineResult(
                 success=False,
+                preset_signature=preset_signature,
                 error=str(exc),
                 elapsed_sec=time.time() - t0,
             )
@@ -292,19 +328,8 @@ class PipelineJob:
         # ===================================================================
         self._update("reframe", 35.0, "Reframing to pinhole views...")
 
-        from .presets import DEFAULT_PRESET
-        view_config = VIEW_PRESETS.get(
-            cfg.preset_name, VIEW_PRESETS[DEFAULT_PRESET]
-        )
-        # Override output settings from pipeline config
-        view_config = ViewConfig(
-            rings=view_config.rings,
-            include_zenith=view_config.include_zenith,
-            include_nadir=view_config.include_nadir,
-            zenith_fov=view_config.zenith_fov,
-            output_size=cfg.output_size,
-            jpeg_quality=cfg.jpeg_quality,
-        )
+        view_config = _build_runtime_view_config(cfg)
+        preset_signature = _format_preset_signature(cfg.preset_name, view_config)
 
         reframer = Reframer(view_config)
 
@@ -344,7 +369,7 @@ class PipelineJob:
         # ===================================================================
         self._update("colmap", 51.0, "Running COLMAP alignment...")
 
-        view_fovs = [fov for _yaw, _pitch, fov, _name in view_config.get_all_views()]
+        view_fovs = [fov for _yaw, _pitch, fov, _name, _flip in view_config.get_all_views()]
         camera_params, default_focal_length_factor, _shared_fov_deg = (
             infer_shared_pinhole_camera_params(view_fovs, cfg.output_size)
         )
@@ -429,5 +454,6 @@ class PipelineJob:
             registered_images_by_view=colmap_result.registered_images_by_view,
             partial_frame_examples=colmap_result.partial_frame_examples,
             dropped_frame_examples=colmap_result.dropped_frame_examples,
+            preset_signature=preset_signature,
             elapsed_sec=elapsed,
         )

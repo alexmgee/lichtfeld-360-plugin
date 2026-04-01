@@ -32,7 +32,15 @@ def create_rotation_matrix(
 ) -> np.ndarray:
     """Build a 3x3 rotation matrix from Euler angles (degrees).
 
-    Convention: Rz(roll) @ Rx(pitch) @ Ry(yaw), applied right-to-left.
+    Returns ``world_from_cam`` for the virtual pinhole view.
+
+    Convention:
+    - yaw rotates around the global up axis
+    - pitch tilts the already-yawed camera up/down around its local x axis
+    - roll spins around the camera's local forward axis
+
+    With column vectors, that is ``Ry(yaw) @ Rx(-pitch) @ Rz(roll)`` applied
+    right-to-left. Positive pitch therefore means "look upward".
     """
     yaw = np.radians(yaw_deg)
     pitch = np.radians(pitch_deg)
@@ -62,7 +70,7 @@ def create_rotation_matrix(
         ]
     )
 
-    return Rz @ Rx @ Ry
+    return Ry @ Rx.T @ Rz
 
 
 def reframe_view(
@@ -329,7 +337,7 @@ def _process_single_image(
     mask_root = out_root.parent / "masks" if mask is not None else None
 
     views = config.get_all_views()
-    for yaw, pitch, fov, view_name in views:
+    for yaw, pitch, fov, view_name, flip_v in views:
         persp = reframe_view(
             equirect,
             fov_deg=fov,
@@ -337,6 +345,9 @@ def _process_single_image(
             pitch_deg=pitch,
             out_size=config.output_size,
         )
+
+        if flip_v:
+            persp = np.flipud(persp)
 
         view_dir = out_root / view_name
         view_dir.mkdir(parents=True, exist_ok=True)
@@ -358,6 +369,8 @@ def _process_single_image(
                 out_size=config.output_size,
                 mode="nearest",
             )
+            if flip_v:
+                mask_persp = np.flipud(mask_persp)
             mask_persp = (mask_persp > 0).astype(np.uint8) * 255
             mask_dir = mask_root / view_name
             mask_dir.mkdir(parents=True, exist_ok=True)

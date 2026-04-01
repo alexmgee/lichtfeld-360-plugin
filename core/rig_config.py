@@ -110,12 +110,17 @@ def generate_rig_config(view_config: ViewConfig) -> list[dict]:
     if not views:
         return [{"cameras": []}]
 
-    ref_yaw, ref_pitch, _ref_fov, _ref_name = views[0]
+    ref_yaw, ref_pitch, _ref_fov, _ref_name, _ref_flip = views[0]
     R_ref = create_rotation_matrix(ref_yaw, ref_pitch)
 
     cameras: List[dict] = []
-    for i, (yaw, pitch, fov, name) in enumerate(views):
-        R = create_rotation_matrix(yaw, pitch)
+    for i, (yaw, pitch, fov, name, _flip) in enumerate(views):
+        # Pole faces (|pitch| == 90) need their rig rotation negated so
+        # COLMAP places them on the correct side of the reconstruction.
+        # Without this, the zenith and nadir faces swap positions in the
+        # viewer because the rig constraint and image content cancel out.
+        rig_pitch = -pitch if abs(pitch) == 90 else pitch
+        R = create_rotation_matrix(yaw, rig_pitch)
 
         cam_entry: dict = {
             "image_prefix": f"{name}/",
