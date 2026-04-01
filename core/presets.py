@@ -23,12 +23,16 @@ class Ring:
         count: Number of evenly-spaced views in this ring.
         fov: Field of view in degrees for each view.
         start_yaw: Starting yaw offset in degrees.
+        flip_vertical: Mirror the rendered image top-to-bottom.
+            Needed for cubemap pole faces where the standard unfolded
+            layout requires a reflection, not a rotation.
     """
 
     pitch: float
     count: int
     fov: float = 65.0
     start_yaw: float = 0.0
+    flip_vertical: bool = False
 
     def get_yaw_positions(self) -> List[float]:
         """Return the yaw angle for every view in this ring."""
@@ -67,20 +71,20 @@ class ViewConfig:
             count += 1
         return count
 
-    def get_all_views(self) -> List[Tuple[float, float, float, str]]:
-        """Return (yaw, pitch, fov, name) for every view."""
-        views: List[Tuple[float, float, float, str]] = []
+    def get_all_views(self) -> List[Tuple[float, float, float, str, bool]]:
+        """Return (yaw, pitch, fov, name, flip_vertical) for every view."""
+        views: List[Tuple[float, float, float, str, bool]] = []
 
         for ring_idx, ring in enumerate(self.rings):
             for view_idx, yaw in enumerate(ring.get_yaw_positions()):
                 name = f"{ring_idx:02d}_{view_idx:02d}"
-                views.append((yaw, ring.pitch, ring.fov, name))
+                views.append((yaw, ring.pitch, ring.fov, name, ring.flip_vertical))
 
         if self.include_zenith:
-            views.append((0, 90, self.zenith_fov, "ZN_00"))
+            views.append((0, 90, self.zenith_fov, "ZN_00", False))
 
         if self.include_nadir:
-            views.append((0, -90, self.zenith_fov, "ND_00"))
+            views.append((0, -90, self.zenith_fov, "ND_00", False))
 
         return views
 
@@ -93,6 +97,7 @@ class ViewConfig:
                     "count": r.count,
                     "fov": r.fov,
                     "start_yaw": r.start_yaw,
+                    "flip_vertical": r.flip_vertical,
                 }
                 for r in self.rings
             ],
@@ -112,6 +117,7 @@ class ViewConfig:
                 count=r["count"],
                 fov=r.get("fov", 65.0),
                 start_yaw=r.get("start_yaw", 0.0),
+                flip_vertical=r.get("flip_vertical", False),
             )
             for r in data.get("rings", [])
         ]
@@ -133,8 +139,8 @@ VIEW_PRESETS: dict[str, ViewConfig] = {
     "cubemap": ViewConfig(
         rings=[
             Ring(pitch=0, count=4, fov=90),
-            Ring(pitch=90, count=1, fov=90),
             Ring(pitch=-90, count=1, fov=90),
+            Ring(pitch=90, count=1, fov=90),
         ],
         include_zenith=False,
         include_nadir=False,
