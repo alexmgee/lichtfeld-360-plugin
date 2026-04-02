@@ -7,7 +7,7 @@ Process 360° video into COLMAP-aligned datasets ready for Gaussian Splatting �
 Takes a 360° equirectangular video and produces a complete COLMAP dataset:
 
 1. **Extract** frames from your video — four sharpness levels from instant (interval-only) to thorough (full blur analysis with scene detection)
-2. **Reframe** each equirectangular frame into pinhole perspective views — four presets from Cubemap (6 views) to Dense (17 views per frame)
+2. **Reframe** each equirectangular frame into pinhole perspective views — four presets from Cubemap (6 views) to High (18 views per frame)
 3. **Align** all views using COLMAP — sequential or exhaustive matching with rig-aware constraints
 4. **Import** the result directly into LichtFeld Studio for training
 
@@ -81,12 +81,13 @@ folders to group the images into rig frames.
 
 ## Reframing Presets
 
-| Preset | Views | Coverage |
-|--------|-------|----------|
-| Cubemap | 6 | 4 horizon, 1 top, 1 bottom |
-| Balanced | 9 | 6 horizon, 1 above, 1 below, zenith |
-| Standard | 13 | 8 horizon, 2 above, 2 below, zenith |
-| Dense | 17 | 8 horizon, 4 above, 4 below, zenith |
+| Preset | Views | Description |
+|--------|-------|-------------|
+| Cubemap | 6 | 4 horizon at 90° FOV, top and bottom faces |
+| Low | 9 | 5 horizon, 1 above, 2 below, 1 forward at 75° FOV |
+| Medium | 14 | 5 horizon, 4 above, 4 below, zenith at 65° FOV |
+| High | 18 | 4 upper, 9 lower, zenith, nadir, 4 mid-upper at 65° FOV |
+
 
 ## Extraction Sharpness
 
@@ -97,21 +98,21 @@ In every mode except **None**, the plugin looks at candidate frames first and on
 | Sharpness | Analysis Method | Extraction Result |
 |---------|-----------------|-------------------|
 | None | No sharpness analysis | Saves exactly 1 frame per interval |
-| Fast | Tests 3 candidate frames per interval with a lightweight Laplacian sharpness score at 480 px | Saves the sharpest of those 3 candidates |
-| Normal | Runs FFmpeg `blurdetect` plus scene scoring on a subsampled analysis stream at about 5× the target extraction rate, using a 640 px analysis width | Saves the sharpest frame per interval, with possible extra splits at scene changes |
-| Maximum | Runs FFmpeg `blurdetect` plus scene scoring on every source frame, using a 1280 px analysis width | Saves the strongest frame choice it can find, with possible extra splits at scene changes |
+| Low | Tests 3 candidate frames per interval with a lightweight Laplacian sharpness score at 480 px | Saves the sharpest of those 3 candidates |
+| Medium | Runs FFmpeg `blurdetect` plus scene scoring on a subsampled analysis stream at about 5× the target extraction rate, using a 640 px analysis width | Saves the sharpest frame per interval, with possible extra splits at scene changes |
+| High | Runs FFmpeg `blurdetect` plus scene scoring on every source frame, using a 1280 px analysis width | Saves the strongest frame choice it can find, with possible extra splits at scene changes |
 
-For most videos, start with **Normal**. Drop to **Fast** or **None** if you need faster extraction, and move up to **Maximum** when the footage is difficult enough that cleaner frame selection matters more than runtime.
+The default sharpness is **High**. Drop to **Medium** or **Low** if you need faster extraction.
 
 ## COLMAP Matching
 
 The **Matcher** setting controls which image pairs COLMAP attempts to compare
-before mapping begins.
+before mapping begins. The default is **Exhaustive**.
 
 - **Sequential** matches nearby frames in order. It is usually faster and works
   well for normal video-like motion where each frame mostly overlaps with the
   next few frames.
-- **Exhaustive** tries all candidate image pairs. It is much slower, but it can
+- **Exhaustive** tries all candidate image pairs. It is slower, but it can
   recover harder scenes where nearby-frame matching is not enough to keep the
   reconstruction connected.
 
@@ -136,13 +137,6 @@ Available tiers:
 | Default | 32,768 | COLMAP's default and the best starting point for most scenes |
 | High | 65,536 | Harder scenes that need more match coverage |
 | Custom | User defined | Manual tuning |
-
-Guidance:
-
-- Start with **Default** for most 360 video.
-- Try **High** if COLMAP logs repeated `Clamping features...` warnings or
-  drops too many whole rig frames.
-- Lower the match limit if you need to save time or memory.
 
 
 ## Dependencies

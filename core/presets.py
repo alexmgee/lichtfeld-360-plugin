@@ -1,11 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Alex Gee
 # SPDX-License-Identifier: GPL-3.0-or-later
 """
-Ring-based view presets for equirectangular-to-pinhole reprojection.
+View presets for equirectangular-to-pinhole reprojection.
 
-Defines the configuration data structures (Ring, ViewConfig) and built-in
-presets that control how an equirectangular image is decomposed into
-multiple pinhole perspective views.
+Defines the configuration data structures (Ring, FreeView, ViewConfig) and
+built-in presets that control how an equirectangular image is decomposed
+into multiple pinhole perspective views.
+
+Views can be defined as evenly-spaced rings (Ring) or individually-placed
+cameras (FreeView).  Both produce the same output format and are fully
+compatible with COLMAP rig constraints.
 """
 
 from __future__ import annotations
@@ -43,11 +47,36 @@ class Ring:
 
 
 @dataclass
+class FreeView:
+    """A single individually-placed camera view.
+
+    Args:
+        name: View identifier, used as the output folder name and
+            COLMAP image_prefix (e.g. ``"00_00"``).
+        yaw: Yaw angle in degrees (0 = front).
+        pitch: Pitch angle in degrees (0 = horizon, +90 = up).
+        fov: Field of view in degrees.
+    """
+
+    name: str
+    yaw: float
+    pitch: float
+    fov: float = 65.0
+
+
+@dataclass
 class ViewConfig:
     """Full configuration describing all perspective views to extract.
 
+    Views can come from three sources (emitted in this order):
+
+    1. ``rings`` — evenly-spaced cameras at a given pitch.
+    2. ``views`` — individually-placed freeform cameras.
+    3. ``include_zenith`` / ``include_nadir`` — shorthand pole cameras.
+
     Args:
         rings: List of Ring definitions.
+        views: List of individually-placed FreeView cameras.
         include_zenith: Whether to include a top-down view (pitch=+90).
         include_nadir: Whether to include a bottom-up view (pitch=-90).
         zenith_fov: FOV for zenith/nadir views.
@@ -56,6 +85,7 @@ class ViewConfig:
     """
 
     rings: List[Ring] = field(default_factory=list)
+    views: List[FreeView] = field(default_factory=list)
     include_zenith: bool = True
     include_nadir: bool = False
     zenith_fov: float = 65.0
@@ -65,6 +95,7 @@ class ViewConfig:
     def total_views(self) -> int:
         """Total number of views this configuration produces per frame."""
         count = sum(ring.count for ring in self.rings)
+        count += len(self.views)
         if self.include_zenith:
             count += 1
         if self.include_nadir:
@@ -73,24 +104,27 @@ class ViewConfig:
 
     def get_all_views(self) -> List[Tuple[float, float, float, str, bool]]:
         """Return (yaw, pitch, fov, name, flip_vertical) for every view."""
-        views: List[Tuple[float, float, float, str, bool]] = []
+        result: List[Tuple[float, float, float, str, bool]] = []
 
         for ring_idx, ring in enumerate(self.rings):
             for view_idx, yaw in enumerate(ring.get_yaw_positions()):
                 name = f"{ring_idx:02d}_{view_idx:02d}"
-                views.append((yaw, ring.pitch, ring.fov, name, ring.flip_vertical))
+                result.append((yaw, ring.pitch, ring.fov, name, ring.flip_vertical))
+
+        for fv in self.views:
+            result.append((fv.yaw, fv.pitch, fv.fov, fv.name, False))
 
         if self.include_zenith:
-            views.append((0, 90, self.zenith_fov, "ZN_00", False))
+            result.append((0, 90, self.zenith_fov, "ZN_00", False))
 
         if self.include_nadir:
-            views.append((0, -90, self.zenith_fov, "ND_00", False))
+            result.append((0, -90, self.zenith_fov, "ND_00", False))
 
-        return views
+        return result
 
     def to_dict(self) -> dict:
         """Serialize to a plain dictionary."""
-        return {
+        d: dict = {
             "rings": [
                 {
                     "pitch": r.pitch,
@@ -107,6 +141,17 @@ class ViewConfig:
             "output_size": self.output_size,
             "jpeg_quality": self.jpeg_quality,
         }
+        if self.views:
+            d["views"] = [
+                {
+                    "name": v.name,
+                    "yaw": v.yaw,
+                    "pitch": v.pitch,
+                    "fov": v.fov,
+                }
+                for v in self.views
+            ]
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> ViewConfig:
@@ -121,8 +166,18 @@ class ViewConfig:
             )
             for r in data.get("rings", [])
         ]
+        views = [
+            FreeView(
+                name=v["name"],
+                yaw=v["yaw"],
+                pitch=v["pitch"],
+                fov=v.get("fov", 65.0),
+            )
+            for v in data.get("views", [])
+        ]
         return cls(
             rings=rings,
+            views=views,
             include_zenith=data.get("include_zenith", True),
             include_nadir=data.get("include_nadir", False),
             zenith_fov=data.get("zenith_fov", 65.0),
@@ -145,31 +200,64 @@ VIEW_PRESETS: dict[str, ViewConfig] = {
         include_zenith=False,
         include_nadir=False,
     ),
-    "balanced": ViewConfig(
-        rings=[
-            Ring(pitch=0, count=6, fov=75),
-            Ring(pitch=40, count=1, fov=75, start_yaw=30),
-            Ring(pitch=-40, count=1, fov=75, start_yaw=210),
+    "low": ViewConfig(
+        views=[
+            FreeView("00_00", yaw=52, pitch=16, fov=75),
+            FreeView("00_01", yaw=119, pitch=-17, fov=75),
+            FreeView("00_02", yaw=143, pitch=34, fov=75),
+            FreeView("00_03", yaw=-131, pitch=16, fov=75),
+            FreeView("00_04", yaw=-66, pitch=-14, fov=75),
+            FreeView("00_05", yaw=-37, pitch=69, fov=75),
+            FreeView("01_00", yaw=30, pitch=-62, fov=75),
+            FreeView("02_00", yaw=210, pitch=-44, fov=75),
+            FreeView("02_01", yaw=-19, pitch=0, fov=75),
         ],
-        include_zenith=True,
-        zenith_fov=75,
+        include_zenith=False,
+        include_nadir=False,
     ),
-    "standard": ViewConfig(
-        rings=[
-            Ring(pitch=0, count=8, fov=65),
-            Ring(pitch=25, count=2, fov=65, start_yaw=22.5),
-            Ring(pitch=-25, count=2, fov=65, start_yaw=112.5),
+    "medium": ViewConfig(
+        views=[
+            FreeView("00_00", yaw=159, pitch=12, fov=65),
+            FreeView("00_01", yaw=88, pitch=0, fov=65),
+            FreeView("00_02", yaw=-133, pitch=0, fov=65),
+            FreeView("00_03", yaw=-55, pitch=0, fov=65),
+            FreeView("00_04", yaw=7, pitch=0, fov=65),
+            FreeView("01_00", yaw=23, pitch=30, fov=65),
+            FreeView("01_01", yaw=113, pitch=30, fov=65),
+            FreeView("01_02", yaw=202, pitch=30, fov=65),
+            FreeView("01_03", yaw=293, pitch=30, fov=65),
+            FreeView("02_00", yaw=68, pitch=-30, fov=65),
+            FreeView("02_01", yaw=158, pitch=-46, fov=65),
+            FreeView("02_02", yaw=248, pitch=-33, fov=65),
+            FreeView("02_03", yaw=338, pitch=-46, fov=65),
+            FreeView("ZN_00", yaw=0, pitch=90, fov=65),
         ],
-        include_zenith=True,
-        zenith_fov=65,
+        include_zenith=False,
+        include_nadir=False,
     ),
-    "dense": ViewConfig(
-        rings=[
-            Ring(pitch=0, count=8, fov=65),
-            Ring(pitch=30, count=4, fov=65, start_yaw=22.5),
-            Ring(pitch=-30, count=4, fov=65, start_yaw=67.5),
+    "high": ViewConfig(
+        views=[
+            FreeView("ZN_00", yaw=0, pitch=90, fov=65),
+            FreeView("00_00", yaw=3, pitch=34, fov=65),
+            FreeView("00_01", yaw=175, pitch=36, fov=65),
+            FreeView("00_02", yaw=91, pitch=34, fov=65),
+            FreeView("00_03", yaw=-89, pitch=33, fov=65),
+            FreeView("02_00", yaw=133, pitch=-25, fov=65),
+            FreeView("02_01", yaw=-47, pitch=-24, fov=65),
+            FreeView("02_02", yaw=-139, pitch=-22, fov=65),
+            FreeView("02_04", yaw=42, pitch=-26, fov=65),
+            FreeView("02_05", yaw=-1, pitch=-27, fov=65),
+            FreeView("02_06", yaw=91, pitch=-29, fov=65),
+            FreeView("02_07", yaw=-89, pitch=-27, fov=65),
+            FreeView("02_03", yaw=-180, pitch=-29, fov=65),
+            FreeView("ND_00", yaw=180, pitch=-90, fov=65),
+            FreeView("01_00", yaw=143, pitch=21, fov=65),
+            FreeView("01_01", yaw=49, pitch=20, fov=65),
+            FreeView("01_02", yaw=-47, pitch=21, fov=65),
+            FreeView("01_03", yaw=-139, pitch=28, fov=65),
         ],
-        include_zenith=True,
+        include_zenith=False,
+        include_nadir=False,
     ),
 }
 

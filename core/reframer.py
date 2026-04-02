@@ -30,47 +30,36 @@ from .presets import Ring, ViewConfig, VIEW_PRESETS
 def create_rotation_matrix(
     yaw_deg: float, pitch_deg: float, roll_deg: float = 0
 ) -> np.ndarray:
-    """Build a 3x3 rotation matrix from Euler angles (degrees).
+    """Build a 3x3 world-to-camera rotation matrix from yaw/pitch angles.
 
-    Returns ``world_from_cam`` for the virtual pinhole view.
+    Direct transliteration of the webapp's ``w2c(yaw, pitch)`` function.
+    Rows are ``[right, up, -forward]`` in world coordinates.
 
-    Convention:
-    - yaw rotates around the global up axis
-    - pitch tilts the already-yawed camera up/down around its local x axis
-    - roll spins around the camera's local forward axis
-
-    With column vectors, that is ``Ry(yaw) @ Rx(-pitch) @ Rz(roll)`` applied
-    right-to-left. Positive pitch therefore means "look upward".
+    The webapp is the single source of truth for this math.
     """
     yaw = np.radians(yaw_deg)
     pitch = np.radians(pitch_deg)
-    roll = np.radians(roll_deg)
 
-    Ry = np.array(
-        [
-            [np.cos(yaw), 0, np.sin(yaw)],
-            [0, 1, 0],
-            [-np.sin(yaw), 0, np.cos(yaw)],
-        ]
-    )
+    # s2d(yaw, pitch) → forward direction
+    fwd = np.array([
+        np.cos(pitch) * np.sin(yaw),
+        np.sin(pitch),
+        np.cos(pitch) * np.cos(yaw),
+    ])
 
-    Rx = np.array(
-        [
-            [1, 0, 0],
-            [0, np.cos(pitch), -np.sin(pitch)],
-            [0, np.sin(pitch), np.cos(pitch)],
-        ]
-    )
+    # r = cross(fwd, [0,1,0]) — matches webapp w2c() exactly
+    r = np.cross(fwd, np.array([0.0, 1.0, 0.0]))
+    rl = np.linalg.norm(r)
+    if rl < 1e-6:
+        r = np.array([1.0, 0.0, 0.0])
+    else:
+        r = r / rl
 
-    Rz = np.array(
-        [
-            [np.cos(roll), -np.sin(roll), 0],
-            [np.sin(roll), np.cos(roll), 0],
-            [0, 0, 1],
-        ]
-    )
+    # u = cross(r, fwd)
+    u = np.cross(r, fwd)
 
-    return Ry @ Rx.T @ Rz
+    # Return [r, u, -fwd] — identical to webapp w2c()
+    return np.array([r, u, -fwd])
 
 
 def reframe_view(
@@ -97,50 +86,64 @@ def reframe_view(
     """
     h_eq, w_eq = equirect.shape[:2]
 
-    # Focal length from FOV
+    # --- Direct transliteration of webapp sampleERP() ---
+    # Source: erp-perspective-planner.html, lines 341-357
     fov_rad = np.radians(fov_deg)
     f = (out_size / 2) / np.tan(fov_rad / 2)
+    cxx = out_size / 2
+    cy = out_size / 2
 
-    # Pixel grid centred on the optical axis
-    u = np.arange(out_size) - out_size / 2
-    v = np.arange(out_size) - out_size / 2
-    u, v = np.meshgrid(u, v)
+    R = create_rotation_matrix(yaw_deg, pitch_deg)
+    # Unpack R into scalars matching webapp variable names
+    r00, r01, r02 = R[0, 0], R[0, 1], R[0, 2]
+    r10, r11, r12 = R[1, 0], R[1, 1], R[1, 2]
+    r20, r21, r22 = R[2, 0], R[2, 1], R[2, 2]
 
-    # Camera-space rays
-    x = u
-    y = -v  # flip y for image coordinates
-    z = np.full_like(u, f, dtype=np.float64)
+    # Pixel grid
+    px_arr = np.arange(out_size, dtype=np.float64)
+    py_arr = np.arange(out_size, dtype=np.float64)
+    px_grid, py_grid = np.meshgrid(px_arr, py_arr)
 
-    # Rotate into world coordinates
-    xyz = np.stack([x, y, z], axis=-1)
-    R = create_rotation_matrix(yaw_deg, pitch_deg, 0)
-    xyz_rot = xyz @ R.T
+    crx = (px_grid - cxx) / f
+    cry = -(py_grid - cy) / f
 
-    # Spherical coordinates
-    x_r, y_r, z_r = xyz_rot[..., 0], xyz_rot[..., 1], xyz_rot[..., 2]
-    theta = np.arctan2(x_r, z_r)  # longitude
-    norm = np.linalg.norm(xyz_rot, axis=-1)
-    phi = np.arcsin(np.clip(y_r / norm, -1, 1))  # latitude
+    # World-space ray:  webapp line 349
+    # wx = r00*crx + r10*cry - r20
+    # wy = r01*crx + r11*cry - r21
+    # wz = r02*crx + r12*cry - r22
+    wx = r00 * crx + r10 * cry - r20
+    wy = r01 * crx + r11 * cry - r21
+    wz = r02 * crx + r12 * cry - r22
 
-    # Map to equirect pixel coordinates
-    u_eq = (theta / np.pi + 1) / 2 * w_eq
+    # Normalize
+    l = np.sqrt(wx * wx + wy * wy + wz * wz)
+    wx, wy, wz = wx / l, wy / l, wz / l
+
+    # Spherical coordinates:  webapp line 351
+    theta = np.arctan2(wx, wz)                     # longitude
+    phi = np.arcsin(np.clip(wy, -1, 1))             # latitude
+
+    # Map to equirect pixel coordinates:  webapp line 352
+    u_eq = ((theta / np.pi + 1) / 2) * w_eq
     v_eq = (0.5 - phi / np.pi) * h_eq
 
-    # Sample
+    # Sample — then flip horizontally to convert from the webapp's
+    # left-handed camera convention to right-handed output for COLMAP.
     if mode == "nearest":
         u_eq = np.round(u_eq).astype(int) % w_eq
         v_eq = np.clip(np.round(v_eq).astype(int), 0, h_eq - 1)
-        return equirect[v_eq, u_eq]
+        return np.fliplr(equirect[v_eq, u_eq])
     else:
         map_x = u_eq.astype(np.float32) % w_eq
         map_y = np.clip(v_eq.astype(np.float32), 0, h_eq - 1)
-        return cv2.remap(
+        result = cv2.remap(
             equirect,
             map_x,
             map_y,
             cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_WRAP,
         )
+        return np.fliplr(result)
 
 
 def compute_pinhole_intrinsics(fov_deg: float, crop_size: int) -> dict:
