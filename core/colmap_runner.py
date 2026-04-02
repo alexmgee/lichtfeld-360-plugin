@@ -699,15 +699,19 @@ class ColmapRunner:
             _try_set_attr(pipeline_opts, "multiple_models", False)
         if hasattr(pipeline_opts, "max_num_models"):
             _try_set_attr(pipeline_opts, "max_num_models", 1)
-        _try_set_attr(pipeline_opts, "ba_refine_sensor_from_rig", True)
+        # Virtual cameras reframed from one panorama share an exact optical
+        # center. Once the preset geometry is correct, letting COLMAP refine
+        # full sensor_from_rig poses can invent large per-sensor translations
+        # and visibly tear the rig apart.
+        _try_set_attr(pipeline_opts, "ba_refine_sensor_from_rig", False)
         _try_set_attr(pipeline_opts, "ba_refine_focal_length", self._config.refine_focal_length)
         _try_set_attr(pipeline_opts, "ba_refine_principal_point", False)
         _try_set_attr(pipeline_opts, "ba_refine_extra_params", False)
-        _try_set_attr(pipeline_opts, "constant_rigs", False)
+        _try_set_attr(pipeline_opts, "constant_rigs", True)
         _log(
-            "Step 4: Rig BA — refine_sensor_from_rig=True, "
+            "Step 4: Rig BA — refine_sensor_from_rig=False, "
             f"refine_focal_length={self._config.refine_focal_length}, "
-            "constant_rigs=False"
+            "constant_rigs=True"
         )
 
         _log("Step 4: Calling pycolmap.incremental_mapping()")

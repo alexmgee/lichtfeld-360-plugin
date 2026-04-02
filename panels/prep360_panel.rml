@@ -72,9 +72,9 @@
         <span class="prop-label">Sharpness</span>
         <select data-value="extract_sharpness_idx">
           <option value="0">None</option>
-          <option value="1">Fast</option>
-          <option value="2">Normal</option>
-          <option value="3">Maximum</option>
+          <option value="1">Low</option>
+          <option value="2">Medium</option>
+          <option value="3">High</option>
         </select>
       </div>
       <div class="setting-row">
@@ -95,9 +95,9 @@
         <span class="prop-label">Preset</span>
         <select data-value="preset_idx">
           <option value="0">Cubemap (6 views)</option>
-          <option value="1">Balanced (9 views)</option>
-          <option value="2">Standard (13 views)</option>
-          <option value="3">Dense (17 views)</option>
+          <option value="1">Low (9 views)</option>
+          <option value="2">Medium (14 views)</option>
+          <option value="3">High (18 views)</option>
         </select>
       </div>
       <div class="setting-row">

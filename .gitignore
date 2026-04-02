@@ -11,3 +11,4 @@ dev/
 .tmp-dll/
 tests/
 COLMAP_RIG_REPORT.md
+CLAUDE.md

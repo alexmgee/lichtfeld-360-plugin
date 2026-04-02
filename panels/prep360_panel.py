@@ -38,16 +38,16 @@ logger = logging.getLogger(__name__)
 
 PRESET_NAMES = [
     "cubemap",
-    "balanced",
-    "standard",
-    "dense",
+    "low",
+    "medium",
+    "high",
 ]
 
 PRESET_LABELS = [
     "Cubemap (6 views)",
-    "Balanced (9 views)",
-    "Standard (13 views)",
-    "Dense (17 views)",
+    "Low (9 views)",
+    "Medium (14 views)",
+    "High (18 views)",
 ]
 
 COLMAP_MATCHERS = ["sequential", "exhaustive"]
@@ -75,17 +75,17 @@ SCRUB_FIELD_SPECS = {
 # - Sharpest+: thorough analysis at higher resolution
 EXTRACT_SHARPNESS_PRESETS = [
     {"label": "None",    "use_blur": False, "scale_width": 0,    "scene_threshold": 0.0},
-    {"label": "Fast",    "use_blur": True,  "scale_width": 480,  "scene_threshold": 0.0},
-    {"label": "Normal",  "use_blur": True,  "scale_width": 640,  "scene_threshold": 0.5},
-    {"label": "Maximum", "use_blur": True,  "scale_width": 1280, "scene_threshold": 0.3},
+    {"label": "Low",     "use_blur": True,  "scale_width": 480,  "scene_threshold": 0.0},
+    {"label": "Medium",  "use_blur": True,  "scale_width": 640,  "scene_threshold": 0.5},
+    {"label": "High",    "use_blur": True,  "scale_width": 1280, "scene_threshold": 0.3},
 ]
 
 # Human-readable coverage descriptions per preset
 COVERAGE_DESCRIPTIONS = {
     "cubemap": "4 horizon, 1 top, 1 bottom",
-    "balanced": "6 horizon, 1 above, 1 below, zenith",
-    "standard": "8 horizon, 2 above, 2 below, zenith",
-    "dense": "8 horizon, 4 above, 4 below, zenith",
+    "low": "5 horizon, 1 above, 2 below, 1 forward",
+    "medium": "5 horizon, 4 above, 4 below, zenith",
+    "high": "4 above, 9 below, zenith, nadir, 4 mid-upper",
 }
 
 # ---------------------------------------------------------------------------
@@ -122,7 +122,7 @@ class Prep360Panel(lf.ui.Panel):
 
         # Extraction
         self._extract_fps: float = 1.0
-        self._extract_sharpness_idx: int = 2  # default: Sharpest (standard)
+        self._extract_sharpness_idx: int = 3  # default: High
 
         # Masking (coming soon — setup UI disabled pending python3.dll fix)
         self._enable_masking: bool = False
@@ -139,8 +139,8 @@ class Prep360Panel(lf.ui.Panel):
         self._preset_idx: int = 0
         self._output_size_idx: int = 3  # index into OUTPUT_SIZES, default 1920
         self._output_size: int = OUTPUT_SIZES[3]
-        self._jpeg_quality: int = 95
-        self._colmap_matcher_idx: int = 0
+        self._jpeg_quality: int = 97
+        self._colmap_matcher_idx: int = 1  # default: exhaustive
         self._match_budget_idx: int = 2  # default
         self._colmap_max_num_matches: int = MATCH_BUDGETS["default"]
 

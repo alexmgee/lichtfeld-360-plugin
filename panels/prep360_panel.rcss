@@ -19,6 +19,11 @@ body {
     overflow: visible;
 }
 
+.section-header {
+    position: relative;
+    z-index: 0;
+}
+
 .setting-row {
     position: relative;
     z-index: 0;

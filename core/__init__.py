@@ -6,7 +6,7 @@ from .analyzer import VideoAnalyzer, VideoInfo
 from .colmap_runner import ColmapConfig, ColmapResult, ColmapRunner
 from .masker import Masker, MaskConfig, MaskResult, is_masking_available
 from .pipeline import PipelineConfig, PipelineJob, PipelineResult
-from .presets import Ring, ViewConfig, VIEW_PRESETS
+from .presets import FreeView, Ring, ViewConfig, VIEW_PRESETS
 from .reframer import Reframer, ReframeResult, reframe_view, compute_pinhole_intrinsics
 from .rig_config import generate_rig_config, write_rig_config
 from .sharpest_extractor import SharpestConfig, SharpestExtractor, SharpestResult
@@ -30,6 +30,7 @@ __all__ = [
     "PipelineJob",
     "PipelineResult",
     # presets
+    "FreeView",
     "Ring",
     "ViewConfig",
     "VIEW_PRESETS",

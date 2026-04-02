@@ -106,6 +106,7 @@ def _build_runtime_view_config(cfg: PipelineConfig) -> ViewConfig:
     base = VIEW_PRESETS.get(cfg.preset_name, VIEW_PRESETS[DEFAULT_PRESET])
     return ViewConfig(
         rings=base.rings,
+        views=base.views,
         include_zenith=base.include_zenith,
         include_nadir=base.include_nadir,
         zenith_fov=base.zenith_fov,
