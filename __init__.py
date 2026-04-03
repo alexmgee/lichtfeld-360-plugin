@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Alex Gee
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""360 Camera plugin for LichtFeld Studio."""
+"""PanoSplat plugin for LichtFeld Studio."""
 
 try:
     from .plugin import on_load, on_unload
