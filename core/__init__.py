@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Alex Gee
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""360 Camera core processing modules."""
+"""PanoSplat core processing modules."""
 
 from .analyzer import VideoAnalyzer, VideoInfo
 from .colmap_runner import ColmapConfig, ColmapResult, ColmapRunner

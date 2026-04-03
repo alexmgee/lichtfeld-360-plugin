@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Alex Gee
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""360 Camera preprocessing panel — full UI with data model, threading, and import."""
+"""PanoSplat panel — full UI with data model, threading, and import."""
 
 from __future__ import annotations
 
@@ -95,9 +95,9 @@ COVERAGE_DESCRIPTIONS = {
 SECTIONS = ["extraction", "masking", "reframe", "quality"]
 
 
-class Prep360Panel(lf.ui.Panel):
-    id = "lichtfeld_360_plugin.prep360"
-    label = "360 Camera"
+class PanoSplatPanel(lf.ui.Panel):
+    id = "panosplat.main"
+    label = "PanoSplat"
     space = lf.ui.PanelSpace.MAIN_PANEL_TAB
     order = 10100
     template = str(Path(__file__).resolve().with_name("prep360_panel.rml"))
@@ -187,7 +187,7 @@ class Prep360Panel(lf.ui.Panel):
     # ── Data model binding ────────────────────────────────────
 
     def on_bind_model(self, ctx):
-        model = ctx.create_data_model("lichtfeld_360_plugin")
+        model = ctx.create_data_model("panosplat")
         if model is None:
             return
 
@@ -1170,7 +1170,7 @@ class Prep360Panel(lf.ui.Panel):
 
             # Print to Python console
             print(f"\n{'=' * 60}")
-            print(f"360 Camera Pipeline \u2014 Timing Report")
+            print(f"PanoSplat Pipeline \u2014 Timing Report")
             print(f"{'=' * 60}")
             print(self._completion_report)
             print(f"{'=' * 60}\n")
@@ -1259,7 +1259,7 @@ class Prep360Panel(lf.ui.Panel):
             logger.error("Pipeline failed: %s", self._error_message)
 
             print(f"\n{'=' * 60}")
-            print("360 Camera Pipeline — Failure Report")
+            print("PanoSplat Pipeline — Failure Report")
             print(f"{'=' * 60}")
             print(self._completion_report)
             print(f"{'=' * 60}\n")

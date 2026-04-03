@@ -1,4 +1,4 @@
-# 360 Camera Plugin for LichtFeld Studio
+# PanoSplat — LichtFeld Studio Plugin
 
 Process 360° video into COLMAP-aligned datasets ready for Gaussian Splatting — directly inside LichtFeld Studio.
 
@@ -16,7 +16,7 @@ Takes a 360° equirectangular video and produces a complete COLMAP dataset:
 ### From Plugin Manager (recommended)
 
 1. Open **Plugin Manager** in LichtFeld Studio
-2. Search for **360 Camera** or paste the repo URL: `alexmgee/lichtfeld-360-plugin`
+2. Search for **PanoSplat** or paste the repo URL: `alexmgee/lichtfeld-360-plugin`
 3. Click **Install**
 
 Dependencies are installed automatically on first load.
@@ -31,7 +31,7 @@ Then restart LichtFeld Studio.
 
 ## Usage
 
-1. Open the **360 Camera** tab in the right panel
+1. Open the **PanoSplat** tab in the right panel
 2. Click **Select 360° Video** and choose your equirectangular video file
 3. Choose an **Output Path**
 4. Adjust settings by section:

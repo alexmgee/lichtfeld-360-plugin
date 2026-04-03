@@ -1,7 +1,7 @@
 [project]
-name = "lichtfeld-360-plugin"
+name = "panosplat"
 version = "0.1.0"
-description = "360° camera to Gaussian Splat — one-click pipeline with rig-aware COLMAP alignment"
+description = "360° video to Gaussian Splat — one-click pipeline with rig-aware COLMAP alignment"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "GPL-3.0-or-later" }
