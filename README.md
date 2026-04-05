@@ -2,6 +2,8 @@
 
 Process 360° video into COLMAP-aligned datasets ready for Gaussian Splatting — directly inside LichtFeld Studio.
 
+(THIS IS A WORK IN PROGRESS )
+
 ## What It Does
 
 Takes a 360° equirectangular video and produces a complete COLMAP dataset:
