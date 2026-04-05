@@ -185,7 +185,7 @@ may exist locally but are not required for using or sharing the plugin.
 
 ## Credits
 
-COLMAP integration adapted from [Lichtfeld-COLMAP-Plugin](https://github.com/shadygm/Lichtfeld-COLMAP-Plugin) by shadygm. GPU-accelerated pycolmap wheels from [build_gpu_colmap](https://github.com/lyehe/build_gpu_colmap) by lyehe.
+COLMAP integration adapted from [Lichtfeld-COLMAP-Plugin](https://github.com/shadygm/Lichtfeld-COLMAP-Plugin) by shadygm. Masking and reconstruction-layout comparisons were informed by the FullCircle / Reconstruction Zone work. GPU-accelerated pycolmap wheels from [build_gpu_colmap](https://github.com/lyehe/build_gpu_colmap) by lyehe.
 
 ## License
 
