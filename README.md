@@ -175,15 +175,13 @@ Successful and failed runs both write debug artifacts into the output folder:
 These same results are surfaced in the panel's **Run Diagnostics** summary so you can
 inspect registration behavior without digging through the Python console.
 
-## Key Project Notes
+## Repo Scope
 
-If you want the current technical status instead of the full historical paper trail,
-start with:
+This public repository is intentionally kept focused on the plugin code and the
+files needed to run it inside LichtFeld Studio.
 
-- [Default masking stabilization report](docs/2026-04-04-default-masking-stabilization-report-and-plan.md)
-- [Default optimization phases 0-4 complete](docs/2026-04-05-optimization-phases-0-4-complete.md)
-- [Cubemap status report](docs/2026-04-05-cubemap-status-report.md)
-- [Docs index](docs/README.md)
+Internal planning notes, investigation writeups, and developer-only harnesses
+may exist locally but are not required for using or sharing the plugin.
 
 ## Credits
 
