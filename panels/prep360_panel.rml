@@ -3,7 +3,7 @@
   <link type="text/template" href="docked_panel.rml"/>
   <link type="text/rcss" href="prep360_panel.rcss"/>
 </head>
-<body template="docked-panel" data-model="panosplat">
+<body template="docked-panel" data-model="plugin360">
 
   <!-- ══════════════════════════════════════════════════════════ -->
   <!-- Error banner (shown when pipeline fails)                  -->

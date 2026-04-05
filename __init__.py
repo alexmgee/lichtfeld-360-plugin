@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Alex Gee
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""PanoSplat plugin for LichtFeld Studio."""
+"""360 Plugin for LichtFeld Studio."""
 
 import os
 import sys
