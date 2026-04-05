@@ -94,6 +94,26 @@ body {
 
 .processing-block {
     padding: 4dp 0dp;
+    display: flex;
+    flex-direction: column;
+    gap: 4dp;
+}
+
+.processing-header,
+.processing-actions {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8dp;
+}
+
+.processing-stage {
+    font-size: 13dp;
+}
+
+.processing-status {
+    font-size: 12dp;
 }
 
 .process-section {
@@ -102,10 +122,7 @@ body {
 
 .progress-row {
     display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 6dp;
-    margin: 4dp 0dp;
+    margin: 2dp 0dp 4dp 0dp;
 }
 
 .progress-row progress {
@@ -141,8 +158,8 @@ body {
 }
 
 .processing-report {
-    margin: 4dp 0dp 6dp 0dp;
-    max-height: 140dp;
+    margin: 0dp;
+    max-height: 96dp;
 }
 
 /* ── Text input (for mask prompts) ──────────────────────── */

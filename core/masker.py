@@ -1072,31 +1072,22 @@ class Masker:
             ]
             self._detection_remap_key = cache_key
 
-        # Build all 16 detection images from cached remap tables
+        # Build all 16 detection images from cached remap tables (BGR)
         detection_images: list[np.ndarray] = []
         for vi in range(n_views):
             map_x, map_y = self._detection_remap_cache[vi]
             flip_v = detection_views[vi][4]
             face_img = _apply_detection_remap(erp, map_x, map_y, flip_v)
-            detection_images.append(cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB))
+            detection_images.append(face_img)
 
-        # Single batched YOLO call for all 16 views
-        batch_results = list(self._backend._yolo(
-            detection_images, stream=True, verbose=False, conf=0.35,
-            iou=0.6, classes=[0], agnostic_nms=False, max_det=20,
-        ))
+        # Batched detection via backend protocol
+        batch_detections = self._backend.batch_detect_boxes(
+            detection_images, detection_confidence=0.35,
+        )
 
         # Parse results per view — direction logic unchanged
         for vi, (yaw, pitch, fov, view_name, flip_v) in enumerate(detection_views):
-            result = batch_results[vi]
-            all_boxes = []
-            if result.boxes is not None and len(result.boxes) > 0:
-                for j in range(len(result.boxes)):
-                    conf = float(result.boxes.conf[j])
-                    if conf < 0.35:
-                        continue
-                    box = result.boxes.xyxy[j].cpu().numpy().astype(int)
-                    all_boxes.append(box)
+            all_boxes = [box for box, _conf in batch_detections[vi]]
 
             if not all_boxes:
                 continue
@@ -1228,7 +1219,31 @@ class Masker:
 
         # Log tracking results
         n_tracked = sum(1 for m in tracked_masks if m is not None and m.sum() > 0)
-        print(f"[360] Pass 2: tracked {n_tracked}/{len(tracked_masks)} frames, backprojecting...")
+        print(f"[360] Pass 2: tracked {n_tracked}/{len(tracked_masks)} frames")
+
+        # Recover isolated SAM2 dropouts by re-running image detection on the
+        # already-rendered synthetic fisheye frame instead of falling back to
+        # the empty Pass 1 mask. This keeps Pass 1 as localization-only while
+        # giving Pass 2 a per-frame rescue path for missed tracking frames.
+        n_rescued = 0
+        if self._backend is not None:
+            for syn_idx, syn_mask in enumerate(tracked_masks):
+                if syn_mask is None or syn_mask.sum() > 0:
+                    continue
+                with timer.time("p2_empty_frame_rescue") if timer else contextmanager(lambda: (yield))():
+                    rescued_mask = self._backend.detect_and_segment(
+                        synthetic_frames[syn_idx],
+                        cfg.targets,
+                    )
+                if rescued_mask is not None and rescued_mask.sum() > 0:
+                    tracked_masks[syn_idx] = rescued_mask
+                    n_rescued += 1
+
+        if n_rescued > 0:
+            n_tracked += n_rescued
+            print(f"[360] Pass 2: rescued {n_rescued} empty tracked frames with per-frame detection")
+
+        print(f"[360] Pass 2: backprojecting {n_tracked}/{len(tracked_masks)} non-empty synthetic masks...")
 
         # Backproject each synthetic mask to ERP.
         # If person direction is stable (angular spread < 10°), build
