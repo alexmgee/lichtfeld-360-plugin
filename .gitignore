@@ -14,3 +14,4 @@ CLAUDE.md
 .superpowers/
 .claude/
 dev/bp_harness_output/
+tests/
