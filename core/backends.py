@@ -63,6 +63,11 @@ class MaskingBackend(Protocol):
         detection_confidence: float = 0.35,
         single_primary_box: bool = False,
     ) -> np.ndarray: ...
+    def batch_detect_boxes(
+        self,
+        images: list[np.ndarray],
+        detection_confidence: float = 0.35,
+    ) -> list[list[tuple[np.ndarray, float]]]: ...
     def cleanup(self) -> None: ...
 
 
@@ -187,6 +192,36 @@ class YoloSamBackend:
         )
         return final_mask
 
+    def batch_detect_boxes(
+        self,
+        images: list[np.ndarray],
+        detection_confidence: float = 0.35,
+    ) -> list[list[tuple[np.ndarray, float]]]:
+        """Run batched YOLO person detection on BGR images.
+
+        Returns per-image list of (xyxy_box, confidence) tuples.
+        COCO class 0 (person) only. RGB conversion handled internally.
+        """
+        images_rgb = [
+            cv2.cvtColor(image, cv2.COLOR_BGR2RGB) for image in images
+        ]
+        batch_results = list(self._yolo(
+            images_rgb, stream=True, verbose=False, conf=detection_confidence,
+            iou=0.6, classes=[0], agnostic_nms=False, max_det=20,
+        ))
+        all_detections: list[list[tuple[np.ndarray, float]]] = []
+        for result in batch_results:
+            detections: list[tuple[np.ndarray, float]] = []
+            if result.boxes is not None and len(result.boxes) > 0:
+                for j in range(len(result.boxes)):
+                    conf = float(result.boxes.conf[j])
+                    if conf < detection_confidence:
+                        continue
+                    box = result.boxes.xyxy[j].cpu().numpy().astype(int)
+                    detections.append((box, conf))
+            all_detections.append(detections)
+        return all_detections
+
     def cleanup(self) -> None:
         self._yolo = None
         self._sam_predictor = None
@@ -261,6 +296,28 @@ class Sam3Backend:
                 logger.warning("SAM 3 prompt '%s' failed: %s", prompt_text, exc)
 
         return combined
+
+    def batch_detect_boxes(
+        self,
+        images: list[np.ndarray],
+        detection_confidence: float = 0.35,
+    ) -> list[list[tuple[np.ndarray, float]]]:
+        """Per-image detection via SAM 3. Returns bounding boxes from mask contours."""
+        all_detections: list[list[tuple[np.ndarray, float]]] = []
+        for image in images:
+            mask = self.detect_and_segment(image, ["person"], detection_confidence)
+            detections: list[tuple[np.ndarray, float]] = []
+            if mask.sum() > 0:
+                contours, _ = cv2.findContours(
+                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+                )
+                for cnt in contours:
+                    x, y, w, h = cv2.boundingRect(cnt)
+                    if w * h > 100:
+                        box = np.array([x, y, x + w, y + h])
+                        detections.append((box, 1.0))
+            all_detections.append(detections)
+        return all_detections
 
     def cleanup(self) -> None:
         self._model = None

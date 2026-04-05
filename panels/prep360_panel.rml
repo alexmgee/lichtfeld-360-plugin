@@ -17,14 +17,20 @@
   <!-- ══════════════════════════════════════════════════════════ -->
   <div data-if="show_processing">
     <div class="processing-block">
-      <span class="status-text status-muted">{{processing_stage_text}}</span>
-      <span class="status-text">{{processing_status_text}}</span>
-      <div class="progress-row">
-        <progress max="1" data-attr-value="processing_progress_value"></progress>
+      <div class="processing-header">
+        <span class="status-text status-muted">Current Step</span>
         <span class="progress__text">{{processing_progress_pct}}</span>
       </div>
-      <div class="completion-report processing-report">{{processing_log_text}}</div>
-      <button class="btn btn--error btn--full" data-event-click="cancel_pipeline">Cancel</button>
+      <span class="status-text processing-stage">{{processing_stage_text}}</span>
+      <span class="status-text processing-status">{{processing_status_text}}</span>
+      <div class="progress-row">
+        <progress max="1" data-attr-value="processing_progress_value"></progress>
+      </div>
+      <div class="processing-actions">
+        <span class="status-text status-muted">Recent Activity</span>
+        <button class="btn btn--error btn--compact" data-event-click="cancel_pipeline">Cancel</button>
+      </div>
+      <div class="completion-report processing-report">{{processing_recent_text}}</div>
     </div>
   </div>
 

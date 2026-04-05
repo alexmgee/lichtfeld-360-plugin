@@ -29,7 +29,6 @@ from typing import Callable, Optional
 from .colmap_runner import ColmapConfig, ColmapResult, ColmapRunner
 from .colmap_runner import infer_shared_pinhole_camera_params
 from .masker import Masker, MaskConfig, MaskResult, is_masking_available
-# CubemapProjection no longer used by masker but kept for potential future use
 from .overlap_mask import compute_overlap_masks
 from .presets import VIEW_PRESETS, ViewConfig
 from .reframer import Reframer
@@ -67,7 +66,7 @@ class PipelineConfig:
     enable_overlap_masks: bool = True  # Voronoi anti-overlap masks for COLMAP
 
     # Reframe
-    preset_name: str = "cubemap"
+    preset_name: str = "default"
     output_size: int = 1920
     jpeg_quality: int = 95
 

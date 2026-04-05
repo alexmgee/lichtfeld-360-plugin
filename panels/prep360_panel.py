@@ -228,7 +228,7 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("processing_status_text", lambda: self._processing_status)
         model.bind_func("processing_progress_value", lambda: f"{self._processing_progress / 100:.4f}")
         model.bind_func("processing_progress_pct", lambda: f"{self._processing_progress:.1f}%")
-        model.bind_func("processing_log_text", lambda: "\n".join(self._processing_log_lines))
+        model.bind_func("processing_recent_text", self._get_processing_recent_text)
         model.bind_func("show_error", lambda: bool(self._error_message))
         model.bind_func("error_text", lambda: self._error_message)
         model.bind_func("completion_summary_text", self._get_completion_summary_text)
@@ -380,6 +380,18 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _get_completion_report_text(self) -> str:
         return self._completion_report or "Run Process Only or Process & Import to capture timing and registration diagnostics."
+
+    def _get_processing_recent_text(self) -> str:
+        """Return a compact recent-activity view for the live processing card."""
+        lines = [
+            line for line in self._processing_log_lines
+            if line
+            and line != self._processing_stage
+            and line != self._processing_status
+        ]
+        if not lines:
+            return "Waiting for pipeline updates..."
+        return "\n".join(lines[-6:])
 
     def _get_matcher_and_tier(self) -> tuple[str, str]:
         matcher = (
