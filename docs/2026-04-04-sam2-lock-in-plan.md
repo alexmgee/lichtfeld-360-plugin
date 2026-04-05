@@ -1,7 +1,7 @@
 # SAM2 Lock-In Plan
 
 **Date:** 2026-04-04  
-**Status:** Metadata/installer path updated; verification in progress  
+**Status:** Metadata/installer path updated; lock-backed and verified  
 **Scope:** Make the currently working SAM2 masking environment reproducible from project metadata and lockfiles  
 **Non-goal:** No code changes or environment mutations are performed by this document
 
@@ -19,7 +19,7 @@ The current masking environment is now working again:
 
 The project has now been updated to model SAM2 as an explicit optional feature, and the installer path has been redirected away from `uv add sam2`.
 
-However, the environment is **not yet perfectly no-op against the lockfile** because the current live venv still contains some manually drifted package versions and dev packages.
+The environment is now effectively lock-backed for the video-tracking path.
 
 The original proof of the gap was the dry-run:
 
@@ -68,11 +68,9 @@ After the metadata and installer changes in this document:
   - `httpx`
   - `hf-xet`
 
-The remaining dry-run churn is now limited to:
+The remaining dry-run churn is now limited to a benign naming normalization on the direct `pycolmap` wheel:
 
-- dev packages excluded by `--no-dev`
-- version normalization of some packages that were manually installed during recovery
-- benign naming normalization on the direct `pycolmap` wheel
+- `pycolmap==4.0.2` ↔ `pycolmap==4.0.2+cuda`
 
 So the main SAM2 lock-in gap has been closed at the project-definition level.
 
@@ -260,7 +258,7 @@ uv sync --locked --no-dev --extra video-tracking --dry-run
 Current interpretation:
 
 - success: it no longer strips the SAM2 runtime stack
-- expected remaining churn: dev packages and manual version normalization
+- expected remaining churn: only the `pycolmap` naming normalization
 
 That means the project is now modeling the video-tracking feature correctly enough for future locked installs.
 
@@ -314,6 +312,8 @@ should be effectively a no-op for:
 - its support packages
 - `torch`
 - `torchvision`
+
+The only tolerated remaining difference is the direct-wheel display normalization for `pycolmap`.
 
 ## Runtime
 
@@ -377,13 +377,7 @@ Right now you have:
 
 - a working live env
 - a backup of that working env
-
-But you do **not** yet have:
-
 - a project definition that can reproduce the full working SAM2 stack on demand
+- an installer path that uses the locked `video-tracking` extra instead of `uv add sam2`
 
-The exact gap is now known.
-
-The fix is:
-
-> model SAM2 as a locked optional feature and make the installer use that locked feature path instead of `uv add sam2`.
+The main lock-in goal has been achieved.

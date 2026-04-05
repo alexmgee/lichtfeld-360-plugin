@@ -1,7 +1,7 @@
 # Default Masking Stabilization — Consolidated Report And Plan
 
 **Date:** 2026-04-04  
-**Status:** Baseline restored / lock-in planning active  
+**Status:** Baseline restored / lock-backed and verified  
 **Scope:** Default preset masking only  
 **Purpose:** Freeze the current understanding of the regression, separate code-state facts from environment drift, and define the exact recovery/investigation order before any more implementation changes.
 
@@ -29,6 +29,7 @@ The most important current facts are now:
   - `sam2.build_sam` importable
 - A masking-only rerun from the restored environment returned to the prior good mask quality.
 - A subsequent full plugin test run also produced good ERP masks and good pinhole masks.
+- A locked sync using `uv sync --locked --extra video-tracking` now preserves the working runtime.
 - Therefore, environment drift was the primary cause of the apparent masking regression.
 
 So the disciplined next move is:
@@ -162,6 +163,27 @@ This matches the known-good masking target.
 So the current CPU torch state is **not** best explained by “the repo is configured for CPU torch.”
 
 It is best explained by **venv drift from mixed package-management paths**.
+
+---
+
+## 6. The environment is now lock-backed in practice
+
+After the SAM2 lock-in work:
+
+- `uv sync --locked --extra video-tracking` succeeds against the live `.venv`
+- the environment remains on:
+  - `torch 2.11.0+cu128`
+  - `torchvision 0.26.0+cu128`
+  - CUDA enabled
+  - `sam2.build_sam` importable
+- the post-lock-sync masking smoke test still produces good masks
+
+The only remaining dry-run churn is a harmless normalization of the direct
+`pycolmap` wheel label:
+
+- `pycolmap==4.0.2` ↔ `pycolmap==4.0.2+cuda`
+
+That is not a functional masking concern.
 
 ---
 
@@ -365,9 +387,9 @@ Outcome:
 
 Current next step:
 
-1. lock the SAM2 path into project metadata
-2. keep the installer on a locked sync path for video tracking
-3. avoid future environment drift during masking work
+1. keep the installer on the locked `video-tracking` sync path
+2. avoid future environment drift during masking work
+3. re-apply optimizations carefully from this stable baseline
 
 ---
 
@@ -389,7 +411,7 @@ Status: passed
 
 ### Gate 4 — Lock-in work
 
-Status: active
+Status: passed
 
 ---
 
@@ -403,14 +425,17 @@ What is clear is:
 - some earlier code suspects have already been reverted/fixed
 - the runtime was restored to the known-good CUDA + SAM2 baseline
 - masking-only and full-plugin reruns returned to the prior good quality
+- the environment now survives `uv sync --locked --extra video-tracking`
 - the primary cause of the apparent regression was environment drift
-- the remaining work is to lock SAM2 into the project-managed environment
+- the remaining work is careful optimization re-application from the stabilized baseline
 
 So the next disciplined move is not more masking-code thrash.
 
 It is:
 
 > finish the SAM2 lock-in work so the current good baseline becomes reproducible from project metadata and lockfiles.
+
+That lock-in work is now complete enough to proceed with the next phase.
 
 ---
 
