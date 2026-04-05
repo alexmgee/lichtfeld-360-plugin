@@ -13,3 +13,4 @@ CLAUDE.md
 *.code-workspace
 .superpowers/
 .claude/
+dev/bp_harness_output/
