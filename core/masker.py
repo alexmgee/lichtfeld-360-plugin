@@ -32,6 +32,8 @@ from .reframer import create_rotation_matrix
 
 logger = logging.getLogger(__name__)
 
+CUBEMAP_DIRECT_CONFIDENCE = 0.35
+
 
 # ── Substage timing ─────────────────────────────────────────────
 
@@ -876,21 +878,19 @@ class Masker:
         self,
         images_dir: str | Path,
         masks_dir: str | Path,
-        person_directions: dict[str, np.ndarray | None],
         views: list[tuple[float, float, float, str, bool]],
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> MaskResult:
         """Direct per-view masking on already-reframed cubemap images.
 
-        Runs YOLO+SAM v1 detect_and_segment on each cubemap view image,
-        gated by Pass 1 person direction. Writes final COLMAP-polarity
-        masks directly to masks_dir/{view_name}/{frame_stem}.png.
+        Runs YOLO+SAM v1 detect_and_segment on every cubemap view image
+        and writes final COLMAP-polarity masks directly to
+        masks_dir/{view_name}/{frame_stem}.png.
 
         Args:
             images_dir: Directory containing reframed images in
                 {view_name}/{frame_stem}.jpg layout.
             masks_dir: Output directory for per-view masks.
-            person_directions: frame_stem → direction from estimate_person_directions.
             views: List of (yaw, pitch, fov, view_name, flip_v) from the preset.
             progress_callback: Optional (current, total, message) callback.
         """
@@ -904,8 +904,6 @@ class Masker:
         timer = _SubstageTimer()
         total_images = 0
         masked_count = 0
-        gated_in_count = 0
-        gated_out_count = 0
 
         # Collect all view images
         view_images: list[tuple[str, str, Path]] = []  # (view_name, frame_stem, path)
@@ -921,64 +919,42 @@ class Masker:
         if total_images == 0:
             return MaskResult(success=False, error=f"No images found in {images_dir}")
 
-        # Build a lookup from view_name → (yaw, pitch, fov)
-        view_geom = {name: (yaw, pitch, fov) for yaw, pitch, fov, name, _fv in views}
-
         # Per-view erosion kernel (matches reframer behavior)
         erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        unmasked_count = 0
 
         for idx, (view_name, frame_stem, img_path) in enumerate(view_images):
-            yaw, pitch, fov = view_geom[view_name]
-            direction = person_directions.get(frame_stem)
-
-            # Gate: check if this face could contain the person
-            with timer.time("cubemap_gate"):
-                if direction is not None:
-                    visible = self._cubemap_face_visible(yaw, pitch, fov, direction)
-                else:
-                    # No direction → segment all faces (safety rule)
-                    visible = True
-
             mask_view_dir = masks_path / view_name
             mask_view_dir.mkdir(parents=True, exist_ok=True)
             mask_out_path = mask_view_dir / f"{frame_stem}.png"
 
-            if not visible:
-                # Gated out → write all-white keep mask
-                with timer.time("cubemap_write_mask"):
-                    img = cv2.imread(str(img_path))
-                    if img is not None:
-                        h, w = img.shape[:2]
-                        keep_mask = np.full((h, w), 255, dtype=np.uint8)
-                        cv2.imwrite(str(mask_out_path), keep_mask)
-                gated_out_count += 1
-                logger.debug("  %s/%s: gated out", view_name, frame_stem)
+            with timer.time("cubemap_imread"):
+                img = cv2.imread(str(img_path))
+            if img is None:
+                continue
+
+            h, w = img.shape[:2]
+
+            with timer.time("cubemap_segment"):
+                detection_mask = self._backend.detect_and_segment(
+                    img,
+                    self.config.targets,
+                    detection_confidence=CUBEMAP_DIRECT_CONFIDENCE,
+                    single_primary_box=True,
+                )
+
+            # Convert: detection (1=detected) → COLMAP polarity (255=keep, 0=remove)
+            if detection_mask.sum() > 0:
+                keep_mask = ((detection_mask == 0).astype(np.uint8)) * 255
+                # Per-view erosion (erode keep region = dilate remove region)
+                keep_mask = cv2.erode(keep_mask, erode_kernel, iterations=1)
+                masked_count += 1
             else:
-                # Gated in → run detection + segmentation
-                gated_in_count += 1
-                with timer.time("cubemap_imread"):
-                    img = cv2.imread(str(img_path))
-                if img is None:
-                    continue
+                keep_mask = np.full((h, w), 255, dtype=np.uint8)
+                unmasked_count += 1
 
-                h, w = img.shape[:2]
-
-                with timer.time("cubemap_segment"):
-                    detection_mask = self._backend.detect_and_segment(
-                        img, self.config.targets,
-                    )
-
-                # Convert: detection (1=detected) → COLMAP polarity (255=keep, 0=remove)
-                if detection_mask.sum() > 0:
-                    keep_mask = ((detection_mask == 0).astype(np.uint8)) * 255
-                    # Per-view erosion (erode keep region = dilate remove region)
-                    keep_mask = cv2.erode(keep_mask, erode_kernel, iterations=1)
-                    masked_count += 1
-                else:
-                    keep_mask = np.full((h, w), 255, dtype=np.uint8)
-
-                with timer.time("cubemap_write_mask"):
-                    cv2.imwrite(str(mask_out_path), keep_mask)
+            with timer.time("cubemap_write_mask"):
+                cv2.imwrite(str(mask_out_path), keep_mask)
 
             if progress_callback:
                 progress_callback(
@@ -990,10 +966,10 @@ class Masker:
                 frame_num = (idx + 1) // len(views)
                 total_frames = total_images // max(len(views), 1)
                 print(f"[360] Cubemap masking: frame {frame_num}/{total_frames} "
-                      f"({gated_in_count} gated in, {gated_out_count} gated out)")
+                      f"({masked_count} views with detections, {unmasked_count} without)")
 
         print(f"[360] Cubemap masking complete: {masked_count} views with detections, "
-              f"{gated_in_count} segmented, {gated_out_count} gated out")
+              f"{unmasked_count} views without detections")
         timer.report()
 
         total_frames = total_images // max(len(views), 1)
