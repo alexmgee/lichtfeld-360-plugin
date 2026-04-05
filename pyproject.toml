@@ -1,7 +1,7 @@
 [project]
-name = "panosplat"
+name = "lichtfeld-360-plugin"
 version = "0.1.0"
-description = "360° video to Gaussian Splat — one-click pipeline with rig-aware COLMAP alignment"
+description = "360 video to Gaussian Splat scene with automated masking and rig support."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "GPL-3.0-or-later" }
@@ -11,6 +11,16 @@ dependencies = [
     "numpy",
     "pycolmap",
     "static-ffmpeg",
+    "ultralytics>=8.4.33",
+    "segment-anything>=1.0",
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+]
+
+[project.optional-dependencies]
+video-tracking = [
+    "sam2==1.1.0",
+    "huggingface-hub==1.9.0",
 ]
 
 [project.urls]
@@ -21,9 +31,26 @@ Issues = "https://github.com/alexmgee/lichtfeld-360-plugin/issues"
 pycolmap = [
   { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.0.2/pycolmap-4.0.2%2Bcuda-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
 ]
+torch = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [tool.lichtfeld]
 hot_reload = true
+display_name = "360 Plugin"
 plugin_api = ">=1,<2"
 lichtfeld_version = ">=0.5.0"
 required_features = []
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

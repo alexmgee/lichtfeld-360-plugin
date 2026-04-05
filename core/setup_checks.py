@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Alex Gee
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Centralized masking setup state detection."""
+"""Centralized masking setup state detection for two-tier backends."""
 from __future__ import annotations
 
 import logging
@@ -9,7 +9,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-SAM3_MODEL_ID = "facebook/sam3.1"
+SAM3_MODEL_ID = "facebook/sam3"
 
 _hf_access_cache: bool | None = None
 
@@ -18,41 +18,118 @@ _hf_access_cache: bool | None = None
 class MaskingSetupState:
     """Current state of masking dependencies."""
 
+    # Default tier (YOLO + SAM v1)
+    has_torch: bool = False
+    has_yolo: bool = False
+    has_sam1: bool = False
+
+    # Video tracking (SAM v2, optional)
+    has_sam2: bool = False
+
+    # Premium tier (SAM 3)
     has_token: bool = False
     has_access: bool = False
-    has_torch: bool = False
     has_sam3: bool = False
     has_weights: bool = False
 
     @property
+    def default_tier_ready(self) -> bool:
+        return self.has_torch and self.has_yolo and self.has_sam1
+
+    @property
+    def premium_tier_ready(self) -> bool:
+        return self.has_torch and self.has_sam3 and self.has_weights
+
+    @property
+    def active_backend(self) -> str | None:
+        """Return the best available backend.
+
+        SAM 3 is only active if installed and weights are present.
+        Falls back to YOLO+SAM v1 if available.
+        """
+        if self.premium_tier_ready:
+            return "sam3"
+        if self.default_tier_ready:
+            return "yolo_sam1"
+        return None
+
+    @property
     def is_ready(self) -> bool:
-        # If deps + weights are present, masking works regardless of token
-        # (token is only needed for initial download)
-        if self.has_torch and self.has_sam3 and self.has_weights:
-            return True
-        return all([
-            self.has_token, self.has_torch, self.has_sam3, self.has_weights,
-        ])
+        return self.active_backend is not None
 
     @property
     def first_incomplete_step(self) -> int:
-        """1 = HF access, 2 = dependencies, 3 = weights, 0 = all done."""
-        # If everything needed to run is present, skip all setup
-        if self.has_torch and self.has_sam3 and self.has_weights:
+        """For default tier setup: 0 = done, 1 = need deps."""
+        if self.default_tier_ready:
             return 0
-        if not self.has_token:
-            return 1
-        if not self.has_torch or not self.has_sam3:
-            return 2
-        if not self.has_weights:
+        return 1
+
+    @property
+    def video_tracking_ready(self) -> bool:
+        """Pass 2 uses SAM v2 temporal tracking."""
+        return self.default_tier_ready and self.has_sam2
+
+    @property
+    def capability_level(self) -> int:
+        """Masking capability level for UI reporting.
+
+        0 = nothing installed
+        1 = YOLO+SAM v1 (Pass 1 + fallback Pass 2)
+        2 = YOLO+SAM v1 + SAM v2 (full video tracking)
+        3 = SAM 3 (premium)
+        """
+        if self.premium_tier_ready:
             return 3
+        if self.video_tracking_ready:
+            return 2
+        if self.default_tier_ready:
+            return 1
         return 0
+
+
+def _check_torch_installed() -> bool:
+    try:
+        import torch  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _check_yolo_installed() -> bool:
+    try:
+        from ultralytics import YOLO  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _check_sam1_installed() -> bool:
+    try:
+        from segment_anything import SamPredictor  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _check_sam2_installed() -> bool:
+    try:
+        from sam2.build_sam import build_sam2_video_predictor_hf  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _check_sam3_installed() -> bool:
+    try:
+        from sam3.model_builder import build_sam3_image_model  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def _check_hf_token() -> bool:
     try:
         from huggingface_hub import get_token
-
         token = get_token()
         return token is not None and len(token) > 0
     except Exception:
@@ -60,7 +137,7 @@ def _check_hf_token() -> bool:
 
 
 def _check_hf_access() -> bool:
-    """Check if cached token has access to SAM 3.1 model.
+    """Check if cached token has access to SAM 3 model.
 
     Result is cached in-memory after first successful check to avoid
     network calls on every panel load.
@@ -70,7 +147,6 @@ def _check_hf_access() -> bool:
         return _hf_access_cache
     try:
         from huggingface_hub import get_token, model_info
-
         token = get_token()
         if not token:
             return False
@@ -83,29 +159,10 @@ def _check_hf_access() -> bool:
         return False
 
 
-def _check_torch_installed() -> bool:
-    try:
-        import torch  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
-
-def _check_sam3_installed() -> bool:
-    try:
-        from sam3.model_builder import build_sam3_multiplex_video_predictor  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
-
 def _check_weights_downloaded() -> bool:
-    """Check if SAM 3.1 weights exist in HuggingFace cache."""
+    """Check if SAM 3 weights exist in HuggingFace cache."""
     try:
         from huggingface_hub import try_to_load_from_cache
-
         result = try_to_load_from_cache(SAM3_MODEL_ID, "config.json")
         return result is not None and isinstance(result, str)
     except Exception:
@@ -114,22 +171,21 @@ def _check_weights_downloaded() -> bool:
 
 def check_masking_setup() -> MaskingSetupState:
     """Check all masking setup conditions. Returns current state."""
-    token = _check_hf_token()
-    access = _check_hf_access()
     torch_ok = _check_torch_installed()
-    sam3_ok = _check_sam3_installed()
-    weights = _check_weights_downloaded()
     return MaskingSetupState(
-        has_token=token,
-        has_access=access,
         has_torch=torch_ok,
-        has_sam3=sam3_ok,
-        has_weights=weights,
+        has_yolo=_check_yolo_installed(),
+        has_sam1=_check_sam1_installed(),
+        has_sam2=_check_sam2_installed(),
+        has_token=_check_hf_token(),
+        has_access=_check_hf_access(),
+        has_sam3=_check_sam3_installed(),
+        has_weights=_check_weights_downloaded(),
     )
 
 
 def verify_hf_token(token: str) -> bool:
-    """Verify a HuggingFace token has access to SAM 3.1.
+    """Verify a HuggingFace token has access to SAM 3.
 
     Saves the token via huggingface_hub.login() if valid.
     Returns True if token is valid and has model access.
@@ -137,7 +193,6 @@ def verify_hf_token(token: str) -> bool:
     global _hf_access_cache
     try:
         from huggingface_hub import login, model_info
-
         login(token=token)
         info = model_info(SAM3_MODEL_ID, token=token)
         if info is not None:
@@ -150,13 +205,12 @@ def verify_hf_token(token: str) -> bool:
 
 
 def download_model_weights() -> bool:
-    """Download SAM 3.1 model weights from HuggingFace.
+    """Download SAM 3 model weights from HuggingFace.
 
-    Returns True on success.
+    Returns True on success. Weights download eagerly (not on first use).
     """
     try:
         from huggingface_hub import snapshot_download
-
         snapshot_download(SAM3_MODEL_ID)
         return True
     except Exception as exc:
@@ -170,9 +224,6 @@ def download_model_weights() -> bool:
 
 _PLUGIN_DIR = Path(__file__).resolve().parent.parent
 _VENV_DIR = _PLUGIN_DIR / ".venv"
-_PYTORCH_INDEX = "https://download.pytorch.org/whl/cu128"
-
-
 def _find_uv() -> str:
     """Find uv binary — bundled with LFS or on PATH."""
     try:
@@ -186,42 +237,25 @@ def _find_uv() -> str:
     return shutil.which("uv") or ""
 
 
-def _venv_python() -> Path:
-    """Get the plugin venv's Python interpreter."""
-    import os
-    if os.name == "nt":
-        return _VENV_DIR / "Scripts" / "python.exe"
-    return _VENV_DIR / "bin" / "python"
-
-
-def install_torch_to_plugin_venv(on_output=None) -> bool:
-    """Install torch + torchvision into the plugin's own .venv/.
-
-    Uses the CUDA 12.8 PyTorch index (same as densification plugin).
-    """
+def _run_uv_command(args: list[str], on_output=None) -> bool:
+    """Run a uv command in the plugin directory. Returns True on success."""
     uv = _find_uv()
     if not uv:
-        logger.error("uv not found — cannot install torch")
-        return False
-
-    venv_py = _venv_python()
-    if not venv_py.exists():
-        logger.error("Plugin venv not found at %s", venv_py)
+        logger.error("uv not found — cannot install packages")
         return False
 
     import subprocess, os
-    cmd = [
-        uv, "pip", "install",
-        "torch", "torchvision",
-        "--extra-index-url", _PYTORCH_INDEX,
-        "--python", str(venv_py),
-    ]
+    cmd = [uv] + args
     flags = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    env = os.environ.copy()
+    uv_cache_dir = _PLUGIN_DIR / "tmp" / "uv-cache-runtime"
+    uv_cache_dir.mkdir(parents=True, exist_ok=True)
+    env.setdefault("UV_CACHE_DIR", str(uv_cache_dir))
 
-    logger.info("Installing torch: %s", " ".join(cmd))
+    logger.info("Running: %s", " ".join(cmd))
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, **flags,
+        text=True, cwd=str(_PLUGIN_DIR), env=env, **flags,
     )
     for line in proc.stdout:
         line = line.rstrip()
@@ -231,58 +265,197 @@ def install_torch_to_plugin_venv(on_output=None) -> bool:
     return proc.returncode == 0
 
 
-def install_sam3_to_plugin_venv(on_output=None) -> bool:
-    """Install sam3.1 + triton into the plugin's own .venv/.
+def install_default_tier(on_output=None) -> bool:
+    """Install YOLO + SAM v1 + torch into the plugin venv.
 
-    Installs from the GitHub repo (not PyPI) since sam3.1 requires
-    the facebookresearch/sam3 source with HuggingFace model access.
+    Syncs the locked project environment without the dev group.
+    PyTorch CUDA wheel selection is encoded in pyproject.toml/uv.lock.
+    Downloads SAM v1 ViT-H weights eagerly after install.
     """
-    uv = _find_uv()
-    if not uv:
-        logger.error("uv not found — cannot install sam3")
+    ok = _run_uv_command([
+        "sync",
+        "--locked",
+        "--no-dev",
+    ], on_output=on_output)
+    if not ok:
         return False
 
-    venv_py = _venv_python()
-    if not venv_py.exists():
-        logger.error("Plugin venv not found at %s", venv_py)
+    # Eagerly download SAM v1 ViT-H weights
+    try:
+        import os
+        import urllib.request
+        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "sam")
+        os.makedirs(cache_dir, exist_ok=True)
+        ckpt_path = os.path.join(cache_dir, "sam_vit_h_4b8939.pth")
+        if not os.path.exists(ckpt_path):
+            url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
+            if on_output:
+                on_output("Downloading SAM v1 ViT-H weights (~2.56 GB)...")
+            urllib.request.urlretrieve(url, ckpt_path)
+            if on_output:
+                on_output("SAM v1 weights downloaded.")
+    except Exception as exc:
+        logger.warning("SAM v1 weight download failed (will retry on first use): %s", exc)
+
+    return True
+
+
+def _try_import_sam2_c() -> bool:
+    """Try importing sam2._C, returning True on success.
+
+    On Windows, torch must be imported first so that CUDA runtime DLLs
+    are on the loader search path before the PE loader resolves _C.pyd's
+    dependencies.
+    """
+    try:
+        import torch  # noqa: F401  — seeds DLL search paths on Windows
+        from sam2 import _C  # noqa: F401
+        return True
+    except (ImportError, OSError):
         return False
 
-    import subprocess, os
-    flags = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 
-    # Install triton first (sam3 dependency)
-    cmd_triton = [
-        uv, "pip", "install", "triton",
-        "--python", str(venv_py),
-    ]
-    logger.info("Installing triton: %s", " ".join(cmd_triton))
-    proc = subprocess.Popen(
-        cmd_triton, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, **flags,
+def _normalize_acl(path: Path) -> None:
+    """Best-effort ACL normalization on Windows.
+
+    After copying _C.pyd, its ACL may inherit restrictive permissions
+    from the source or the copy operation.  Match the ACL of a known-good
+    file in the same directory (sam2/__init__.py) so the PE loader can
+    open it in the LichtFeld runtime.
+    """
+    import os
+    if os.name != "nt":
+        return
+    try:
+        sam2_dir = path.parent
+        reference = sam2_dir / "__init__.py"
+        if not reference.exists():
+            return
+        # icacls /reset clears inherited ACEs and reapplies parent defaults
+        import subprocess
+        subprocess.run(
+            ["icacls", str(path), "/reset"],
+            capture_output=True, check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except Exception as exc:
+        logger.debug("ACL normalization failed for %s: %s", path, exc)
+
+
+def _install_sam2_c_extension(on_output=None) -> bool:
+    """Copy the bundled _C.pyd into the installed sam2 package.
+
+    The sam2 PyPI package ships without the compiled CUDA extension for
+    connected-component mask hole-filling.  We pre-built it and bundle
+    it in lib/_C.pyd.  This copies it into the sam2 package so that
+    ``from sam2 import _C`` succeeds at runtime.
+
+    After copying, normalizes Windows ACLs and verifies the import
+    actually succeeds.  Returns True only if _C is importable after
+    this call.
+    """
+    bundled = _PLUGIN_DIR / "lib" / "_C.pyd"
+    if not bundled.exists():
+        logger.debug("No bundled _C.pyd found in lib/")
+        return False
+
+    try:
+        import sam2 as _sam2_pkg
+        sam2_dir = Path(_sam2_pkg.__file__).resolve().parent
+    except ImportError:
+        logger.debug("sam2 package not importable — skipping _C.pyd install")
+        return False
+
+    dest = sam2_dir / "_C.pyd"
+    needs_copy = not dest.exists() or dest.stat().st_size != bundled.stat().st_size
+
+    if needs_copy:
+        import shutil
+        shutil.copy2(str(bundled), str(dest))
+        _normalize_acl(dest)
+        logger.info("Installed _C.pyd into %s", sam2_dir)
+        if on_output:
+            on_output("Installed SAM v2 mask post-processing extension.")
+
+    # Verify the import actually works — file presence alone is not enough
+    if _try_import_sam2_c():
+        return True
+
+    # File is there but won't load — try ACL repair on existing file
+    if not needs_copy:
+        _normalize_acl(dest)
+        if _try_import_sam2_c():
+            logger.info("_C.pyd loaded after ACL repair")
+            return True
+
+    logger.warning(
+        "sam2._C extension is installed at %s but cannot be loaded. "
+        "SAM v2 will still work but mask hole-filling is disabled. "
+        "See docs/2026-04-04-sam2-c-extension-bundling.md for details.",
+        dest,
     )
-    for line in proc.stdout:
-        line = line.rstrip()
-        if line and on_output:
-            on_output(line)
-    proc.wait()
-    if proc.returncode != 0:
-        logger.error("triton installation failed")
+    return False
+
+
+def ensure_sam2_c_extension() -> None:
+    """Runtime safety net: install _C.pyd if missing from sam2 package.
+
+    Called from Sam2VideoBackend.initialize() before loading the model.
+    Imports torch first (seeds Windows DLL search paths), then attempts
+    to import sam2._C.  If the import fails, tries to copy and load the
+    bundled extension.  Logs a clear status message on permanent failure.
+    """
+    if _try_import_sam2_c():
+        return
+    _install_sam2_c_extension()
+
+
+def install_video_tracking(on_output=None) -> bool:
+    """Install SAM v2 for video tracking on synthetic views.
+
+    Requires torch already installed (from default tier).
+    Syncs the locked optional ``video-tracking`` extra instead of
+    mutating the environment ad hoc with ``uv add sam2``.
+    """
+    ok = _run_uv_command([
+        "sync",
+        "--locked",
+        "--no-dev",
+        "--extra", "video-tracking",
+    ], on_output=on_output)
+    if not ok:
         return False
 
-    # Install sam3 from GitHub
-    cmd_sam3 = [
-        uv, "pip", "install",
-        "sam3 @ git+https://github.com/facebookresearch/sam3.git",
-        "--python", str(venv_py),
-    ]
-    logger.info("Installing sam3: %s", " ".join(cmd_sam3))
-    proc = subprocess.Popen(
-        cmd_sam3, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, **flags,
-    )
-    for line in proc.stdout:
-        line = line.rstrip()
-        if line and on_output:
-            on_output(line)
-    proc.wait()
-    return proc.returncode == 0
+    # Install bundled _C.pyd (CUDA connected-components extension) into
+    # the sam2 package.  Without this, SAM v2 skips mask hole-filling
+    # post-processing and emits a warning on every propagation call.
+    _install_sam2_c_extension(on_output=on_output)
+
+    if on_output:
+        on_output("SAM v2 installed. Model weights download on first use.")
+    return True
+
+
+def install_premium_tier(on_output=None) -> bool:
+    """Install SAM 3 into the plugin venv.
+
+    Requires torch already installed (from default tier).
+    Downloads SAM 3 weights eagerly after install.
+    """
+    ok = _run_uv_command([
+        "add", "sam3",
+    ], on_output=on_output)
+    if not ok:
+        return False
+
+    # Eagerly download SAM 3 weights
+    try:
+        if on_output:
+            on_output("Downloading SAM 3 weights (~3.5 GB)...")
+        download_model_weights()
+        if on_output:
+            on_output("SAM 3 weights downloaded.")
+    except Exception as exc:
+        logger.warning("SAM 3 weight download failed: %s", exc)
+
+    return True

@@ -5,10 +5,11 @@ Pipeline Orchestrator — wires all core modules into a single processing flow.
 
 Stages and progress allocation:
   1. Sharpest frame extraction      (0-20%)
-  2. Operator masking via SAM 3.1   (20-35%, skipped if disabled)
-  3. Reframe ERP to pinhole         (35-50%)
-  4. Generate rig config            (50-51%)
-  5. COLMAP alignment               (51-85%)
+  2. Operator masking                (20-45%, skipped if disabled)
+  3. Reframe ERP to pinhole         (45-55%)
+  3.5 Closest-camera overlap masks  (55-56%, if masking enabled)
+  4. Generate rig config            (56-57%)
+  5. COLMAP alignment               (57-85%)
   6. Write output dataset           (85-95%)
   7. Return result                   (95-100%)
 
@@ -27,7 +28,9 @@ from typing import Callable, Optional
 
 from .colmap_runner import ColmapConfig, ColmapResult, ColmapRunner
 from .colmap_runner import infer_shared_pinhole_camera_params
-from .masker import Masker, MaskConfig, is_masking_available
+from .masker import Masker, MaskConfig, MaskResult, is_masking_available
+# CubemapProjection no longer used by masker but kept for potential future use
+from .overlap_mask import compute_overlap_masks
 from .presets import VIEW_PRESETS, ViewConfig
 from .reframer import Reframer
 from .rig_config import write_rig_config
@@ -60,6 +63,8 @@ class PipelineConfig:
     # Masking
     enable_masking: bool = False
     mask_prompts: list[str] = field(default_factory=lambda: ["person"])
+    mask_backend: Optional[str] = None  # "sam3", "yolo_sam1", or None (auto)
+    enable_overlap_masks: bool = True  # Voronoi anti-overlap masks for COLMAP
 
     # Reframe
     preset_name: str = "cubemap"
@@ -253,7 +258,6 @@ class PipelineJob:
         # Sub-directories
         extracted_dir = out / "extracted"
         frames_dir = extracted_dir / "frames"
-        erp_masks_dir = extracted_dir / "masks"
         images_dir = out / "images"
         sparse_dir = out / "sparse"
 
@@ -296,79 +300,202 @@ class PipelineJob:
             raise RuntimeError("Cancelled")
 
         # ===================================================================
-        # Stage 2: Operator Masking (20-35%, skipped if disabled)
+        # Stage 2+3: Masking and Reframing
+        #
+        # The order depends on the preset:
+        #   Default:  Mask (ERP) → Reframe (images + masks)
+        #   Cubemap:  Reframe (images only) → Mask (per-view direct)
         # ===================================================================
-        reframe_mask_dir: Optional[str] = None
-        if cfg.enable_masking and is_masking_available():
-            self._update("masking", 20.0, "Initializing SAM 3.1...")
+        view_config = _build_runtime_view_config(cfg)
+        preset_signature = _format_preset_signature(cfg.preset_name, view_config)
+        mask_result: Optional[MaskResult] = None
+        is_cubemap = cfg.preset_name == "cubemap"
 
-            masker = Masker(MaskConfig(prompts=cfg.mask_prompts))
+        if is_cubemap and cfg.enable_masking and is_masking_available():
+            # ── Cubemap path: reframe images first, then mask per-view ──
+
+            # Stage 3 first: reframe images only (no masks)
+            self._update("reframe", 20.0, "Reframing to cubemap views...")
+            reframer = Reframer(view_config)
+
+            def _reframe_progress(cur: int, total: int, filename: str) -> None:
+                pct = 20 + (cur / max(total, 1)) * 10
+                self._update("reframe", pct, f"Reframing {cur}/{total}: {filename}")
+
+            reframe_result = reframer.reframe_batch(
+                input_dir=str(frames_dir),
+                output_dir=str(images_dir),
+                mask_dir=None,  # no ERP masks for cubemap
+                progress_callback=_reframe_progress,
+            )
+
+            if not reframe_result.success and reframe_result.output_count == 0:
+                errors = "; ".join(reframe_result.errors) if reframe_result.errors else "unknown"
+                raise RuntimeError(f"Reframing failed: {errors}")
+
+            num_output_images = reframe_result.output_count
+            logger.debug("Reframe: input_count=%d, output_count=%d",
+                          reframe_result.input_count, reframe_result.output_count)
+
+            if self._check_cancel():
+                raise RuntimeError("Cancelled")
+
+            # Stage 2: direct per-view masking on reframed images
+            self._update("masking", 30.0, "Initializing masking backend...")
+
+            mask_cfg = MaskConfig(
+                targets=cfg.mask_prompts,
+                output_size=cfg.output_size,
+                backend_preference=cfg.mask_backend,
+                views=view_config.get_all_views(),
+                enable_synthetic=False,  # no synthetic pipeline for cubemap
+            )
+            masker = Masker(mask_cfg)
             masker.initialize()
 
             try:
                 def _mask_progress(cur: int, total: int, msg: str) -> None:
-                    pct = 20 + (cur / max(total, 1)) * 15
+                    pct = 30 + (cur / max(total, 1)) * 15
                     self._update("masking", pct, msg)
 
-                mask_result = masker.process_frames(
+                # Pass 1: direction estimation on ERP frames
+                person_directions = masker.estimate_person_directions(
                     str(frames_dir),
-                    str(erp_masks_dir),
                     progress_callback=_mask_progress,
                 )
 
-                if mask_result.success and mask_result.masked_frames > 0:
-                    reframe_mask_dir = str(erp_masks_dir)
+                if self._check_cancel():
+                    raise RuntimeError("Cancelled")
+
+                # Direct per-view masking on reframed cubemap images
+                cubemap_masks_dir = out / "masks"
+                mask_result = masker.process_reframed_views(
+                    images_dir,
+                    cubemap_masks_dir,
+                    person_directions=person_directions,
+                    views=view_config.get_all_views(),
+                    progress_callback=_mask_progress,
+                )
             finally:
                 masker.cleanup()
 
             if self._check_cancel():
                 raise RuntimeError("Cancelled")
 
+        else:
+            # ── Default path: mask ERP first, then reframe images + masks ──
+
+            erp_masks_dir = extracted_dir / "masks"
+            reframe_mask_dir: Optional[str] = None
+
+            if cfg.enable_masking and is_masking_available():
+                self._update("masking", 20.0, "Initializing masking backend...")
+
+                mask_cfg = MaskConfig(
+                    targets=cfg.mask_prompts,
+                    output_size=cfg.output_size,
+                    backend_preference=cfg.mask_backend,
+                    views=view_config.get_all_views(),
+                )
+                masker = Masker(mask_cfg)
+                masker.initialize()
+
+                try:
+                    def _mask_progress(cur: int, total: int, msg: str) -> None:
+                        pct = 20 + (cur / max(total, 1)) * 25
+                        self._update("masking", pct, msg)
+
+                    mask_result = masker.process_frames(
+                        str(frames_dir),
+                        str(erp_masks_dir),
+                        progress_callback=_mask_progress,
+                    )
+
+                    if mask_result.success and mask_result.masked_frames > 0:
+                        reframe_mask_dir = str(erp_masks_dir)
+                finally:
+                    masker.cleanup()
+
+                if self._check_cancel():
+                    raise RuntimeError("Cancelled")
+
+            # Stage 3: reframe images (+ masks if available)
+            self._update("reframe", 45.0, "Reframing to pinhole views...")
+            reframer = Reframer(view_config)
+
+            def _reframe_progress(cur: int, total: int, filename: str) -> None:
+                pct = 45 + (cur / max(total, 1)) * 10
+                self._update("reframe", pct, f"Reframing {cur}/{total}: {filename}")
+
+            reframe_result = reframer.reframe_batch(
+                input_dir=str(frames_dir),
+                output_dir=str(images_dir),
+                mask_dir=reframe_mask_dir,
+                progress_callback=_reframe_progress,
+            )
+
+            if not reframe_result.success and reframe_result.output_count == 0:
+                errors = "; ".join(reframe_result.errors) if reframe_result.errors else "unknown"
+                raise RuntimeError(f"Reframing failed: {errors}")
+
+            num_output_images = reframe_result.output_count
+            logger.debug("Reframe: input_count=%d, output_count=%d",
+                          reframe_result.input_count, reframe_result.output_count)
+
+            if self._check_cancel():
+                raise RuntimeError("Cancelled")
+
         # ===================================================================
-        # Stage 3: Reframe ERP -> Pinhole (35-50%)
+        # Stage 3.5: Closest-Camera Overlap Masks (55-56%)
         # ===================================================================
-        self._update("reframe", 35.0, "Reframing to pinhole views...")
+        # Voronoi masks partition overlapping regions so COLMAP doesn't
+        # extract duplicate features. Written to a temporary directory
+        # (extracted/colmap_masks/) that COLMAP reads from. The permanent
+        # masks/ directory keeps operator-only masks for LFS training.
+        colmap_masks_dir: Optional[Path] = None
+        if cfg.enable_masking and cfg.enable_overlap_masks and mask_result and mask_result.success:
+            self._update("overlap_masks", 55.0, "Computing overlap masks...")
+            views = view_config.get_all_views()
+            overlap_masks = compute_overlap_masks(views, cfg.output_size)
+            if overlap_masks is not None:
+                import cv2
+                import shutil
+                operator_masks_dir = out / "masks"
+                colmap_masks_dir = extracted_dir / "colmap_masks"
+                # Copy operator masks to temp dir, then AND with Voronoi
+                if colmap_masks_dir.exists():
+                    shutil.rmtree(colmap_masks_dir)
+                shutil.copytree(operator_masks_dir, colmap_masks_dir)
+                for view_name, voronoi_mask in overlap_masks.items():
+                    view_mask_dir = colmap_masks_dir / view_name
+                    if not view_mask_dir.is_dir():
+                        continue
+                    for mask_file in view_mask_dir.iterdir():
+                        if mask_file.suffix.lower() != ".png":
+                            continue
+                        operator_mask = cv2.imread(
+                            str(mask_file), cv2.IMREAD_GRAYSCALE
+                        )
+                        if operator_mask is None:
+                            continue
+                        combined = cv2.bitwise_and(operator_mask, voronoi_mask)
+                        cv2.imwrite(str(mask_file), combined)
 
-        view_config = _build_runtime_view_config(cfg)
-        preset_signature = _format_preset_signature(cfg.preset_name, view_config)
-
-        reframer = Reframer(view_config)
-
-        # reframe_mask_dir is set by Stage 2 if masking succeeded
-
-        def _reframe_progress(cur: int, total: int, filename: str) -> None:
-            pct = 35 + (cur / max(total, 1)) * 15
-            self._update("reframe", pct, f"Reframing {cur}/{total}: {filename}")
-
-        reframe_result = reframer.reframe_batch(
-            input_dir=str(frames_dir),
-            output_dir=str(images_dir),
-            mask_dir=reframe_mask_dir,
-            progress_callback=_reframe_progress,
-        )
-
-        if not reframe_result.success and reframe_result.output_count == 0:
-            errors = "; ".join(reframe_result.errors) if reframe_result.errors else "unknown"
-            raise RuntimeError(f"Reframing failed: {errors}")
-
-        num_output_images = reframe_result.output_count
-        print(f"[DEBUG] Reframe: input_count={reframe_result.input_count}, output_count={reframe_result.output_count}")
-
-        if self._check_cancel():
-            raise RuntimeError("Cancelled")
+            if self._check_cancel():
+                raise RuntimeError("Cancelled")
 
         # ===================================================================
-        # Stage 4: Generate Rig Config (50-51%)
+        # Stage 4: Generate Rig Config (56-57%)
         # ===================================================================
-        self._update("rig_config", 50.0, "Generating rig configuration...")
+        self._update("rig_config", 56.0, "Generating rig configuration...")
 
         rig_config_path = str(out / "rig_config.json")
         write_rig_config(view_config, rig_config_path)
 
         # ===================================================================
-        # Stage 5: COLMAP Alignment (51-85%)
+        # Stage 5: COLMAP Alignment (57-85%)
         # ===================================================================
-        self._update("colmap", 51.0, "Running COLMAP alignment...")
+        self._update("colmap", 57.0, "Running COLMAP alignment...")
 
         view_fovs = [fov for _yaw, _pitch, fov, _name, _flip in view_config.get_all_views()]
         camera_params, default_focal_length_factor, _shared_fov_deg = (
@@ -387,21 +514,28 @@ class PipelineJob:
 
         def _colmap_progress(stage: str, pct: float, msg: str) -> None:
             # ColmapRunner reports pct as 0.0-1.0 per sub-stage
-            self._update("colmap", 51 + pct * 34, msg)
+            self._update("colmap", 57 + pct * 28, msg)
 
-        # Pass mask directory to COLMAP if masks were generated
-        colmap_mask_path = out / "masks"
+        # Pass mask directory to COLMAP if masks were generated.
+        # Use Voronoi-combined masks (colmap_masks_dir) if available,
+        # otherwise fall back to operator-only masks.
+        effective_mask_path = colmap_masks_dir or (out / "masks")
         runner = ColmapRunner(
             images_dir=str(images_dir),
             output_dir=str(out),
             rig_config_path=rig_config_path,
-            mask_path=str(colmap_mask_path) if colmap_mask_path.is_dir() else None,
+            mask_path=str(effective_mask_path) if effective_mask_path.is_dir() else None,
             config=colmap_config,
             on_progress=_colmap_progress,
             cancel_check=self._check_cancel,
         )
 
         colmap_result = runner.run()
+
+        # Clean up temporary COLMAP masks
+        if colmap_masks_dir and colmap_masks_dir.is_dir():
+            import shutil
+            shutil.rmtree(colmap_masks_dir)
 
         if not colmap_result.success:
             raise RuntimeError(f"COLMAP failed: {colmap_result.error}")
