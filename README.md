@@ -7,9 +7,10 @@ Process 360° video into COLMAP-aligned datasets ready for Gaussian Splatting �
 Takes a 360° equirectangular video and produces a complete COLMAP dataset:
 
 1. **Extract** frames from your video — four sharpness levels from instant (interval-only) to thorough (full blur analysis with scene detection)
-2. **Reframe** each equirectangular frame into pinhole perspective views — four presets from Cubemap (6 views) to High (18 views per frame)
-3. **Align** all views using COLMAP — sequential or exhaustive matching with rig-aware constraints
-4. **Import** the result directly into LichtFeld Studio for training
+2. **Mask** the camera operator automatically — with ERP masks, per-view masks, and SAM2 video tracking on the Default path when video tracking is installed
+3. **Reframe** each equirectangular frame into pinhole perspective views — currently either the Default 16-view layout or the 6-view Cubemap layout
+4. **Align** all views using COLMAP — sequential or exhaustive matching with rig-aware constraints
+5. **Import** the result directly into LichtFeld Studio for training
 
 ## Installation
 
@@ -40,7 +41,7 @@ Then restart LichtFeld Studio.
    `FPS` controls how often frames are extracted from the video, and `Sharpness` controls how carefully the plugin searches each interval for the best frame.
 
    **Reframe & Alignment**
-   `Preset` controls how many pinhole views are generated from each 360 frame, and `Matcher` controls how COLMAP searches for matching image pairs across the sequence.
+   `Preset` controls which virtual camera layout is generated from each 360 frame, and `Matcher` controls how COLMAP searches for matching image pairs across the sequence.
 
    **Output Quality**
    `Crop Size` sets the resolution of each pinhole view, `Match Limit` chooses one of the built-in COLMAP matching tiers, and `Max. Matches` sets the actual per-pair correspondence cap COLMAP may keep.
@@ -50,6 +51,7 @@ After every run, the panel's **Run Diagnostics** block shows:
 
 - stage timings
 - matcher, match-limit tier, and max-match setting
+- mask backend and video backend used during the run
 - extracted frames vs written images
 - registered rig frames and images
 - per-view registration counts
@@ -62,15 +64,19 @@ The plugin creates a standard COLMAP dataset layout:
 ```
 output_dir/
 ├── extracted/
-│   └── frames/       source equirectangular frames
+│   ├── frames/       source equirectangular frames
+│   └── masks/        ERP masks for the Default preset when masking is enabled
 ├── images/           reframed pinhole views grouped by virtual camera
 │   ├── 00_00/
 │   │   ├── frame_0001.jpg
 │   │   └── frame_0002.jpg
 │   ├── 00_01/
 │   └── ...
+├── masks/            final per-view masks grouped by virtual camera when masking is enabled
 ├── sparse/
 │   └── 0/            COLMAP reconstruction
+├── timing.json       timing and registration summary
+├── colmap_debug.log  detailed COLMAP log
 ├── database.db
 └── rig_config.json
 ```
@@ -79,14 +85,27 @@ The `images/` tree is camera-first on purpose: COLMAP's rig workflow uses the
 folder prefix to identify the virtual sensor, and the shared filename across
 folders to group the images into rig frames.
 
-## Reframing Presets
+## Current Presets
 
 | Preset | Views | Description |
 |--------|-------|-------------|
-| Cubemap | 6 | 4 horizon at 90° FOV, top and bottom faces |
-| Low | 9 | 5 horizon, 1 above, 2 below, 1 forward at 75° FOV |
-| Medium | 14 | 5 horizon, 4 above, 4 below, zenith at 65° FOV |
-| High | 18 | 4 upper, 9 lower, zenith, nadir, 4 mid-upper at 65° FOV |
+| Default | 16 | Two-ring FullCircle-style layout at `±35°` pitch with `90°` FOV. This is the highest-confidence preset and the current mainline path. |
+| Cubemap | 6 | 4 horizon faces plus top and bottom at `90°` FOV. This is the faster preset with less reconstruction redundancy than Default. |
+
+## Masking
+
+When masking is enabled, PanoSplat produces:
+
+- ERP masks during the Default preset path
+- final per-view masks in `masks/`
+- backend reporting in the run diagnostics summary
+
+Current masking behavior:
+
+- **Default** uses the full ERP masking path and, when video tracking is installed, runs SAM2-backed video propagation
+- **Cubemap** masks the 6 final cubemap faces directly and skips the heavier Default synthetic path
+
+The diagnostics summary now records which backends were actually used during the run so you can tell whether SAM2 video tracking was active or whether the plugin fell back to the simpler image-only path.
 
 
 ## Extraction Sharpness
@@ -155,6 +174,16 @@ Successful and failed runs both write debug artifacts into the output folder:
 
 These same results are surfaced in the panel's **Run Diagnostics** summary so you can
 inspect registration behavior without digging through the Python console.
+
+## Key Project Notes
+
+If you want the current technical status instead of the full historical paper trail,
+start with:
+
+- [Default masking stabilization report](docs/2026-04-04-default-masking-stabilization-report-and-plan.md)
+- [Default optimization phases 0-4 complete](docs/2026-04-05-optimization-phases-0-4-complete.md)
+- [Cubemap status report](docs/2026-04-05-cubemap-status-report.md)
+- [Docs index](docs/README.md)
 
 ## Credits
 
