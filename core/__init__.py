@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Alex Gee
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""PanoSplat core processing modules."""
+"""360 Plugin core processing modules."""
 
 from .analyzer import VideoAnalyzer, VideoInfo
 from .backends import (
