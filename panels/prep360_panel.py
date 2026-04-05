@@ -145,6 +145,7 @@ class PanoSplatPanel(lf.ui.Panel):
         self._processing_stage: str = ""
         self._processing_status: str = ""
         self._processing_progress: float = 0.0
+        self._processing_log_lines: list[str] = []
         self._error_message: str = ""
         self._completion_summary: str = ""
         self._completion_report: str = ""
@@ -227,6 +228,7 @@ class PanoSplatPanel(lf.ui.Panel):
         model.bind_func("processing_status_text", lambda: self._processing_status)
         model.bind_func("processing_progress_value", lambda: f"{self._processing_progress / 100:.4f}")
         model.bind_func("processing_progress_pct", lambda: f"{self._processing_progress:.1f}%")
+        model.bind_func("processing_log_text", lambda: "\n".join(self._processing_log_lines))
         model.bind_func("show_error", lambda: bool(self._error_message))
         model.bind_func("error_text", lambda: self._error_message)
         model.bind_func("completion_summary_text", self._get_completion_summary_text)
@@ -298,10 +300,21 @@ class PanoSplatPanel(lf.ui.Panel):
             self._is_processing,
             self._processing_stage,
             self._processing_progress,
+            tuple(self._processing_log_lines),
             self._error_message,
             self._completion_summary,
             self._completion_report,
         )
+
+    def _append_processing_log(self, line: str) -> None:
+        line = line.strip()
+        if not line:
+            return
+        if self._processing_log_lines and self._processing_log_lines[-1] == line:
+            return
+        self._processing_log_lines.append(line)
+        if len(self._processing_log_lines) > 14:
+            self._processing_log_lines = self._processing_log_lines[-14:]
 
     # ── Computed text helpers ─────────────────────────────────
 
@@ -457,6 +470,13 @@ class PanoSplatPanel(lf.ui.Panel):
         lines.append(f"Max. matches: {self._colmap_max_num_matches:,} per pair")
         if result.preset_signature:
             lines.append(f"Preset geometry: {result.preset_signature}")
+        if result.mask_backend_name:
+            lines.append(f"Mask backend: {result.mask_backend_name}")
+        if result.video_backend_name:
+            suffix = " (fallback used)" if result.used_fallback_video_backend else ""
+            lines.append(f"Video backend: {result.video_backend_name}{suffix}")
+        if result.video_backend_error:
+            lines.append(f"Video backend error: {result.video_backend_error}")
 
         output_root = Path(self._output_path) if self._output_path else None
         if output_root:
@@ -537,11 +557,11 @@ class PanoSplatPanel(lf.ui.Panel):
             "success": False,
             "total_sec": round(total, 3),
             "stages": timing_dict,
-            "result": {
-                "source_frames": result.num_source_frames,
-                "output_images": result.num_output_images,
-                "aligned_cameras": result.num_aligned_cameras,
-                "matcher": matcher,
+                "result": {
+                    "source_frames": result.num_source_frames,
+                    "output_images": result.num_output_images,
+                    "aligned_cameras": result.num_aligned_cameras,
+                    "matcher": matcher,
                 "match_budget_tier": tier,
                 "max_num_matches": self._colmap_max_num_matches,
                 "preset_geometry": result.preset_signature,
@@ -552,13 +572,17 @@ class PanoSplatPanel(lf.ui.Panel):
                 "dropped_rig_frames": max(
                     result.num_source_frames - result.num_registered_frames, 0
                 ),
-                "registered_images_by_view": result.registered_images_by_view,
-                "expected_images_by_view": result.expected_images_by_view,
-                "partial_frame_examples": result.partial_frame_examples,
-                "dropped_frame_examples": result.dropped_frame_examples,
-                "error": self._error_message,
-            },
-        }
+                    "registered_images_by_view": result.registered_images_by_view,
+                    "expected_images_by_view": result.expected_images_by_view,
+                    "partial_frame_examples": result.partial_frame_examples,
+                    "dropped_frame_examples": result.dropped_frame_examples,
+                    "mask_backend": result.mask_backend_name,
+                    "video_backend": result.video_backend_name,
+                    "used_fallback_video_backend": result.used_fallback_video_backend,
+                    "video_backend_error": result.video_backend_error,
+                    "error": self._error_message,
+                },
+            }
         if report_error:
             timing_output["report_error"] = report_error
         timing_path.write_text(json.dumps(timing_output, indent=2))
@@ -577,6 +601,13 @@ class PanoSplatPanel(lf.ui.Panel):
         lines.append(f"Max. matches: {self._colmap_max_num_matches:,} per pair")
         if result.preset_signature:
             lines.append(f"Preset geometry: {result.preset_signature}")
+        if result.mask_backend_name:
+            lines.append(f"Mask backend: {result.mask_backend_name}")
+        if result.video_backend_name:
+            suffix = " (fallback used)" if result.used_fallback_video_backend else ""
+            lines.append(f"Video backend: {result.video_backend_name}{suffix}")
+        if result.video_backend_error:
+            lines.append(f"Video backend error: {result.video_backend_error}")
 
         if result.views_per_frame > 0:
             dropped_frames = max(result.num_source_frames - result.num_registered_frames, 0)
@@ -989,8 +1020,12 @@ class PanoSplatPanel(lf.ui.Panel):
         self._processing_stage = "Starting..."
         self._processing_status = ""
         self._processing_progress = 0.0
+        self._processing_log_lines = []
         self._completion_summary = ""
         self._completion_report = ""
+        self._append_processing_log(f"Preset: {PRESET_LABELS[self._preset_idx]}")
+        self._append_processing_log(f"Output: {self._output_path}")
+        self._append_processing_log("Pipeline queued.")
 
         self._job = PipelineJob(
             config,
@@ -1007,6 +1042,7 @@ class PanoSplatPanel(lf.ui.Panel):
         if self._job:
             self._job.cancel()
             self._processing_status = "Cancelling..."
+            self._append_processing_log("Cancellation requested.")
             if self._handle:
                 self._handle.dirty_all()
 
@@ -1041,9 +1077,13 @@ class PanoSplatPanel(lf.ui.Panel):
         now = time.time()
 
         with self._pending_lock:
+            prev_stage = self._timing_current_stage
             self._processing_stage = self._STAGE_LABELS.get(stage, stage)
             self._processing_progress = percent
             self._processing_status = message
+            if stage != prev_stage:
+                self._append_processing_log(self._processing_stage)
+            self._append_processing_log(message)
 
             # -- Timing accumulation --
 
@@ -1128,6 +1168,7 @@ class PanoSplatPanel(lf.ui.Panel):
             self._processing_stage = ""
             self._processing_status = ""
             self._processing_progress = 0.0
+            self._processing_log_lines = []
             self._error_message = result.error or f"Failed to render diagnostics: {exc}"
             summary, report = self._build_minimal_failure_report(
                 result,
@@ -1227,6 +1268,10 @@ class PanoSplatPanel(lf.ui.Panel):
                         "expected_images_by_view": result.expected_images_by_view,
                         "partial_frame_examples": result.partial_frame_examples,
                         "dropped_frame_examples": result.dropped_frame_examples,
+                        "mask_backend": result.mask_backend_name,
+                        "video_backend": result.video_backend_name,
+                        "used_fallback_video_backend": result.used_fallback_video_backend,
+                        "video_backend_error": result.video_backend_error,
                     },
                 }
                 timing_path.write_text(json.dumps(timing_output, indent=2))

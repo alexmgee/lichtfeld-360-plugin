@@ -100,6 +100,10 @@ class PipelineResult:
     partial_frame_examples: list[str] = field(default_factory=list)
     dropped_frame_examples: list[str] = field(default_factory=list)
     preset_signature: str = ""
+    mask_backend_name: str = ""
+    video_backend_name: str = ""
+    used_fallback_video_backend: bool = False
+    video_backend_error: str = ""
     elapsed_sec: float = 0.0
     error: str = ""
 
@@ -580,5 +584,11 @@ class PipelineJob:
             partial_frame_examples=colmap_result.partial_frame_examples,
             dropped_frame_examples=colmap_result.dropped_frame_examples,
             preset_signature=preset_signature,
+            mask_backend_name=mask_result.backend_name if mask_result else "",
+            video_backend_name=mask_result.video_backend_name if mask_result else "",
+            used_fallback_video_backend=(
+                mask_result.used_fallback_video_backend if mask_result else False
+            ),
+            video_backend_error=mask_result.video_backend_error if mask_result else "",
             elapsed_sec=elapsed,
         )

@@ -23,6 +23,7 @@
         <progress max="1" data-attr-value="processing_progress_value"></progress>
         <span class="progress__text">{{processing_progress_pct}}</span>
       </div>
+      <div class="completion-report processing-report">{{processing_log_text}}</div>
       <button class="btn btn--error btn--full" data-event-click="cancel_pipeline">Cancel</button>
     </div>
   </div>

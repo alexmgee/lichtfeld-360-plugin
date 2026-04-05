@@ -537,6 +537,10 @@ class MaskResult:
     masked_frames: int = 0
     masks_dir: str = ""
     error: str = ""
+    backend_name: str = ""
+    video_backend_name: str = ""
+    used_fallback_video_backend: bool = False
+    video_backend_error: str = ""
 
 
 def _dilate_detection_mask(mask: np.ndarray, px: int) -> np.ndarray:
@@ -747,6 +751,10 @@ class Masker:
         self.config = config or MaskConfig()
         self._backend: MaskingBackend | None = None
         self._video_backend: VideoTrackingBackend | None = None
+        self._backend_name: str = ""
+        self._video_backend_name: str = ""
+        self._used_fallback_video_backend: bool = False
+        self._video_backend_error: str = ""
         # Cached remap tables for DETECTION_LAYOUT — keyed on
         # (detection_size, erp_w, erp_h). Built once on first frame.
         self._detection_remap_cache: list[tuple[np.ndarray, np.ndarray]] | None = None
@@ -763,6 +771,10 @@ class Masker:
                 "Install ultralytics + segment-anything for default tier."
             )
         self._backend.initialize()
+        self._backend_name = type(self._backend).__name__
+        self._used_fallback_video_backend = False
+        self._video_backend_error = ""
+        self._video_backend_name = ""
 
         if self.config.enable_synthetic:
             self._video_backend = get_video_backend(
@@ -771,7 +783,9 @@ class Masker:
                 targets=self.config.targets,
             )
             if self._video_backend is not None:
-                logger.debug("Pass 2 video backend: %s", type(self._video_backend).__name__)
+                self._video_backend_name = type(self._video_backend).__name__
+                logger.debug("Pass 2 video backend: %s", self._video_backend_name)
+                print(f"[360] Pass 2 backend: {self._video_backend_name}")
                 self._video_backend.initialize()
 
     def cleanup(self) -> None:
@@ -978,6 +992,7 @@ class Masker:
             total_frames=total_frames,
             masked_frames=masked_count,
             masks_dir=str(masks_path),
+            backend_name=self._backend_name,
         )
 
     def _primary_detection(
@@ -1262,6 +1277,8 @@ class Masker:
         masked_count = 0
         detection_size = None
         timer = _SubstageTimer()
+        self._used_fallback_video_backend = False
+        self._video_backend_error = ""
 
         try:
             # ── Phase 1: Primary detection ────────────────────────
@@ -1331,10 +1348,12 @@ class Masker:
                               f"{n_replaced}/{len(synthetic_masks)} frames "
                               f"(rest kept Pass 1)")
                     except Exception as exc:
+                        self._video_backend_error = str(exc)
                         logger.warning(
                             "Video backend failed, falling back to "
                             "per-frame detection: %s", exc,
                         )
+                        print(f"[360] Pass 2 backend failed: {exc}")
                         # Clean up failed video backend
                         if self._video_backend is not None:
                             try:
@@ -1350,6 +1369,9 @@ class Masker:
                             self._video_backend = FallbackVideoBackend(
                                 fallback_backend, cfg.targets,
                             )
+                            self._video_backend_name = type(self._video_backend).__name__
+                            self._used_fallback_video_backend = True
+                            print(f"[360] Falling back to {self._video_backend_name}")
                             try:
                                 synthetic_masks = self._synthetic_pass(
                                     frame_files, primary_masks,
@@ -1395,6 +1417,10 @@ class Masker:
                 success=False, total_frames=n_frames,
                 masked_frames=masked_count, masks_dir=str(out_path),
                 error=str(exc),
+                backend_name=self._backend_name,
+                video_backend_name=self._video_backend_name,
+                used_fallback_video_backend=self._used_fallback_video_backend,
+                video_backend_error=self._video_backend_error,
             )
 
         print(f"[360] Masking complete: {masked_count}/{n_frames} frames masked, "
@@ -1403,4 +1429,8 @@ class Masker:
         return MaskResult(
             success=True, total_frames=n_frames,
             masked_frames=masked_count, masks_dir=str(out_path),
+            backend_name=self._backend_name,
+            video_backend_name=self._video_backend_name,
+            used_fallback_video_backend=self._used_fallback_video_backend,
+            video_backend_error=self._video_backend_error,
         )
