@@ -1017,21 +1017,35 @@ class Masker:
         n_views = len(detection_views)
         n_detections = 0
 
-        for vi, (yaw, pitch, fov, view_name, flip_v) in enumerate(detection_views):
-            face_img = _reframe_to_detection(
-                erp, fov, yaw, pitch, detection_size, flip_v
-            )
+        # Build or reuse cached remap tables for DETECTION_LAYOUT.
+        # Tables depend only on view geometry + ERP dimensions — not frame content.
+        cache_key = (detection_size, erp_w, erp_h)
+        if self._detection_remap_key != cache_key:
+            self._detection_remap_cache = [
+                _build_detection_remap(fov, yaw, pitch, detection_size, erp_w, erp_h)
+                for yaw, pitch, fov, _name, _fv in detection_views
+            ]
+            self._detection_remap_key = cache_key
 
-            # YOLO-only detection — boxes are enough for direction estimation
-            image_rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
-            results = self._backend._yolo(
-                image_rgb, stream=True, verbose=False, conf=0.35,
-                iou=0.6, classes=[0], agnostic_nms=False, max_det=20,
-            )
+        # Build all 16 detection images from cached remap tables
+        detection_images: list[np.ndarray] = []
+        for vi in range(n_views):
+            map_x, map_y = self._detection_remap_cache[vi]
+            flip_v = detection_views[vi][4]
+            face_img = _apply_detection_remap(erp, map_x, map_y, flip_v)
+            detection_images.append(cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB))
+
+        # Single batched YOLO call for all 16 views
+        batch_results = list(self._backend._yolo(
+            detection_images, stream=True, verbose=False, conf=0.35,
+            iou=0.6, classes=[0], agnostic_nms=False, max_det=20,
+        ))
+
+        # Parse results per view — direction logic unchanged
+        for vi, (yaw, pitch, fov, view_name, flip_v) in enumerate(detection_views):
+            result = batch_results[vi]
             all_boxes = []
-            for result in results:
-                if result.boxes is None or len(result.boxes) == 0:
-                    continue
+            if result.boxes is not None and len(result.boxes) > 0:
                 for j in range(len(result.boxes)):
                     conf = float(result.boxes.conf[j])
                     if conf < 0.35:

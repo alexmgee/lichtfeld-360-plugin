@@ -6,6 +6,8 @@
 **Scope:** Default preset only  
 **Purpose:** Provide a comprehensive, execution-ready plan for improving speed and quality on the stabilized Default preset baseline without reintroducing the recent environment or masking regressions.
 
+**Companion checklist:** [2026-04-05-default-preset-optimization-execution-checklist.md](/c:/Users/alexm/.lichtfeld/plugins/lichtfeld-360-plugin/docs/2026-04-05-default-preset-optimization-execution-checklist.md)
+
 ---
 
 ## Executive Summary
