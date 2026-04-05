@@ -304,7 +304,7 @@ class PipelineJob:
         #
         # The order depends on the preset:
         #   Default:  Mask (ERP) → Reframe (images + masks)
-        #   Cubemap:  Reframe (images only) → Mask (per-view direct)
+        #   Cubemap:  Reframe (images only) → Mask (direct on all faces)
         # ===================================================================
         view_config = _build_runtime_view_config(cfg)
         preset_signature = _format_preset_signature(cfg.preset_name, view_config)
@@ -312,7 +312,7 @@ class PipelineJob:
         is_cubemap = cfg.preset_name == "cubemap"
 
         if is_cubemap and cfg.enable_masking and is_masking_available():
-            # ── Cubemap path: reframe images first, then mask per-view ──
+            # ── Cubemap path: reframe images first, then mask all faces directly ──
 
             # Stage 3 first: reframe images only (no masks)
             self._update("reframe", 20.0, "Reframing to cubemap views...")
@@ -358,21 +358,11 @@ class PipelineJob:
                     pct = 30 + (cur / max(total, 1)) * 15
                     self._update("masking", pct, msg)
 
-                # Pass 1: direction estimation on ERP frames
-                person_directions = masker.estimate_person_directions(
-                    str(frames_dir),
-                    progress_callback=_mask_progress,
-                )
-
-                if self._check_cancel():
-                    raise RuntimeError("Cancelled")
-
                 # Direct per-view masking on reframed cubemap images
                 cubemap_masks_dir = out / "masks"
                 mask_result = masker.process_reframed_views(
                     images_dir,
                     cubemap_masks_dir,
-                    person_directions=person_directions,
                     views=view_config.get_all_views(),
                     progress_callback=_mask_progress,
                 )

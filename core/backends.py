@@ -57,7 +57,11 @@ except ImportError:
 class MaskingBackend(Protocol):
     def initialize(self) -> None: ...
     def detect_and_segment(
-        self, image: np.ndarray, targets: list[str]
+        self,
+        image: np.ndarray,
+        targets: list[str],
+        detection_confidence: float = 0.35,
+        single_primary_box: bool = False,
     ) -> np.ndarray: ...
     def cleanup(self) -> None: ...
 
@@ -79,6 +83,27 @@ class YoloSamBackend:
         self._device = device
         self._yolo: Any = None
         self._sam_predictor: Any = None
+
+    @staticmethod
+    def _select_person_boxes(
+        boxes: list[np.ndarray],
+        confidences: list[float],
+        single_primary_box: bool,
+    ) -> list[np.ndarray]:
+        """Select person boxes to pass to SAM.
+
+        For cubemap direct masking we assume a single operator and keep only
+        the strongest detected person box. This avoids feeding a weaker,
+        disconnected false-positive box into SAM and masking extra furniture
+        or edges. Default masking keeps the legacy all-box behavior.
+        """
+        if not boxes:
+            return []
+        if not single_primary_box:
+            return boxes
+
+        best_idx = max(range(len(boxes)), key=lambda idx: confidences[idx])
+        return [boxes[best_idx]]
 
     def initialize(self) -> None:
         if not HAS_YOLO:
@@ -109,7 +134,11 @@ class YoloSamBackend:
         logger.info("YOLO + SAM v1 backend ready")
 
     def detect_and_segment(
-        self, image: np.ndarray, targets: list[str]
+        self,
+        image: np.ndarray,
+        targets: list[str],
+        detection_confidence: float = 0.35,
+        single_primary_box: bool = False,
     ) -> np.ndarray:
         """Detect person via YOLO, segment via SAM v1. Returns 0/1 uint8 mask."""
         h, w = image.shape[:2]
@@ -117,27 +146,33 @@ class YoloSamBackend:
         # YOLO detection — person = COCO class 0
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         results = self._yolo(
-            image_rgb, stream=True, verbose=False, conf=0.35,
+            image_rgb, stream=True, verbose=False, conf=detection_confidence,
             iou=0.6, classes=[0], agnostic_nms=False, max_det=20,
         )
         all_boxes = []
+        confidences = []
         for result in results:
             if result.boxes is None or len(result.boxes) == 0:
                 continue
             for j in range(len(result.boxes)):
                 conf = float(result.boxes.conf[j])
-                if conf < 0.35:
+                if conf < detection_confidence:
                     continue
                 box = result.boxes.xyxy[j].cpu().numpy().astype(int)
                 all_boxes.append(box)
+                confidences.append(conf)
 
-        if not all_boxes:
+        selected_boxes = self._select_person_boxes(
+            all_boxes, confidences, single_primary_box,
+        )
+
+        if not selected_boxes:
             return np.zeros((h, w), dtype=np.uint8)
 
         # SAM segmentation from YOLO boxes
         self._sam_predictor.set_image(image_rgb)
         input_boxes = torch.as_tensor(
-            np.array(all_boxes), device=self._device,
+            np.array(selected_boxes), device=self._device,
         )
         transformed_boxes = self._sam_predictor.transform.apply_boxes_torch(
             input_boxes, image_rgb.shape[:2]
@@ -186,7 +221,11 @@ class Sam3Backend:
         logger.info("SAM 3 backend ready")
 
     def detect_and_segment(
-        self, image: np.ndarray, targets: list[str]
+        self,
+        image: np.ndarray,
+        targets: list[str],
+        detection_confidence: float = 0.35,
+        single_primary_box: bool = False,
     ) -> np.ndarray:
         """Detect targets via text prompts, segment. Returns 0/1 uint8 mask."""
         from PIL import Image as PILImage
