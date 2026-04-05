@@ -140,6 +140,11 @@ body {
     border-radius: 4dp;
 }
 
+.processing-report {
+    margin: 4dp 0dp 6dp 0dp;
+    max-height: 140dp;
+}
+
 /* ── Text input (for mask prompts) ──────────────────────── */
 
 .text-input {

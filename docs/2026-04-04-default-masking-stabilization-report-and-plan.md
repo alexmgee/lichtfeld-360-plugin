@@ -187,6 +187,40 @@ That is not a functional masking concern.
 
 ---
 
+## 7. Default preset has now been re-proven in LFS with real SAM2 active
+
+After the later ghost-package `sam2` failure was discovered and repaired, the
+Default preset was re-tested end-to-end in LichtFeld Studio on:
+
+- `D:\Capture\deskTest\default_test2`
+
+Observed result:
+
+- `Mask backend: YoloSamBackend`
+- `Video backend: Sam2VideoBackend`
+- `Frames extracted: 11`
+- `Views per frame: 16`
+- `Images written: 176`
+- `Registered frames: 11/11`
+- `Complete rig frames: 11`
+- `Registered images: 176`
+- all 16 views registered `11/11`
+
+User visual review of that proof pass:
+
+- ERP masks looked great
+- pinhole masks looked good overall
+- one minor pinhole false positive/noise artifact remained in:
+  - `masks/00_04/deskTest_trim_00007.png`
+  - source image: `images/00_04/deskTest_trim_00007.jpg`
+
+This is the proof pass that restores confidence in the Default preset baseline.
+The current live environment is no longer merely "repaired in theory"; it has
+now been verified in the real LFS execution path with the real SAM2 video
+backend active.
+
+---
+
 ## Known-Good Target State
 
 This is the masking environment target we should treat as the baseline:

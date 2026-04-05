@@ -342,6 +342,50 @@ def _normalize_acl(path: Path) -> None:
         logger.debug("ACL normalization failed for %s: %s", path, exc)
 
 
+def _find_real_sam2_package_dir() -> Path | None:
+    """Return the installed sam2 package dir only if build_sam is present."""
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("sam2.build_sam")
+        if spec is None or spec.origin is None:
+            return None
+        return Path(spec.origin).resolve().parent
+    except Exception:
+        return None
+
+
+def _quarantine_broken_sam2_namespace(on_output=None) -> Path | None:
+    """Move aside a ghost sam2 directory that lacks real package modules.
+
+    A stale ``site-packages/sam2`` folder containing only copied extension
+    artifacts can survive package-manager changes and then import as a namespace
+    package. If ``sam2.build_sam`` is missing but the directory still exists,
+    move it out of the way before reinstalling the real package.
+    """
+    if _find_real_sam2_package_dir() is not None:
+        return None
+
+    try:
+        import sysconfig
+        import time
+
+        purelib = Path(sysconfig.get_path("purelib"))
+        broken = purelib / "sam2"
+        if not broken.is_dir():
+            return None
+
+        backup = purelib / f"sam2.broken_{time.strftime('%Y%m%d_%H%M%S')}"
+        broken.rename(backup)
+        logger.warning("Quarantined broken sam2 namespace directory at %s", backup)
+        if on_output:
+            on_output(f"Moved broken SAM v2 package aside: {backup.name}")
+        return backup
+    except Exception as exc:
+        logger.warning("Failed to quarantine broken sam2 namespace package: %s", exc)
+        return None
+
+
 def _install_sam2_c_extension(on_output=None) -> bool:
     """Copy the bundled _C.pyd into the installed sam2 package.
 
@@ -359,11 +403,9 @@ def _install_sam2_c_extension(on_output=None) -> bool:
         logger.debug("No bundled _C.pyd found in lib/")
         return False
 
-    try:
-        import sam2 as _sam2_pkg
-        sam2_dir = Path(_sam2_pkg.__file__).resolve().parent
-    except ImportError:
-        logger.debug("sam2 package not importable — skipping _C.pyd install")
+    sam2_dir = _find_real_sam2_package_dir()
+    if sam2_dir is None:
+        logger.debug("real sam2 package not importable — skipping _C.pyd install")
         return False
 
     dest = sam2_dir / "_C.pyd"
@@ -417,6 +459,8 @@ def install_video_tracking(on_output=None) -> bool:
     Syncs the locked optional ``video-tracking`` extra instead of
     mutating the environment ad hoc with ``uv add sam2``.
     """
+    _quarantine_broken_sam2_namespace(on_output=on_output)
+
     ok = _run_uv_command([
         "sync",
         "--locked",
@@ -424,6 +468,12 @@ def install_video_tracking(on_output=None) -> bool:
         "--extra", "video-tracking",
     ], on_output=on_output)
     if not ok:
+        return False
+
+    if not _check_sam2_installed():
+        logger.error("sam2 install completed but sam2.build_sam is still unavailable")
+        if on_output:
+            on_output("SAM v2 install appears incomplete: sam2.build_sam is missing.")
         return False
 
     # Install bundled _C.pyd (CUDA connected-components extension) into
