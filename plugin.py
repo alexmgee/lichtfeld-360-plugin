@@ -14,10 +14,10 @@ def on_load():
         lf.register_class(cls)
     lf.ui.set_panel_space(PanoSplatPanel.id, lf.ui.PanelSpace.MAIN_PANEL_TAB)
     lf.ui.set_panel_order(PanoSplatPanel.id, PanoSplatPanel.order)
-    lf.log.info("PanoSplat plugin loaded")
+    lf.log.info("360 Plugin loaded")
 
 
 def on_unload():
     for cls in reversed(_CLASSES):
         lf.unregister_class(cls)
-    lf.log.info("PanoSplat plugin unloaded")
+    lf.log.info("360 Plugin unloaded")

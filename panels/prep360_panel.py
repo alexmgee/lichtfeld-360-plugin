@@ -22,11 +22,10 @@ except ImportError:
 from ..core.analyzer import VideoAnalyzer, VideoInfo
 from ..core.colmap_runner import MATCH_BUDGETS
 from ..core.masker import is_masking_available
-# Masking setup UI — disabled pending python3.dll fix (see plugin_masking_blocker.md)
-# from ..core.setup_checks import (
-#     MaskingSetupState, check_masking_setup, verify_hf_token, download_model_weights,
-#     install_torch_to_plugin_venv, install_sam3_to_plugin_venv,
-# )
+from ..core.setup_checks import (
+    MaskingSetupState, check_masking_setup, verify_hf_token, download_model_weights,
+    install_default_tier, install_premium_tier, install_video_tracking,
+)
 from ..core.pipeline import PipelineConfig, PipelineJob, PipelineResult
 from ..core.presets import VIEW_PRESETS
 
@@ -37,17 +36,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 PRESET_NAMES = [
+    "default",
     "cubemap",
-    "low",
-    "medium",
-    "high",
 ]
 
 PRESET_LABELS = [
+    "Default (16 views)",
     "Cubemap (6 views)",
-    "Low (9 views)",
-    "Medium (14 views)",
-    "High (18 views)",
 ]
 
 COLMAP_MATCHERS = ["sequential", "exhaustive"]
@@ -83,9 +78,7 @@ EXTRACT_SHARPNESS_PRESETS = [
 # Human-readable coverage descriptions per preset
 COVERAGE_DESCRIPTIONS = {
     "cubemap": "4 horizon, 1 top, 1 bottom",
-    "low": "5 horizon, 1 above, 2 below, 1 forward",
-    "medium": "5 horizon, 4 above, 4 below, zenith",
-    "high": "4 above, 9 below, zenith, nadir, 4 mid-upper",
+    "default": "8+8 two-ring layout at +/-35°, no poles",
 }
 
 # ---------------------------------------------------------------------------
@@ -97,7 +90,7 @@ SECTIONS = ["extraction", "masking", "reframe", "quality"]
 
 class PanoSplatPanel(lf.ui.Panel):
     id = "panosplat.main"
-    label = "PanoSplat"
+    label = "360 Camera"
     space = lf.ui.PanelSpace.MAIN_PANEL_TAB
     order = 10100
     template = str(Path(__file__).resolve().with_name("prep360_panel.rml"))
@@ -124,16 +117,16 @@ class PanoSplatPanel(lf.ui.Panel):
         self._extract_fps: float = 1.0
         self._extract_sharpness_idx: int = 3  # default: High
 
-        # Masking (coming soon — setup UI disabled pending python3.dll fix)
-        self._enable_masking: bool = False
+        # Masking
         self._masking_available: bool = is_masking_available()
+        self._enable_masking: bool = self._masking_available
         self._mask_prompts_str: str = "person"
-        # self._setup_state: MaskingSetupState = check_masking_setup()
-        # self._hf_token_input: str = ""
-        # self._hf_verify_text: str = ""
-        # self._hf_verify_ok: bool = False
-        # self._install_busy: bool = False
-        # self._install_button_text: str = "Install PyTorch + SAM 3.1"
+        self._setup_state: MaskingSetupState = check_masking_setup()
+        self._hf_token_input: str = ""
+        self._hf_verify_text: str = ""
+        self._hf_verify_ok: bool = False
+        self._install_busy: bool = False
+        self._install_button_text: str = "Install Masking"
 
         # Reframe
         self._preset_idx: int = 0
@@ -202,9 +195,15 @@ class PanoSplatPanel(lf.ui.Panel):
         model.bind("extract_sharpness_idx", lambda: str(self._extract_sharpness_idx), self._set_extract_sharpness)
         model.bind_func("est_frames_text", self._get_est_frames_text)
 
-        # -- Masking (coming soon — setup UI disabled) --
+        # -- Masking --
         model.bind("enable_masking", lambda: self._enable_masking, self._set_enable_masking)
         model.bind("mask_prompts_str", lambda: self._mask_prompts_str, self._set_mask_prompts)
+        model.bind_func("masking_available", lambda: self._masking_available)
+        model.bind_func("masking_backend_text", self._get_masking_backend_text)
+        model.bind_func("show_masking_install", lambda: not self._setup_state.default_tier_ready)
+        model.bind_func("show_masking_controls", lambda: self._setup_state.default_tier_ready)
+        model.bind_func("install_button_text", lambda: self._install_button_text)
+        model.bind_func("install_busy", lambda: self._install_busy)
 
         # -- Reframe --
         model.bind("preset_idx", lambda: str(self._preset_idx), self._set_preset)
@@ -241,13 +240,11 @@ class PanoSplatPanel(lf.ui.Panel):
         model.bind_event("run_pipeline_only", self._on_run_pipeline_only)
         model.bind_event("cancel_pipeline", self._on_cancel)
         model.bind_event("toggle_section", self._on_toggle_section)
-        # Masking setup events — disabled pending python3.dll fix
-        # model.bind_event("open_hf_signup", self._on_open_hf_signup)
-        # model.bind_event("open_hf_model", self._on_open_hf_model)
-        # model.bind_event("open_hf_tokens", self._on_open_hf_tokens)
-        # model.bind_event("verify_hf_token", self._on_verify_hf_token)
-        # model.bind_event("install_masking_deps", self._on_install_deps)
-        # model.bind_event("download_weights", self._on_download_weights)
+        # Masking setup events
+        model.bind_event("install_masking_deps", self._on_install_default_tier)
+        model.bind_event("install_video_tracking", self._on_install_video_tracking)
+        model.bind_func("show_video_tracking_install",
+                         lambda: self._setup_state.capability_level == 1)
 
         self._handle = model.get_handle()
 
@@ -309,8 +306,8 @@ class PanoSplatPanel(lf.ui.Panel):
     # ── Computed text helpers ─────────────────────────────────
 
     def _get_current_view_config(self):
-        name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "cubemap"
-        return VIEW_PRESETS.get(name, VIEW_PRESETS["cubemap"])
+        name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "default"
+        return VIEW_PRESETS.get(name, VIEW_PRESETS["default"])
 
     def _get_est_frames_text(self) -> str:
         if not self._video_info:
@@ -324,7 +321,7 @@ class PanoSplatPanel(lf.ui.Panel):
         return f"~{base} frames"
 
     def _get_coverage_text(self) -> str:
-        name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "cubemap"
+        name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "default"
         return COVERAGE_DESCRIPTIONS.get(name, "")
 
     def _get_total_output_text(self) -> str:
@@ -648,6 +645,16 @@ class PanoSplatPanel(lf.ui.Panel):
     def _set_mask_prompts(self, val):
         self._mask_prompts_str = str(val)
 
+    def _get_masking_backend_text(self):
+        level = self._setup_state.capability_level
+        if level == 3:
+            return "Using SAM 3"
+        if level == 2:
+            return "Masking ready (video tracking)"
+        if level == 1:
+            return "Masking ready"
+        return "Not installed"
+
     def _set_hf_token_input(self, val):
         self._hf_token_input = str(val)
 
@@ -661,7 +668,7 @@ class PanoSplatPanel(lf.ui.Panel):
     def _on_open_hf_model(self, handle, event, args):
         del handle, event, args
         import webbrowser
-        webbrowser.open("https://huggingface.co/facebook/sam3.1")
+        webbrowser.open("https://huggingface.co/facebook/sam3")
 
     def _on_open_hf_tokens(self, handle, event, args):
         del handle, event, args
@@ -694,43 +701,61 @@ class PanoSplatPanel(lf.ui.Panel):
 
         threading.Thread(target=_verify, daemon=True).start()
 
-    def _on_install_deps(self, handle, event, args):
+    def _on_install_default_tier(self, handle, event, args):
         del handle, event, args
         if self._install_busy:
             return
         self._install_busy = True
-        self._install_button_text = "Installing PyTorch..."
+        self._install_button_text = "Installing..."
         if self._handle:
             self._handle.dirty_all()
 
-        def _install_all():
-            ok = install_torch_to_plugin_venv()
-            if ok:
-                self._install_button_text = "Installing SAM 3.1..."
+        def _install():
+            def _progress(msg):
+                self._install_button_text = msg
                 if self._handle:
                     self._handle.dirty_all()
-                ok = install_sam3_to_plugin_venv()
+
+            ok = install_default_tier(on_output=_progress)
             self._install_busy = False
             if ok:
                 self._install_button_text = "Installed"
+                self._masking_available = True
+                self._enable_masking = True
             else:
-                self._install_button_text = "Install failed \u2014 retry"
+                self._install_button_text = "Install failed — retry"
             self._setup_state = check_masking_setup()
             if self._handle:
                 self._handle.dirty_all()
 
-        threading.Thread(target=_install_all, daemon=True).start()
+        threading.Thread(target=_install, daemon=True).start()
 
-    def _on_download_weights(self, handle, event, args):
+    def _on_install_video_tracking(self, handle, event, args):
         del handle, event, args
+        if self._install_busy:
+            return
+        self._install_busy = True
+        self._install_button_text = "Installing video tracking..."
+        if self._handle:
+            self._handle.dirty_all()
 
-        def _download():
-            download_model_weights()
+        def _install():
+            def _progress(msg):
+                self._install_button_text = msg
+                if self._handle:
+                    self._handle.dirty_all()
+
+            ok = install_video_tracking(on_output=_progress)
+            self._install_busy = False
+            if ok:
+                self._install_button_text = "Video tracking installed"
+            else:
+                self._install_button_text = "Install failed — retry"
             self._setup_state = check_masking_setup()
             if self._handle:
                 self._handle.dirty_all()
 
-        threading.Thread(target=_download, daemon=True).start()
+        threading.Thread(target=_install, daemon=True).start()
 
     def _set_preset(self, val):
         try:
@@ -932,7 +957,7 @@ class PanoSplatPanel(lf.ui.Panel):
             return
 
         self._error_message = ""
-        preset_name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "cubemap"
+        preset_name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "default"
         colmap_matcher = COLMAP_MATCHERS[self._colmap_matcher_idx] if 0 <= self._colmap_matcher_idx < len(COLMAP_MATCHERS) else "sequential"
         match_budget_tier = MATCH_BUDGET_TIERS[self._match_budget_idx] if 0 <= self._match_budget_idx < len(MATCH_BUDGET_TIERS) else "custom"
 
@@ -950,6 +975,7 @@ class PanoSplatPanel(lf.ui.Panel):
             quality=self._jpeg_quality,
             enable_masking=self._enable_masking and self._masking_available,
             mask_prompts=prompts if prompts else ["person"],
+            mask_backend=self._setup_state.active_backend,
             preset_name=preset_name,
             output_size=self._output_size,
             jpeg_quality=self._jpeg_quality,
@@ -1170,7 +1196,7 @@ class PanoSplatPanel(lf.ui.Panel):
 
             # Print to Python console
             print(f"\n{'=' * 60}")
-            print(f"PanoSplat Pipeline \u2014 Timing Report")
+            print(f"360 Plugin \u2014 Timing Report")
             print(f"{'=' * 60}")
             print(self._completion_report)
             print(f"{'=' * 60}\n")
@@ -1238,6 +1264,8 @@ class PanoSplatPanel(lf.ui.Panel):
                     )
                 except Exception as exc:
                     logger.error("Failed to import dataset: %s", exc)
+                    print(f"[360] IMPORT FAILED: {exc}")
+                    import traceback; traceback.print_exc()
                     self._error_message = f"Import failed: {exc}"
         else:
             self._error_message = result.error or "Pipeline failed"
@@ -1259,7 +1287,7 @@ class PanoSplatPanel(lf.ui.Panel):
             logger.error("Pipeline failed: %s", self._error_message)
 
             print(f"\n{'=' * 60}")
-            print("PanoSplat Pipeline — Failure Report")
+            print("360 Plugin — Failure Report")
             print(f"{'=' * 60}")
             print(self._completion_report)
             print(f"{'=' * 60}\n")

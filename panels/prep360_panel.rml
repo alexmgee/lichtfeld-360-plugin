@@ -83,7 +83,31 @@
       </div>
     </div>
 
-    <!-- Operator Masking section hidden pending SAM 3.1 integration -->
+    <!-- ── Section 2: Operator Masking ──────────────────────── -->
+    <div class="section-header text-accent" id="hdr-masking" data-event-click="toggle_section('masking')">
+      <span class="section-arrow text-accent is-expanded" id="arrow-masking">&#x25B6;</span>
+      <span class="text-accent">Operator Masking</span>
+    </div>
+    <div class="section-content" id="sec-masking">
+      <div data-if="show_masking_install">
+        <div class="setting-row">
+          <span class="status-text status-muted">Masking removes the camera operator from 360 footage.</span>
+        </div>
+        <div class="setting-row">
+          <button class="btn btn-primary" data-event-click="install_masking_deps" data-attr-disabled="install_busy">{{install_button_text}}</button>
+        </div>
+      </div>
+      <div data-if="show_masking_controls">
+        <div class="setting-row">
+          <span class="prop-label">Enable</span>
+          <input type="checkbox" data-checked="enable_masking" />
+        </div>
+        <div class="setting-row">
+          <span class="prop-label">Backend</span>
+          <span class="status-text status-muted">{{masking_backend_text}}</span>
+        </div>
+      </div>
+    </div>
 
     <!-- ── Section 4: Reframe & Alignment ──────────────────── -->
     <div class="section-header text-accent" id="hdr-reframe" data-event-click="toggle_section('reframe')">
@@ -94,10 +118,8 @@
       <div class="setting-row setting-row--dropdown setting-row--dropdown-high">
         <span class="prop-label">Preset</span>
         <select data-value="preset_idx">
-          <option value="0">Cubemap (6 views)</option>
-          <option value="1">Low (9 views)</option>
-          <option value="2">Medium (14 views)</option>
-          <option value="3">High (18 views)</option>
+          <option value="0">Default (16 views)</option>
+          <option value="1">Cubemap (6 views)</option>
         </select>
       </div>
       <div class="setting-row">

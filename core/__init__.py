@@ -3,8 +3,15 @@
 """PanoSplat core processing modules."""
 
 from .analyzer import VideoAnalyzer, VideoInfo
+from .backends import (
+    MaskingBackend, YoloSamBackend, Sam3Backend,
+    VideoTrackingBackend, FallbackVideoBackend, Sam2VideoBackend,
+    get_backend, get_backend_name, get_video_backend,
+)
 from .colmap_runner import ColmapConfig, ColmapResult, ColmapRunner
+from .cubemap_projection import CubemapProjection
 from .masker import Masker, MaskConfig, MaskResult, is_masking_available
+from .overlap_mask import compute_overlap_masks
 from .pipeline import PipelineConfig, PipelineJob, PipelineResult
 from .presets import FreeView, Ring, ViewConfig, VIEW_PRESETS
 from .reframer import Reframer, ReframeResult, reframe_view, compute_pinhole_intrinsics
@@ -16,15 +23,29 @@ __all__ = [
     # analyzer
     "VideoAnalyzer",
     "VideoInfo",
+    # backends
+    "MaskingBackend",
+    "YoloSamBackend",
+    "Sam3Backend",
+    "VideoTrackingBackend",
+    "FallbackVideoBackend",
+    "Sam2VideoBackend",
+    "get_backend",
+    "get_backend_name",
+    "get_video_backend",
     # colmap_runner
     "ColmapConfig",
     "ColmapResult",
     "ColmapRunner",
+    # cubemap_projection
+    "CubemapProjection",
     # masker
     "Masker",
     "MaskConfig",
     "MaskResult",
     "is_masking_available",
+    # overlap_mask
+    "compute_overlap_masks",
     # pipeline
     "PipelineConfig",
     "PipelineJob",

@@ -10,16 +10,57 @@ pixel-grid ray casting, spherical coordinate mapping) and a high-level
 
 from __future__ import annotations
 
+import logging
 import math
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Callable, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 from .presets import Ring, ViewConfig, VIEW_PRESETS
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Substage timing
+# ---------------------------------------------------------------------------
+
+
+class _SubstageTimer:
+    """Lightweight accumulating timer for reframer substages."""
+
+    def __init__(self) -> None:
+        self._totals: dict[str, float] = {}
+        self._counts: dict[str, int] = {}
+
+    @contextmanager
+    def time(self, label: str):
+        t0 = perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = perf_counter() - t0
+            self._totals[label] = self._totals.get(label, 0.0) + elapsed
+            self._counts[label] = self._counts.get(label, 0) + 1
+
+    def report(self, log: logging.Logger | None = None) -> None:
+        if not self._totals:
+            return
+        _log = log or logger
+        total = sum(self._totals.values())
+        lines = ["Reframer substage timing:"]
+        for label in self._totals:
+            t = self._totals[label]
+            n = self._counts[label]
+            lines.append(f"  {label:24s} {t:7.1f}s  ({n} calls)")
+        lines.append(f"  {'TOTAL':24s} {total:7.1f}s")
+        _log.debug("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +187,81 @@ def reframe_view(
         return np.fliplr(result)
 
 
+def _build_reframe_remap(
+    fov_deg: float, yaw_deg: float, pitch_deg: float,
+    out_size: int, erp_w: int, erp_h: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute (map_x, map_y) remap tables for a reframe view.
+
+    Pure geometry — depends only on view params and ERP dimensions.
+    Tables are float32, ready for cv2.remap.  The fliplr convention
+    is baked into the maps (columns are reversed) so that
+    _apply_reframe_remap only needs cv2.remap + optional flipud.
+    """
+    fov_rad = np.radians(fov_deg)
+    f = (out_size / 2) / np.tan(fov_rad / 2)
+    cxx = out_size / 2
+    cy = out_size / 2
+
+    R = create_rotation_matrix(yaw_deg, pitch_deg)
+    r00, r01, r02 = R[0, 0], R[0, 1], R[0, 2]
+    r10, r11, r12 = R[1, 0], R[1, 1], R[1, 2]
+    r20, r21, r22 = R[2, 0], R[2, 1], R[2, 2]
+
+    px_arr = np.arange(out_size, dtype=np.float64)
+    px_grid, py_grid = np.meshgrid(px_arr, px_arr)
+    crx = (px_grid - cxx) / f
+    cry = -(py_grid - cy) / f
+
+    wx = r00 * crx + r10 * cry - r20
+    wy = r01 * crx + r11 * cry - r21
+    wz = r02 * crx + r12 * cry - r22
+
+    l = np.sqrt(wx * wx + wy * wy + wz * wz)
+    wx, wy, wz = wx / l, wy / l, wz / l
+
+    theta = np.arctan2(wx, wz)
+    phi = np.arcsin(np.clip(wy, -1, 1))
+
+    u_eq = ((theta / np.pi + 1) / 2) * erp_w
+    v_eq = (0.5 - phi / np.pi) * erp_h
+
+    map_x = u_eq.astype(np.float32) % erp_w
+    map_y = np.clip(v_eq.astype(np.float32), 0, erp_h - 1)
+
+    # Bake in the fliplr: reverse column order in the maps so the
+    # caller doesn't need a separate np.fliplr after remap.
+    map_x = np.ascontiguousarray(np.fliplr(map_x))
+    map_y = np.ascontiguousarray(np.fliplr(map_y))
+
+    return map_x, map_y
+
+
+def _apply_reframe_remap(
+    image: np.ndarray,
+    map_x: np.ndarray,
+    map_y: np.ndarray,
+    mode: str = "bilinear",
+) -> np.ndarray:
+    """Apply precomputed remap tables to produce a perspective view.
+
+    The fliplr is already baked into the maps.  For masks, use
+    mode="nearest".
+    """
+    if mode == "nearest":
+        return cv2.remap(
+            image, map_x, map_y,
+            cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_WRAP,
+        )
+    else:
+        return cv2.remap(
+            image, map_x, map_y,
+            cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_WRAP,
+        )
+
+
 def compute_pinhole_intrinsics(fov_deg: float, crop_size: int) -> dict:
     """Compute pinhole camera intrinsics from FOV and output size."""
     f = crop_size / (2.0 * math.tan(math.radians(fov_deg / 2.0)))
@@ -209,6 +325,9 @@ class Reframer:
     ) -> ReframeResult:
         """Reframe all equirectangular images in *input_dir*.
 
+        Precomputes remap tables on the first image and reuses them
+        for all subsequent images (same view geometry, same ERP size).
+
         Args:
             input_dir: Directory containing equirectangular images.
             output_dir: Destination for perspective views.
@@ -242,11 +361,38 @@ class Reframer:
 
         errors: List[str] = []
         total_outputs = 0
+        timer = _SubstageTimer()
+
+        # Remap cache — built lazily on first image (need ERP dimensions)
+        remap_cache: Optional[List[Tuple[np.ndarray, np.ndarray]]] = None
+        remap_cache_key: Optional[Tuple[int, int]] = None
 
         for i, img in enumerate(images):
+            # Build remap tables on first image (or if ERP size changes)
+            if remap_cache is None or remap_cache_key is None:
+                probe = cv2.imread(str(img))
+                if probe is not None:
+                    erp_h, erp_w = probe.shape[:2]
+                    views = self.config.get_all_views()
+                    with timer.time("remap_build"):
+                        remap_cache = [
+                            _build_reframe_remap(
+                                fov, yaw, pitch,
+                                self.config.output_size, erp_w, erp_h,
+                            )
+                            for yaw, pitch, fov, _name, _fv in views
+                        ]
+                    remap_cache_key = (erp_w, erp_h)
+                    n_views = len(views)
+                    logger.debug("Built %d reframe remap tables (%dpx, ERP %dx%d)",
+                                 n_views, self.config.output_size, erp_w, erp_h)
+                    del probe  # don't keep the image — _process_single_image reads it
+
             m_path = mask_map.get(img.stem) if mask_dir else None
             outputs, error = _process_single_image(
-                str(img), str(output_path), self.config, m_path
+                str(img), str(output_path), self.config, m_path,
+                remap_cache=remap_cache,
+                timer=timer,
             )
             if error:
                 errors.append(error)
@@ -255,6 +401,8 @@ class Reframer:
 
             if progress_callback:
                 progress_callback(i + 1, len(images), img.name)
+
+        timer.report()
 
         return ReframeResult(
             success=len(errors) == 0,
@@ -317,15 +465,26 @@ def _process_single_image(
     output_dir: str,
     config: ViewConfig,
     mask_path: Optional[str] = None,
+    remap_cache: Optional[List[Tuple[np.ndarray, np.ndarray]]] = None,
+    timer: Optional[_SubstageTimer] = None,
 ) -> Tuple[List[str], Optional[str]]:
-    """Process one equirectangular image into all configured views."""
-    equirect = cv2.imread(image_path)
+    """Process one equirectangular image into all configured views.
+
+    Args:
+        remap_cache: Optional precomputed (map_x, map_y) per view,
+            built by reframe_batch.  When provided, skips all geometry
+            math and goes straight to cv2.remap.
+        timer: Optional substage timer for instrumentation.
+    """
+    with timer.time("imread") if timer else contextmanager(lambda: (yield))():
+        equirect = cv2.imread(image_path)
     if equirect is None:
         return [], f"Failed to load {image_path}"
 
     mask: Optional[np.ndarray] = None
     if mask_path:
-        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        with timer.time("imread_mask") if timer else contextmanager(lambda: (yield))():
+            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         if mask is None:
             return [], f"Failed to load mask {mask_path}"
         if mask.shape[:2] != equirect.shape[:2]:
@@ -340,14 +499,18 @@ def _process_single_image(
     mask_root = out_root.parent / "masks" if mask is not None else None
 
     views = config.get_all_views()
-    for yaw, pitch, fov, view_name, flip_v in views:
-        persp = reframe_view(
-            equirect,
-            fov_deg=fov,
-            yaw_deg=yaw,
-            pitch_deg=pitch,
-            out_size=config.output_size,
-        )
+    for vi, (yaw, pitch, fov, view_name, flip_v) in enumerate(views):
+        # Image reprojection
+        if remap_cache is not None:
+            with timer.time("remap_apply_img") if timer else contextmanager(lambda: (yield))():
+                map_x, map_y = remap_cache[vi]
+                persp = _apply_reframe_remap(equirect, map_x, map_y, mode="bilinear")
+        else:
+            with timer.time("reframe_view") if timer else contextmanager(lambda: (yield))():
+                persp = reframe_view(
+                    equirect, fov_deg=fov, yaw_deg=yaw,
+                    pitch_deg=pitch, out_size=config.output_size,
+                )
 
         if flip_v:
             persp = np.flipud(persp)
@@ -358,26 +521,37 @@ def _process_single_image(
         out_name = f"{stem}.jpg"
         out_path = view_dir / out_name
 
-        cv2.imwrite(
-            str(out_path), persp, [cv2.IMWRITE_JPEG_QUALITY, config.jpeg_quality]
-        )
+        with timer.time("imwrite_img") if timer else contextmanager(lambda: (yield))():
+            cv2.imwrite(
+                str(out_path), persp, [cv2.IMWRITE_JPEG_QUALITY, config.jpeg_quality]
+            )
         output_files.append(f"{view_name}/{out_name}")
 
+        # Mask reprojection — same geometry, nearest-neighbor interpolation
         if mask is not None and mask_root is not None:
-            mask_persp = reframe_view(
-                mask,
-                fov_deg=fov,
-                yaw_deg=yaw,
-                pitch_deg=pitch,
-                out_size=config.output_size,
-                mode="nearest",
-            )
+            if remap_cache is not None:
+                with timer.time("remap_apply_mask") if timer else contextmanager(lambda: (yield))():
+                    map_x, map_y = remap_cache[vi]
+                    mask_persp = _apply_reframe_remap(mask, map_x, map_y, mode="nearest")
+            else:
+                with timer.time("reframe_view_mask") if timer else contextmanager(lambda: (yield))():
+                    mask_persp = reframe_view(
+                        mask, fov_deg=fov, yaw_deg=yaw,
+                        pitch_deg=pitch, out_size=config.output_size,
+                        mode="nearest",
+                    )
             if flip_v:
                 mask_persp = np.flipud(mask_persp)
             mask_persp = (mask_persp > 0).astype(np.uint8) * 255
+            # Per-view dilation: expand the REMOVE (black=0) region by
+            # eroding the KEEP (white=255) region. This catches segmentation
+            # edge artifacts. FullCircle-style, replaces ERP morph-close.
+            erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+            mask_persp = cv2.erode(mask_persp, erode_kernel, iterations=1)
             mask_dir = mask_root / view_name
             mask_dir.mkdir(parents=True, exist_ok=True)
             mask_out = f"{stem}.png"
-            cv2.imwrite(str(mask_dir / mask_out), mask_persp)
+            with timer.time("imwrite_mask") if timer else contextmanager(lambda: (yield))():
+                cv2.imwrite(str(mask_dir / mask_out), mask_persp)
 
     return output_files, None
