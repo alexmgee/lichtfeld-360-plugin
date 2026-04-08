@@ -501,6 +501,21 @@ def verify_hf_token_detailed(token: str) -> Sam3SetupReport:
     )
 
 
+def forget_hf_token() -> bool:
+    """Remove the saved HuggingFace login for this machine."""
+    global _hf_access_cache
+
+    try:
+        from huggingface_hub import logout
+
+        logout()
+        _hf_access_cache = None
+        return True
+    except Exception as exc:
+        logger.warning("Could not forget saved HuggingFace token: %s", exc)
+        return False
+
+
 def make_sam3_install_failure_report(
     detail: str = "",
     *,
