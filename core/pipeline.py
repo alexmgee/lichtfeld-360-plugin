@@ -29,6 +29,7 @@ from typing import Callable, Optional
 from .colmap_runner import ColmapConfig, ColmapResult, ColmapRunner
 from .colmap_runner import infer_shared_pinhole_camera_params
 from .masker import Masker, MaskConfig, MaskResult, is_masking_available
+from .setup_checks import is_sam3_masking_ready
 from .overlap_mask import compute_overlap_masks
 from .presets import VIEW_PRESETS, ViewConfig
 from .reframer import Reframer
@@ -62,6 +63,7 @@ class PipelineConfig:
 
     # Masking
     enable_masking: bool = False
+    masking_method: str = "fullcircle"  # "fullcircle" or "sam3_cubemap"
     mask_prompts: list[str] = field(default_factory=lambda: ["person"])
     mask_backend: Optional[str] = None  # "sam3", "yolo_sam1", or None (auto)
     enable_overlap_masks: bool = True  # Voronoi anti-overlap masks for COLMAP
@@ -321,13 +323,88 @@ class PipelineJob:
         mask_result: Optional[MaskResult] = None
         is_cubemap = cfg.preset_name == "cubemap"
 
-        if cfg.enable_masking and not is_masking_available():
-            raise RuntimeError(
-                "Operator masking requires the full masking stack, including "
-                "SAM v2 video tracking. Install masking before enabling it."
+        # ── Method-specific masking availability gate ──────────────
+        if cfg.enable_masking:
+            if cfg.masking_method == "sam3_cubemap":
+                if not is_sam3_masking_ready():
+                    raise RuntimeError(
+                        "SAM 3 masking requires sam3 + weights. "
+                        "Install SAM 3 via the plugin settings panel."
+                    )
+                if cfg.preset_name != "cubemap":
+                    raise RuntimeError(
+                        "SAM 3 masking is currently cubemap-only. "
+                        "Select the Cubemap preset to use SAM 3, or "
+                        "switch to the FullCircle masking method."
+                    )
+            else:
+                # FullCircle requires the full stack including SAM v2
+                if not is_masking_available():
+                    raise RuntimeError(
+                        "Operator masking requires the full masking stack, including "
+                        "SAM v2 video tracking. Install masking before enabling it."
+                    )
+
+        # ── SAM 3 cubemap path ─────────────────────────────────────
+        if (cfg.enable_masking
+                and cfg.masking_method == "sam3_cubemap"
+                and is_cubemap):
+            from .sam3_masker import Sam3CubemapMasker, Sam3MaskerConfig
+
+            self._update("masking", 20.0, "Initializing SAM 3 cubemap masker...")
+
+            sam3_cfg = Sam3MaskerConfig(
+                prompts=cfg.mask_prompts,
+                confidence_threshold=0.3,
+                output_size=cfg.output_size,
+            )
+            sam3_masker = Sam3CubemapMasker(sam3_cfg)
+            sam3_masker.initialize()
+
+            try:
+                def _sam3_progress(cur: int, total: int, msg: str) -> None:
+                    pct = 20 + (cur / max(total, 1)) * 15
+                    self._update("masking", pct, msg)
+
+                sam3_result = sam3_masker.process_frames(
+                    frames_dir=str(frames_dir),
+                    output_dir=str(out),
+                    view_config=view_config,
+                    progress_callback=_sam3_progress,
+                )
+            finally:
+                sam3_masker.cleanup()
+
+            if self._check_cancel():
+                raise RuntimeError("Cancelled")
+
+            # SAM 3 masker writes masks directly to out/masks/{view_id}/
+            # Now reframe images only (no mask reframe needed)
+            self._update("reframe", 35.0, "Reframing to cubemap views...")
+            reframer = Reframer(view_config)
+
+            def _reframe_progress(cur: int, total: int, filename: str) -> None:
+                pct = 35 + (cur / max(total, 1)) * 15
+                self._update("reframe", pct, f"Reframing {cur}/{total}: {filename}")
+
+            reframe_result = reframer.reframe_batch(
+                input_dir=str(frames_dir),
+                output_dir=str(images_dir),
+                mask_dir=None,
+                progress_callback=_reframe_progress,
             )
 
-        if is_cubemap and cfg.enable_masking and is_masking_available():
+            if not reframe_result.success and reframe_result.output_count == 0:
+                errors = "; ".join(reframe_result.errors) if reframe_result.errors else "unknown"
+                raise RuntimeError(f"Reframing failed: {errors}")
+
+            num_output_images = reframe_result.output_count
+
+            if self._check_cancel():
+                raise RuntimeError("Cancelled")
+
+        # ── FullCircle cubemap path (unchanged) ─────────────────────
+        elif is_cubemap and cfg.enable_masking and is_masking_available():
             # ── Cubemap path: reframe images first, then mask all faces directly ──
 
             # Stage 3 first: reframe images only (no masks)
@@ -359,10 +436,13 @@ class PipelineJob:
             # Stage 2: direct per-view masking on reframed images
             self._update("masking", 30.0, "Initializing masking backend...")
 
+            # Pin backend to yolo_sam1 for FullCircle — do not trust
+            # cfg.mask_backend which may auto-promote to sam3
+            fc_backend = "yolo_sam1"
             mask_cfg = MaskConfig(
                 targets=cfg.mask_prompts,
                 output_size=cfg.output_size,
-                backend_preference=cfg.mask_backend,
+                backend_preference=fc_backend,
                 views=view_config.get_all_views(),
                 enable_synthetic=False,  # no synthetic pipeline for cubemap
                 enable_diagnostics=cfg.enable_diagnostics,
@@ -398,10 +478,12 @@ class PipelineJob:
             if cfg.enable_masking and is_masking_available():
                 self._update("masking", 20.0, "Initializing masking backend...")
 
+                # Pin backend to yolo_sam1 for FullCircle default path
+                fc_backend = "yolo_sam1"
                 mask_cfg = MaskConfig(
                     targets=cfg.mask_prompts,
                     output_size=cfg.output_size,
-                    backend_preference=cfg.mask_backend,
+                    backend_preference=fc_backend,
                     views=view_config.get_all_views(),
                     enable_diagnostics=cfg.enable_diagnostics,
                 )
