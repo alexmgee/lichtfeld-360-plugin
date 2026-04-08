@@ -85,6 +85,19 @@ body {
     width: 100%;
 }
 
+.inline-input-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 4dp;
+    width: 100%;
+}
+
+.inline-input-row input {
+    flex: 1;
+    min-width: 0;
+}
+
 .btn--compact {
     min-width: 28dp;
     padding: 2dp 6dp;
