@@ -124,7 +124,7 @@ class Plugin360Panel(lf.ui.Panel):
         # Masking
         self._setup_state: MaskingSetupState = check_masking_setup()
         self._masking_method_idx: int = 0  # 0=FullCircle, 1=SAM 3 Cubemap
-        self._masking_available: bool = self._setup_state.masking_ready
+        self._masking_available: bool = self._setup_state.fullcircle_ready
         self._enable_masking: bool = self._masking_available
         self._enable_diagnostics: bool = False
         self._mask_prompts_str: str = "person"
@@ -214,8 +214,8 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("masking_backend_text", self._get_masking_backend_text)
         # FullCircle conditional states
         model.bind_func("show_masking_fullcircle", lambda: self._masking_method_idx == 0)
-        model.bind_func("show_masking_install", lambda: not self._setup_state.masking_ready)
-        model.bind_func("show_masking_controls", lambda: self._setup_state.masking_ready)
+        model.bind_func("show_masking_install", lambda: not self._setup_state.fullcircle_ready)
+        model.bind_func("show_masking_controls", lambda: self._setup_state.fullcircle_ready)
         # SAM 3 conditional states
         model.bind_func("show_masking_sam3_setup", lambda: self._masking_method_idx == 1 and not self._setup_state.sam3_ready)
         model.bind_func("show_masking_sam3_ready", lambda: self._masking_method_idx == 1 and self._setup_state.sam3_ready)
@@ -726,17 +726,25 @@ class Plugin360Panel(lf.ui.Panel):
     def _set_mask_prompts(self, val):
         self._mask_prompts_str = str(val)
 
+    def _selected_masking_ready(self) -> bool:
+        if self._masking_method_idx == 1:
+            return self._setup_state.sam3_ready
+        return self._setup_state.fullcircle_ready
+
+    def _refresh_masking_availability(self, *, auto_enable: bool = False) -> None:
+        ready = self._selected_masking_ready()
+        self._masking_available = ready
+        if auto_enable:
+            self._enable_masking = ready
+        else:
+            self._enable_masking = self._enable_masking and ready
+
     def _set_masking_method(self, val):
         try:
             idx = int(val)
             if idx in (0, 1):
                 self._masking_method_idx = idx
-                # Refresh masking availability for the selected method
-                if idx == 1:
-                    self._masking_available = self._setup_state.sam3_ready
-                else:
-                    self._masking_available = self._setup_state.masking_ready
-                self._enable_masking = self._enable_masking and self._masking_available
+                self._refresh_masking_availability()
         except (ValueError, TypeError):
             pass
 
@@ -814,10 +822,9 @@ class Plugin360Panel(lf.ui.Panel):
             ok = install_default_tier(on_output=_progress)
             self._install_busy = False
             self._setup_state = check_masking_setup()
-            self._masking_available = self._setup_state.masking_ready
+            self._refresh_masking_availability(auto_enable=ok)
             if ok:
                 self._install_button_text = "Masking installed"
-                self._enable_masking = self._masking_available
             else:
                 self._install_button_text = "Install failed — retry"
                 self._enable_masking = False
@@ -844,10 +851,9 @@ class Plugin360Panel(lf.ui.Panel):
             ok = install_video_tracking(on_output=_progress)
             self._install_busy = False
             self._setup_state = check_masking_setup()
-            self._masking_available = self._setup_state.masking_ready
+            self._refresh_masking_availability(auto_enable=ok)
             if ok:
                 self._install_button_text = "Video tracking installed"
-                self._enable_masking = self._masking_available
             else:
                 self._install_button_text = "Install failed — retry"
                 self._enable_masking = False
@@ -874,11 +880,9 @@ class Plugin360Panel(lf.ui.Panel):
             ok = install_premium_tier(on_output=_progress)
             self._install_busy = False
             self._setup_state = check_masking_setup()
-            # SAM 3 install sets SAM 3 availability, not FullCircle
-            self._masking_available = self._setup_state.sam3_ready
+            self._refresh_masking_availability(auto_enable=ok)
             if ok:
                 self._install_button_text = "SAM 3 installed"
-                self._enable_masking = self._masking_available
             else:
                 self._install_button_text = "Install failed — retry"
                 self._enable_masking = False
