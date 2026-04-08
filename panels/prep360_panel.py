@@ -32,7 +32,7 @@ from ..core.setup_checks import (
     make_sam3_install_failure_report, verify_hf_token_detailed,
 )
 from ..core.pipeline import PipelineConfig, PipelineJob, PipelineResult
-from ..core.presets import VIEW_PRESETS
+from ..core.presets import DEFAULT_PRESET, VIEW_PRESETS
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +41,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 PRESET_NAMES = [
-    "default",
     "cubemap",
+    "default",
+    "low",
+    "medium",
+    "high",
+    "ultra",
 ]
 
 PRESET_LABELS = [
-    "Default (16 views)",
     "Cubemap (6 views)",
+    "Default (16 views)",
+    "Low (10 views)",
+    "Medium (14 views)",
+    "High (20 views)",
+    "Ultra (24 views)",
 ]
 
 COLMAP_MATCHERS = ["sequential", "exhaustive"]
@@ -87,7 +95,11 @@ BLUR_METRICS = [
 # Human-readable coverage descriptions per preset
 COVERAGE_DESCRIPTIONS = {
     "cubemap": "4 horizon, 1 top, 1 bottom",
-    "default": "8+8 two-ring layout at +/-35°, no poles",
+    "default": "8+8 two-ring layout at ±35°, no poles",
+    "low": "10 Fibonacci-spiral views, poles to poles",
+    "medium": "14 Fibonacci-spiral views, poles to poles",
+    "high": "20 Fibonacci-spiral views, poles to poles",
+    "ultra": "24 Fibonacci-spiral views, poles to poles",
 }
 
 # ---------------------------------------------------------------------------
@@ -132,8 +144,8 @@ class Plugin360Panel(lf.ui.Panel):
         self._sam3_setup_report: Sam3SetupReport = check_sam3_setup(
             setup_state=self._setup_state
         )
-        self._masking_method_idx: int = 0  # 0=Default, 1=SAM 3
-        self._masking_available: bool = self._setup_state.fullcircle_ready
+        self._masking_method_idx: int = 1  # SAM 3 only in the UI
+        self._masking_available: bool = self._setup_state.sam3_ready
         self._enable_masking: bool = False
         self._enable_diagnostics: bool = False
         self._mask_prompts_str: str = "person"
@@ -149,7 +161,7 @@ class Plugin360Panel(lf.ui.Panel):
         self._sam3_install_progress_phase: float = 0.0
 
         # Reframe
-        self._preset_idx: int = 0
+        self._preset_idx: int = PRESET_NAMES.index(DEFAULT_PRESET)
         self._output_size_idx: int = 3  # index into OUTPUT_SIZES, default 1920
         self._output_size: int = OUTPUT_SIZES[3]
         self._jpeg_quality: int = 97
@@ -218,7 +230,6 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("est_frames_text", self._get_est_frames_text)
 
         # -- Masking --
-        model.bind("masking_method_idx", lambda: str(self._masking_method_idx), self._set_masking_method)
         model.bind("enable_masking", lambda: self._enable_masking, self._set_enable_masking)
         model.bind("enable_diagnostics", lambda: self._enable_diagnostics, self._set_enable_diagnostics)
         model.bind("mask_prompts_str", lambda: self._mask_prompts_str, self._set_mask_prompts)
@@ -226,15 +237,9 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("hf_verify_text", lambda: self._hf_verify_text)
         model.bind_func("masking_available", lambda: self._masking_available)
         model.bind_func("masking_backend_text", self._get_masking_backend_text)
-        model.bind_func("fullcircle_status_text", self._get_fullcircle_status_text)
-        model.bind_func("fullcircle_action_text", lambda: self._install_button_text)
-        # FullCircle conditional states
-        model.bind_func("show_masking_fullcircle", lambda: self._masking_method_idx == 0)
-        model.bind_func("show_masking_install", lambda: not self._setup_state.fullcircle_ready)
-        model.bind_func("show_masking_controls", lambda: self._setup_state.fullcircle_ready)
         # SAM 3 conditional states
-        model.bind_func("show_masking_sam3_setup", lambda: self._masking_method_idx == 1 and not self._setup_state.sam3_ready)
-        model.bind_func("show_masking_sam3_ready", lambda: self._masking_method_idx == 1 and self._setup_state.sam3_ready)
+        model.bind_func("show_masking_sam3_setup", lambda: not self._setup_state.sam3_ready)
+        model.bind_func("show_masking_sam3_ready", lambda: self._setup_state.sam3_ready)
         model.bind_func("sam3_status_message", lambda: self._sam3_setup_report.message)
         model.bind_func("show_sam3_notice", lambda: bool(self._sam3_notice_text))
         model.bind_func("sam3_notice_text", lambda: self._sam3_notice_text)
@@ -436,15 +441,8 @@ class Plugin360Panel(lf.ui.Panel):
         }
         return labels.get(status, status.replace("_", " ").title())
 
-    def _get_fullcircle_status_text(self) -> str:
-        if self._setup_state.fullcircle_ready:
-            return "Default masking is ready on this install. No HuggingFace account required."
-        return "Default masking runtime is missing or damaged. Repair the local masking runtime."
-
     def _get_sam3_reassurance_text(self) -> str:
-        if self._setup_state.fullcircle_ready:
-            return "Default masking remains available while SAM 3 setup is incomplete."
-        return "Default masking runtime needs repair on this install."
+        return "The plugin still works without operator masking while SAM 3 setup is incomplete."
 
     def _get_sam3_saved_token_text(self) -> str:
         if self._sam3_setup_report.access_status == "granted":
@@ -472,7 +470,7 @@ class Plugin360Panel(lf.ui.Panel):
         return "SAM 3 files are already cached on this machine from an earlier setup."
 
     def _get_sam3_install_button_text(self) -> str:
-        if self._install_busy and self._masking_method_idx == 1:
+        if self._install_busy:
             return self._install_button_text
         stage = self._sam3_setup_report.overall_stage
         if stage == "needs_weights":
@@ -498,7 +496,7 @@ class Plugin360Panel(lf.ui.Panel):
         }
 
     def _show_sam3_install_progress(self) -> bool:
-        return self._sam3_install_in_progress and self._masking_method_idx == 1
+        return self._sam3_install_in_progress
 
     def _show_sam3_check_button(self) -> bool:
         return (
@@ -952,9 +950,7 @@ class Plugin360Panel(lf.ui.Panel):
         self._mask_prompts_str = str(val)
 
     def _selected_masking_ready(self) -> bool:
-        if self._masking_method_idx == 1:
-            return self._setup_state.sam3_ready
-        return self._setup_state.fullcircle_ready
+        return self._setup_state.sam3_ready
 
     def _refresh_masking_availability(self, *, auto_enable: bool = False) -> None:
         ready = self._selected_masking_ready()
@@ -982,23 +978,8 @@ class Plugin360Panel(lf.ui.Panel):
             self._sam3_edit_token = False
         self._refresh_masking_availability(auto_enable=auto_enable)
 
-    def _set_masking_method(self, val):
-        try:
-            idx = int(val)
-            if idx in (0, 1):
-                self._masking_method_idx = idx
-                self._refresh_masking_availability()
-        except (ValueError, TypeError):
-            pass
-
     def _get_masking_backend_text(self):
-        if self._masking_method_idx == 1:
-            return "SAM 3 (large model)"
-        if self._setup_state.fullcircle_ready:
-            return "Default (YOLO + SAM v1 + SAM v2)"
-        if self._setup_state.default_tier_ready:
-            return "Default runtime needs repair"
-        return "Default runtime unavailable"
+        return "SAM 3 (large model)"
 
     def _set_hf_token_input(self, val):
         self._hf_token_input = str(val)
@@ -1439,10 +1420,9 @@ class Plugin360Panel(lf.ui.Panel):
         sharpness_modes = ["none", "basic", "best"]
         blur_metric = BLUR_METRICS[self._blur_metric_idx]["value"]
 
-        # Pin masking_method and mask_backend explicitly by UI selection —
-        # do not pass active_backend through, which can auto-promote to sam3
-        masking_method = "sam3_cubemap" if self._masking_method_idx == 1 else "fullcircle"
-        mask_backend = "sam3" if self._masking_method_idx == 1 else "yolo_sam1"
+        # The UI now exposes only the SAM 3 masking path.
+        masking_method = "sam3_cubemap"
+        mask_backend = "sam3"
 
         config = PipelineConfig(
             video_path=self._video_path,
