@@ -4,22 +4,23 @@
 Sharpest Frame Extractor Module
 
 Extracts the sharpest frame from each time-interval chunk of a video
-using FFmpeg's blurdetect filter.  Instead of extracting all frames and
-then discarding blurry ones, this analyses blur on every frame *first*
-and only extracts the winners.
+using a two-pass pipeline: FFmpeg for scene detection, OpenCV for
+sharpness scoring (Tenengrad or Laplacian).
 
-Scene-aware chunking: a ``select='gte(scene,0)'`` filter in the same
-pass populates ``lavfi.scene_score`` for free.  When a score exceeds
+Scene-aware chunking: FFmpeg's ``select='gte(scene,0)'`` filter
+populates ``lavfi.scene_score``.  When a score exceeds
 ``scene_threshold``, the interval chunk is split so both sides of the
 transition get a representative sharp frame.
 
-Algorithm (Normal/Maximum modes):
-  1. Run ffmpeg blurdetect + scene scoring -> per-frame metadata
-  2. Divide frames into interval chunks; split at scene boundaries
-  3. Pick lowest-blur frame per (sub-)chunk
-  4. Extract only those frames with ffmpeg select filter
+Algorithm (Basic/Best modes):
+  1. FFmpeg scene detection pass -> per-frame scene scores
+  2. OpenCV scoring pass -> per-frame sharpness scores
+  3. Divide frames into interval chunks; split at scene boundaries
+  4. Pick highest-scoring frame per (sub-)chunk
+  5. Extract only those frames with ffmpeg seeks
 """
 
+import bisect
 import json
 import os
 import re
@@ -50,6 +51,54 @@ _SUBPROCESS_FLAGS: Dict[str, Any] = (
 MANIFEST_FILENAME = "extraction_manifest.json"
 
 
+# -- scene score merging ----------------------------------------------------
+
+def _merge_scene_scores(
+    scored_frames: List[Tuple[float, float]],
+    scene_data: List[Tuple[int, float]],
+    analysis_fps: float,
+    start_sec: float,
+) -> List[Tuple[float, float, float]]:
+    """Merge FFmpeg scene scores into scored frame data.
+
+    Uses bisect for O(n log m) instead of O(n*m).
+
+    Args:
+        scored_frames: (timestamp_sec, sharpness_score) from OpenCV pass.
+        scene_data: (frame_number, scene_score) from FFmpeg pass.
+        analysis_fps: FPS used in FFmpeg scene detection pass.
+        start_sec: Video start offset.
+
+    Returns:
+        List of (timestamp_sec, sharpness_score, scene_score) tuples.
+    """
+    if not scene_data:
+        return [(ts, score, 0.0) for ts, score in scored_frames]
+
+    scene_times = [start_sec + (frame_num / analysis_fps) for frame_num, _ in scene_data]
+    scene_scores = [score for _, score in scene_data]
+    tolerance = (1.0 / analysis_fps) * 1.5
+
+    merged = []
+    for ts, sharpness in scored_frames:
+        idx = bisect.bisect_left(scene_times, ts)
+        best_scene = 0.0
+        best_dist = float("inf")
+
+        for candidate_idx in (idx - 1, idx):
+            if 0 <= candidate_idx < len(scene_times):
+                dist = abs(ts - scene_times[candidate_idx])
+                if dist < best_dist:
+                    best_dist = dist
+                    best_scene = scene_scores[candidate_idx]
+
+        if best_dist > tolerance:
+            best_scene = 0.0
+        merged.append((ts, sharpness, best_scene))
+
+    return merged
+
+
 # -- data classes -----------------------------------------------------------
 
 @dataclass
@@ -57,16 +106,15 @@ class SharpestConfig:
     """Configuration for sharpest-frame extraction.
 
     Extraction sharpness levels (``extraction_sharpness``):
-      - ``"none"``:    extract at fixed intervals, no analysis
-      - ``"fast"``:    extract 3× candidates, Laplacian score, keep sharpest
-      - ``"normal"``:  blurdetect on subsampled candidates (~5× FPS)
-      - ``"maximum"``: blurdetect on every frame in the video
+      - ``"none"``:  extract at fixed intervals, no analysis
+      - ``"basic"``: ~10 candidates per interval, OpenCV scoring
+      - ``"best"``:  score every frame in the video
     """
     interval: float = 2.0            # seconds between selections
-    extraction_sharpness: str = "normal"  # none, fast, normal, maximum
+    extraction_sharpness: str = "best"  # none, basic, best
+    blur_metric: str = "tenengrad"   # tenengrad, laplacian
     scene_threshold: float = 0.3     # scene-change score to split chunks
     scale_width: int = 640           # resolution for blur analysis
-    block_size: int = 32             # blurdetect block dimensions
     quality: int = 95                # JPEG quality (1-100)
     output_format: str = "jpg"       # jpg or png
     start_sec: Optional[float] = None
@@ -108,7 +156,7 @@ class SharpestExtractor:
         cancel_check: Optional[Callable[[], bool]] = None,
         prefix_source: bool = True,
     ) -> SharpestResult:
-        """Full pipeline: probe fps -> blurdetect -> parse -> extract.
+        """Full pipeline: scene detect -> score -> select -> extract.
 
         Args:
             video_path:  Path to input video file.
@@ -132,10 +180,6 @@ class SharpestExtractor:
 
         out.mkdir(parents=True, exist_ok=True)
 
-        def _progress(cur, tot, msg):
-            if progress_callback:
-                progress_callback(cur, tot, msg)
-
         eq = config.extraction_sharpness
 
         # None: extract at fixed intervals, no analysis
@@ -147,101 +191,13 @@ class SharpestExtractor:
                 prefix_source=prefix_source,
             )
 
-        # Fast: extract 3× candidates, Laplacian score, keep sharpest per interval
-        if eq == "fast":
-            return self._extract_fast_blur(
-                str(video), str(out), config,
-                progress_callback=progress_callback,
-                cancel_check=cancel_check,
-                prefix_source=prefix_source,
-            )
-
-        # Normal / Maximum: blurdetect-based analysis
-        # Normal subsamples to ~5× target FPS; Maximum analyzes every frame
-        _progress(0, 100, "Probing video...")
-        native_fps = self._probe_fps(str(video))
-        if native_fps <= 0:
-            return SharpestResult(success=False, error="Could not determine video FPS")
-        duration_sec = self._probe_duration(str(video))
-
-        # Normal mode: subsample to ~5 candidates per interval
-        # Maximum mode: analyze at native fps (all frames)
-        if eq == "normal":
-            analysis_fps = min(5.0 / max(config.interval, 0.1), native_fps)
-        else:
-            analysis_fps = native_fps
-
-        chunk_size = max(1, round(analysis_fps * config.interval))
-
-        _progress(0, 100, f"Analyzing ({int(analysis_fps)} fps, {chunk_size}/chunk)...")
-        metadata_path = None
-        try:
-            metadata_path = Path(tempfile.mktemp(suffix="_blurdetect.txt",
-                                                  dir=str(out)))
-            ok, err = self._run_blurdetect(
-                str(video), metadata_path, config,
-                analysis_fps=analysis_fps if eq == "normal" else None,
-                progress_callback=progress_callback,
-                duration_sec=duration_sec,
-                cancel_check=cancel_check,
-            )
-            if not ok:
-                return SharpestResult(success=False, error=f"blurdetect failed: {err}")
-
-            # Parse and select best frames
-            _progress(85, 100, "Selecting sharpest frames...")
-            frame_data = self._parse_metadata_file(metadata_path)
-            best_frames = self._parse_best_frames(
-                frame_data, chunk_size, config.scene_threshold,
-            )
-            total_analyzed = len(frame_data)
-
-            if not best_frames:
-                return SharpestResult(
-                    success=False,
-                    total_frames_analyzed=total_analyzed,
-                    error="No frames selected (blurdetect returned no data)",
-                )
-
-            if cancel_check and cancel_check():
-                return SharpestResult(success=False, error="Cancelled")
-
-            # Extract winners — use timestamps for subsampled mode
-            stem = video.stem + "_" if prefix_source else ""
-            _progress(85, 100, f"Extracting {len(best_frames)} sharpest frames...")
-
-            if eq == "normal":
-                # Frame numbers are in the subsampled stream; convert to timestamps
-                start_offset = config.start_sec or 0.0
-                timestamps = [start_offset + (f / analysis_fps) for f in best_frames]
-                frame_paths = self._extract_at_timestamps(
-                    str(video), timestamps, str(out), config,
-                    stem=stem,
-                    progress_callback=progress_callback,
-                    cancel_check=cancel_check,
-                )
-            else:
-                frame_paths = self._extract_frames(
-                    str(video), best_frames, str(out), config,
-                    stem=stem,
-                    progress_callback=progress_callback,
-                    cancel_check=cancel_check,
-                )
-
-            start = config.start_sec or 0.0
-            self._write_manifest(out, frame_paths, video, config, best_frames, analysis_fps, start)
-
-            return SharpestResult(
-                success=True,
-                total_frames_analyzed=total_analyzed,
-                frames_extracted=len(frame_paths),
-                output_dir=str(out),
-                frame_paths=frame_paths,
-            )
-
-        finally:
-            if metadata_path and metadata_path.exists():
-                metadata_path.unlink(missing_ok=True)
+        # Basic / Best: two-pass pipeline (scene detect + OpenCV scoring)
+        return self._extract_scored(
+            str(video), str(out), config,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            prefix_source=prefix_source,
+        )
 
     # -- interval-only extraction -------------------------------------------
 
@@ -299,6 +255,17 @@ class SharpestExtractor:
                     progress_callback(int(pct), 100,
                                       f"Extracting {i + 1}/{len(timestamps)}")
 
+            self._write_manifest(
+                out,
+                frame_paths,
+                Path(video_path),
+                config,
+                timestamps,
+                fps,
+                start,
+                extraction_mode="interval",
+            )
+
             return SharpestResult(
                 success=True,
                 total_frames_analyzed=0,
@@ -309,9 +276,114 @@ class SharpestExtractor:
         finally:
             cap.release()
 
-    # -- fast blur extraction -----------------------------------------------
+    # -- scored extraction (Basic / Best) -----------------------------------
 
-    def _extract_fast_blur(
+    def _score_frame(self, frame: "np.ndarray", config: SharpestConfig) -> float:
+        """Score a BGR frame for sharpness using the configured metric."""
+        import cv2
+        import numpy as np
+
+        h, w = frame.shape[:2]
+        if config.scale_width > 0 and w > config.scale_width:
+            scale = config.scale_width / w
+            frame = cv2.resize(frame, (config.scale_width, int(h * scale)))
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        if config.blur_metric == "laplacian":
+            return self._score_laplacian(gray)
+        return self._score_tenengrad(gray)
+
+    def _score_all_frames(
+        self,
+        cap: "cv2.VideoCapture",
+        config: SharpestConfig,
+        start_sec: float,
+        end_sec: float,
+        progress_callback: Optional[Callable] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> List[Tuple[float, float]]:
+        """Score every frame sequentially. Returns list of (timestamp_sec, score)."""
+        import cv2
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        cap.set(cv2.CAP_PROP_POS_MSEC, start_sec * 1000)
+
+        scored: List[Tuple[float, float]] = []
+        total_expected = int((end_sec - start_sec) * fps)
+        frame_idx = 0
+
+        while True:
+            if cancel_check and cancel_check():
+                return scored
+
+            # Capture timestamp BEFORE read — read() advances the position
+            ts = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            if ts > end_sec:
+                break
+
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+
+            score = self._score_frame(frame, config)
+            scored.append((ts, score))
+            frame_idx += 1
+
+            if progress_callback and frame_idx % 30 == 0:
+                progress_callback(frame_idx, max(total_expected, 1),
+                                  f"Scoring frame {frame_idx}")
+
+        return scored
+
+    def _score_candidate_frames(
+        self,
+        cap: "cv2.VideoCapture",
+        config: SharpestConfig,
+        start_sec: float,
+        end_sec: float,
+        progress_callback: Optional[Callable] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> List[Tuple[float, float]]:
+        """Score ~5fps evenly-spaced candidates per interval. Returns (timestamp, score)."""
+        import cv2
+
+        # Sample at ~5fps, giving ~10 candidates for the default 2s interval.
+        sample_fps = 5.0
+        scored: List[Tuple[float, float]] = []
+
+        # Build all candidate timestamps
+        all_timestamps: List[float] = []
+        t = start_sec
+        while t < end_sec:
+            window_end = min(t + config.interval, end_sec)
+            n_candidates = max(1, round((window_end - t) * sample_fps))
+            step = (window_end - t) / n_candidates
+            for j in range(n_candidates):
+                ts = t + step * j
+                if ts < end_sec:
+                    all_timestamps.append(ts)
+            t += config.interval
+
+        for i, ts in enumerate(all_timestamps):
+            if cancel_check and cancel_check():
+                return scored
+
+            cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+
+            score = self._score_frame(frame, config)
+            scored.append((ts, score))
+
+            if progress_callback and i % 10 == 0:
+                progress_callback(i, len(all_timestamps),
+                                  f"Scoring candidate {i + 1}/{len(all_timestamps)}")
+
+        return scored
+
+    def _extract_scored(
         self,
         video_path: str,
         output_dir: str,
@@ -320,83 +392,133 @@ class SharpestExtractor:
         cancel_check: Optional[Callable[[], bool]] = None,
         prefix_source: bool = True,
     ) -> SharpestResult:
-        """Read 3× candidates per interval from video, score with Laplacian,
-        save only the sharpest.  No intermediate files — all in memory."""
+        """Two-pass extraction: FFmpeg scene detect + OpenCV sharpness scoring."""
         import cv2
 
         out = Path(output_dir)
         stem = Path(video_path).stem + "_" if prefix_source else ""
         start = config.start_sec or 0.0
-        end = config.end_sec
+
+        def _progress(cur, tot, msg):
+            if progress_callback:
+                progress_callback(cur, tot, msg)
+
+        # -- Probe video properties --
+        native_fps = self._probe_fps(video_path)
+        if native_fps <= 0:
+            return SharpestResult(success=False, error="Could not determine video FPS")
+        duration_sec = self._probe_duration(video_path)
+
+        is_best = config.extraction_sharpness == "best"
+
+        # Analysis FPS: Basic samples ~5fps, Best uses native
+        if is_best:
+            analysis_fps = native_fps
+        else:
+            analysis_fps = min(5.0 / max(config.interval, 0.1), native_fps)
+
+        chunk_size = max(1, round(analysis_fps * config.interval))
+
+        # -- Pass 1: FFmpeg scene detection (0-40%) --
+        _progress(0, 100, "Detecting scene changes...")
+        metadata_path = None
+        try:
+            metadata_path = Path(tempfile.mktemp(suffix="_scene.txt",
+                                                  dir=output_dir))
+            ok, err = self._run_scene_detect(
+                video_path, metadata_path, config,
+                analysis_fps=analysis_fps if not is_best else None,
+                progress_callback=lambda c, t, m: _progress(
+                    int(c * 40 / max(t, 1)), 100, m),
+                duration_sec=duration_sec,
+                cancel_check=cancel_check,
+            )
+            if not ok:
+                return SharpestResult(success=False,
+                                      error=f"Scene detection failed: {err}")
+
+            scene_data = self._parse_scene_metadata(metadata_path)
+        finally:
+            if metadata_path and metadata_path.exists():
+                metadata_path.unlink(missing_ok=True)
+
+        if cancel_check and cancel_check():
+            return SharpestResult(success=False, error="Cancelled")
+
+        # -- Pass 2: OpenCV scoring (40-85%) --
+        _progress(40, 100, "Scoring frames for sharpness...")
 
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            return SharpestResult(success=False, error=f"Cannot open {video_path}")
+            return SharpestResult(success=False,
+                                  error=f"Cannot open {video_path}")
 
         try:
             fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
             duration = total_frames / fps if fps > 0 else 0
-            if end is None:
-                end = duration
+            end = config.end_sec or duration
 
-            # Build interval windows: each has 3 candidate timestamps
-            candidates_per_interval = 3
-            intervals: List[List[float]] = []
-            t = start
-            while t < end:
-                window_end = min(t + config.interval, end)
-                step = (window_end - t) / candidates_per_interval
-                candidates = [t + step * j for j in range(candidates_per_interval)]
-                intervals.append(candidates)
-                t += config.interval
-
-            frame_paths: List[str] = []
-            total_scored = 0
-
-            for i, candidate_times in enumerate(intervals):
-                if cancel_check and cancel_check():
-                    return SharpestResult(success=False, error="Cancelled")
-
-                # Read and score each candidate in memory
-                best_frame = None
-                best_score = -1.0
-
-                for ts in candidate_times:
-                    cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000)
-                    ok, frame = cap.read()
-                    if not ok or frame is None:
-                        continue
-
-                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    score = cv2.Laplacian(gray, cv2.CV_64F).var()
-                    total_scored += 1
-
-                    if score > best_score:
-                        best_score = score
-                        best_frame = frame
-
-                # Save winner
-                if best_frame is not None:
-                    out_name = f"{stem}{len(frame_paths) + 1:05d}.jpg"
-                    cv2.imwrite(str(out / out_name), best_frame,
-                                [cv2.IMWRITE_JPEG_QUALITY, config.quality])
-                    frame_paths.append(str(out / out_name))
-
-                if progress_callback:
-                    pct = (i + 1) / len(intervals) * 100
-                    progress_callback(int(pct), 100,
-                                      f"Scoring {i + 1}/{len(intervals)} intervals")
-
-            return SharpestResult(
-                success=True,
-                total_frames_analyzed=total_scored,
-                frames_extracted=len(frame_paths),
-                output_dir=str(out),
-                frame_paths=frame_paths,
-            )
+            if is_best:
+                scored_frames = self._score_all_frames(
+                    cap, config, start, end,
+                    progress_callback=lambda c, t, m: _progress(
+                        40 + int(c * 45 / max(t, 1)), 100, m),
+                    cancel_check=cancel_check,
+                )
+            else:
+                scored_frames = self._score_candidate_frames(
+                    cap, config, start, end,
+                    progress_callback=lambda c, t, m: _progress(
+                        40 + int(c * 45 / max(t, 1)), 100, m),
+                    cancel_check=cancel_check,
+                )
         finally:
             cap.release()
+
+        if not scored_frames:
+            return SharpestResult(success=False, error="No frames scored")
+
+        if cancel_check and cancel_check():
+            return SharpestResult(success=False, error="Cancelled")
+
+        # -- Select best per chunk (scene-aware) --
+        _progress(85, 100, "Selecting sharpest frames...")
+
+        # analysis_fps is always a valid float here
+        scored_with_scenes = _merge_scene_scores(
+            scored_frames, scene_data, analysis_fps, start)
+
+        winner_timestamps = self._parse_best_frames(
+            scored_with_scenes, chunk_size, config.scene_threshold)
+
+        if not winner_timestamps:
+            return SharpestResult(
+                success=False,
+                total_frames_analyzed=len(scored_frames),
+                error="No frames selected",
+            )
+
+        # -- Extract winners at full quality (85-100%) --
+        _progress(85, 100, f"Extracting {len(winner_timestamps)} sharpest frames...")
+        frame_paths = self._extract_at_timestamps(
+            video_path, winner_timestamps, output_dir, config,
+            stem=stem,
+            progress_callback=lambda c, t, m: _progress(
+                85 + int(c * 15 / max(t, 1)), 100, m),
+            cancel_check=cancel_check,
+        )
+
+        self._write_manifest(out, frame_paths, Path(video_path), config,
+                             winner_timestamps, analysis_fps, start)
+
+        return SharpestResult(
+            success=True,
+            total_frames_analyzed=len(scored_frames),
+            frames_extracted=len(frame_paths),
+            output_dir=output_dir,
+            frame_paths=frame_paths,
+        )
 
     # -- timestamp-based extraction -----------------------------------------
 
@@ -489,7 +611,7 @@ class SharpestExtractor:
         except (KeyError, IndexError, ValueError, TypeError):
             return 0.0
 
-    def _run_blurdetect(
+    def _run_scene_detect(
         self,
         video_path: str,
         metadata_path: Path,
@@ -499,24 +621,20 @@ class SharpestExtractor:
         duration_sec: float = 0.0,
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Tuple[bool, str]:
-        """Run ffmpeg blurdetect + scene scoring, write per-frame metadata.
+        """Run FFmpeg scene detection only (no blurdetect), write per-frame metadata.
 
         Args:
             analysis_fps: If set, subsample with fps filter before analysis.
-                This dramatically reduces frames analyzed for Normal mode.
+                Pass None for Best mode (native fps, no fps filter).
         """
-        # Build filter chain
         filters = []
         if analysis_fps is not None:
             filters.append(f"fps={analysis_fps:.4f}")
         filters.append(f"scale={config.scale_width}:-1")
         filters.append(f"select='gte(scene\\,0)'")
-        filters.append(
-            f"blurdetect=block_width={config.block_size}"
-            f":block_height={config.block_size}"
-        )
         filters.append(f"metadata=print:file={metadata_path.name}")
         vf = ",".join(filters)
+
         cmd = [
             self.ffmpeg_path, "-hide_banner", "-y",
             "-progress", "pipe:1", "-nostats",
@@ -528,14 +646,12 @@ class SharpestExtractor:
             cmd.extend(["-to", str(config.end_sec)])
         cmd.extend(["-vf", vf, "-an", "-f", "null", "-"])
 
-        # Effective duration for percentage calculation
         eff_duration = duration_sec
         if config.start_sec or config.end_sec:
             start = config.start_sec or 0.0
             end = config.end_sec or duration_sec
             eff_duration = max(0.0, end - start)
 
-        # Format duration as MM:SS for display
         def _fmt_time(secs):
             m, s = divmod(int(secs), 60)
             h, m = divmod(m, 60)
@@ -548,7 +664,6 @@ class SharpestExtractor:
             text=True, cwd=str(metadata_path.parent), **_SUBPROCESS_FLAGS,
         )
 
-        # Parse ffmpeg -progress output for time/speed updates
         last_pct = -1
         current_time_us = 0
         current_speed = ""
@@ -566,25 +681,22 @@ class SharpestExtractor:
             elif line.startswith("speed="):
                 current_speed = line.split("=", 1)[1].strip()
             elif line.startswith("progress="):
-                # Each progress block ends with "progress=continue" or "progress=end"
-                # -- emit a callback once per block with accumulated values
                 if not progress_callback:
                     continue
                 elapsed_sec = current_time_us / 1_000_000
                 elapsed_display = _fmt_time(elapsed_sec)
 
                 if eff_duration > 0:
-                    # Blurdetect occupies 0-85% of overall progress
                     raw_pct = min(elapsed_sec / eff_duration, 1.0)
-                    pct = int(raw_pct * 85)
+                    pct = int(raw_pct * 100)
                     if pct == last_pct:
                         continue
                     last_pct = pct
                     speed_str = f" [{current_speed}]" if current_speed and current_speed != "N/A" else ""
-                    msg = f"Analyzing: {elapsed_display} / {total_display} ({int(raw_pct * 100)}%){speed_str}"
+                    msg = f"Scene detect: {elapsed_display} / {total_display} ({pct}%){speed_str}"
                     progress_callback(pct, 100, msg)
                 else:
-                    msg = f"Analyzing: {elapsed_display}"
+                    msg = f"Scene detect: {elapsed_display}"
                     progress_callback(0, 0, msg)
 
         proc.wait()
@@ -594,15 +706,13 @@ class SharpestExtractor:
         return True, ""
 
     @staticmethod
-    def _parse_metadata_file(metadata_path: Path) -> List[Tuple[int, float, float]]:
-        """Parse blurdetect metadata file into a list of (frame, blur, scene_score) tuples."""
+    def _parse_scene_metadata(metadata_path: Path) -> List[Tuple[int, float]]:
+        """Parse scene-only metadata file into (frame_number, scene_score) tuples."""
         pat_frame = re.compile(r"frame:(\d+)")
-        pat_blur = re.compile(r"lavfi\.blur=([0-9.]+)")
         pat_scene = re.compile(r"lavfi\.scene_score=([0-9.]+)")
 
-        frame_data: List[Tuple[int, float, float]] = []
+        frame_data: List[Tuple[int, float]] = []
         current_frame = -1
-        current_blur = -1.0
         current_scene = 0.0
 
         try:
@@ -614,19 +724,10 @@ class SharpestExtractor:
             line = line.strip()
             m = pat_frame.search(line)
             if m:
-                # Emit previous frame if complete
-                if current_frame >= 0 and current_blur >= 0:
-                    frame_data.append((current_frame, current_blur, current_scene))
+                if current_frame >= 0:
+                    frame_data.append((current_frame, current_scene))
                 current_frame = int(m.group(1))
-                current_blur = -1.0
                 current_scene = 0.0
-                continue
-            m = pat_blur.search(line)
-            if m and current_frame >= 0:
-                try:
-                    current_blur = float(m.group(1))
-                except ValueError:
-                    pass
                 continue
             m = pat_scene.search(line)
             if m and current_frame >= 0:
@@ -635,9 +736,8 @@ class SharpestExtractor:
                 except ValueError:
                     pass
 
-        # Don't forget the last frame
-        if current_frame >= 0 and current_blur >= 0:
-            frame_data.append((current_frame, current_blur, current_scene))
+        if current_frame >= 0:
+            frame_data.append((current_frame, current_scene))
 
         return frame_data
 
@@ -671,7 +771,7 @@ class SharpestExtractor:
             chunk = frame_data[i: i + chunk_size]
             sub_chunks = SharpestExtractor._split_at_scenes(chunk, scene_threshold)
             for sc in sub_chunks:
-                winner = min(sc, key=lambda x: x[1])
+                winner = max(sc, key=lambda x: x[1])
                 best.append(winner[0])
 
         return best
@@ -698,6 +798,22 @@ class SharpestExtractor:
         if current:
             sub_chunks.append(current)
         return sub_chunks
+
+    @staticmethod
+    def _score_tenengrad(gray: "np.ndarray") -> float:
+        """Sobel gradient energy — higher = sharper. Noise-robust via implicit Gaussian."""
+        import cv2
+        import numpy as np
+        sx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        return float(np.mean(sx**2 + sy**2))
+
+    @staticmethod
+    def _score_laplacian(gray: "np.ndarray") -> float:
+        """Laplacian variance — higher = sharper. Gaussian pre-blur for noise reduction."""
+        import cv2
+        blurred = cv2.GaussianBlur(gray, (0, 0), 0.7)
+        return float(cv2.Laplacian(blurred, cv2.CV_64F).var())
 
     def _extract_frames(
         self,
@@ -795,18 +911,18 @@ class SharpestExtractor:
         frame_paths: List[str],
         video_path: Path,
         config: SharpestConfig,
-        frame_numbers: List[int],
+        timestamps: List[float],
         fps: float,
         start_sec: float,
+        extraction_mode: str = "sharpest",
     ):
-        """Write extraction manifest mapping frames to source video timestamps.
-
-        Uses exact frame numbers and FPS for precise timestamp computation.
-        """
+        """Write extraction manifest mapping frames to source video timestamps."""
         manifest = {
             "video": str(video_path.absolute()),
             "video_stem": video_path.stem,
-            "extraction_mode": "sharpest",
+            "extraction_mode": extraction_mode,
+            "extraction_tier": config.extraction_sharpness,
+            "blur_metric": config.blur_metric,
             "interval": config.interval,
             "start_sec": start_sec,
             "end_sec": config.end_sec,
@@ -816,13 +932,10 @@ class SharpestExtractor:
 
         for i, path in enumerate(frame_paths):
             filename = Path(path).name
-            # frame_numbers[i] is the source video frame index
-            frame_num = frame_numbers[i] if i < len(frame_numbers) else 0
-            time_sec = round(start_sec + frame_num / fps, 3)
+            time_sec = round(timestamps[i], 3) if i < len(timestamps) else 0.0
             manifest["frames"].append({
                 "filename": filename,
                 "index": i + 1,
-                "source_frame": frame_num,
                 "time_sec": time_sec,
             })
 
