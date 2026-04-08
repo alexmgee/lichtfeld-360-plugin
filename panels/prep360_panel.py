@@ -145,6 +145,8 @@ class Plugin360Panel(lf.ui.Panel):
         self._sam3_check_button_text: str = "Check Setup"
         self._sam3_edit_token: bool = False
         self._sam3_notice_text: str = ""
+        self._sam3_install_in_progress: bool = False
+        self._sam3_install_progress_phase: float = 0.0
 
         # Reframe
         self._preset_idx: int = 0
@@ -248,6 +250,8 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("sam3_install_button_text", self._get_sam3_install_button_text)
         model.bind_func("sam3_install_disabled", self._get_sam3_install_disabled)
         model.bind_func("show_sam3_install_button", self._show_sam3_install_button)
+        model.bind_func("show_sam3_install_progress", self._show_sam3_install_progress)
+        model.bind_func("sam3_install_progress_value", lambda: f"{self._sam3_install_progress_phase:.4f}")
         model.bind_func("show_sam3_check_button", self._show_sam3_check_button)
         model.bind_func("show_sam3_external_actions", self._show_sam3_external_actions)
         model.bind_func("show_sam3_local_actions", self._show_sam3_local_actions)
@@ -332,6 +336,12 @@ class Plugin360Panel(lf.ui.Panel):
         if self._scrub_fields.sync_all():
             dirty = True
 
+        if self._sam3_install_in_progress:
+            self._sam3_install_progress_phase += 0.08
+            if self._sam3_install_progress_phase > 1.0:
+                self._sam3_install_progress_phase = 0.0
+            dirty = True
+
         # Masking setup polling — disabled pending python3.dll fix
 
         sig = self._ui_signature()
@@ -364,6 +374,8 @@ class Plugin360Panel(lf.ui.Panel):
             self._install_button_text,
             self._sam3_check_button_text,
             self._sam3_notice_text,
+            self._sam3_install_in_progress,
+            round(self._sam3_install_progress_phase, 3),
             (
                 self._sam3_setup_report.token_status,
                 self._sam3_setup_report.access_status,
@@ -484,6 +496,9 @@ class Plugin360Panel(lf.ui.Panel):
             "needs_weights",
             "error",
         }
+
+    def _show_sam3_install_progress(self) -> bool:
+        return self._sam3_install_in_progress and self._masking_method_idx == 1
 
     def _show_sam3_check_button(self) -> bool:
         return (
@@ -978,7 +993,7 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _get_masking_backend_text(self):
         if self._masking_method_idx == 1:
-            return "SAM 3 (0.9B params)"
+            return "SAM 3 (~900M params)"
         if self._setup_state.fullcircle_ready:
             return "Default (YOLO + SAM v1 + SAM v2)"
         if self._setup_state.default_tier_ready:
@@ -1171,6 +1186,8 @@ class Plugin360Panel(lf.ui.Panel):
             return
         self._sam3_notice_text = ""
         self._install_busy = True
+        self._sam3_install_in_progress = True
+        self._sam3_install_progress_phase = 0.08
         self._install_button_text = "Installing SAM 3..."
         if self._handle:
             self._handle.dirty_all()
@@ -1187,6 +1204,8 @@ class Plugin360Panel(lf.ui.Panel):
 
             ok = install_premium_tier(on_output=_progress)
             self._install_busy = False
+            self._sam3_install_in_progress = False
+            self._sam3_install_progress_phase = 0.0
             state = check_masking_setup()
             self._setup_state = state
             if ok:
