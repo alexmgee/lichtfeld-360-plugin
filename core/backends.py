@@ -556,6 +556,13 @@ try:
 except ImportError:
     pass
 
+HAS_SAM3_VIDEO = False
+try:
+    from sam3.model_builder import build_sam3_multiplex_video_predictor  # type: ignore[import-untyped]
+    HAS_SAM3_VIDEO = True
+except ImportError:
+    pass
+
 
 class VideoTrackingBackend(Protocol):
     """Interface for sequence-level video tracking on synthetic views."""
@@ -1593,6 +1600,29 @@ class Sam2VideoBackend:
         if HAS_TORCH and torch.cuda.is_available():
             torch.cuda.empty_cache()
         logger.info("SAM v2 video backend cleaned up")
+
+
+class Sam3VideoBackend:
+    """Future: SAM 3.1 multiplex video tracking.
+
+    Stub only — not yet implemented. Implements VideoTrackingBackend
+    protocol so the interface is defined for future work.
+    """
+
+    def initialize(self) -> None:
+        raise NotImplementedError("SAM 3.1 video tracking not yet implemented")
+
+    def track_sequence(
+        self,
+        frames: list[np.ndarray],
+        initial_mask: np.ndarray | None = None,
+        initial_frame_idx: int = 0,
+        initial_box: np.ndarray | None = None,
+    ) -> list[np.ndarray]:
+        raise NotImplementedError("SAM 3.1 video tracking not yet implemented")
+
+    def cleanup(self) -> None:
+        pass
 
 
 def get_video_backend(
