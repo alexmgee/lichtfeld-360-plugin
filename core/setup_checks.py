@@ -32,6 +32,9 @@ class MaskingSetupState:
     has_sam3: bool = False
     has_weights: bool = False
 
+    # SAM 3.1 video tracking (future)
+    has_sam3_video: bool = False
+
     @property
     def default_tier_ready(self) -> bool:
         return self.has_torch and self.has_yolo and self.has_sam1
@@ -54,13 +57,28 @@ class MaskingSetupState:
         return None
 
     @property
+    def fullcircle_ready(self) -> bool:
+        """FullCircle masking requires YOLO+SAM v1 image backend plus SAM v2 tracking."""
+        return self.default_tier_ready and self.has_sam2
+
+    @property
+    def sam3_ready(self) -> bool:
+        """SAM 3 cubemap masking requires only torch + sam3 + weights."""
+        return self.has_torch and self.has_sam3 and self.has_weights
+
+    @property
     def masking_ready(self) -> bool:
-        """Operator masking requires an image backend plus SAM v2 tracking."""
-        return self.active_backend is not None and self.has_sam2
+        """Backward-compatible alias for fullcircle_ready.
+
+        Panel and pipeline code that predates method-specific gating
+        may still reference this. It maps to the FullCircle contract only.
+        """
+        return self.fullcircle_ready
 
     @property
     def is_ready(self) -> bool:
-        return self.masking_ready
+        """True if any masking method is ready to run."""
+        return self.fullcircle_ready or self.sam3_ready
 
     @property
     def first_incomplete_step(self) -> int:
@@ -132,6 +150,14 @@ def _check_sam3_installed() -> bool:
         return False
 
 
+def _check_sam3_video_installed() -> bool:
+    try:
+        from sam3.model_builder import build_sam3_multiplex_video_predictor  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def _check_hf_token() -> bool:
     try:
         from huggingface_hub import get_token
@@ -186,20 +212,30 @@ def check_masking_setup() -> MaskingSetupState:
         has_access=_check_hf_access(),
         has_sam3=_check_sam3_installed(),
         has_weights=_check_weights_downloaded(),
+        has_sam3_video=_check_sam3_video_installed(),
     )
 
 
 def is_operator_masking_ready() -> bool:
-    """Fast runtime check for operator masking readiness.
+    """Fast runtime check for FullCircle masking readiness.
 
-    Operator masking is considered available only when at least one
-    image backend is importable and SAM v2 temporal tracking is present.
+    FullCircle masking requires at least one image backend (YOLO+SAM v1
+    or SAM 3) plus SAM v2 temporal tracking.
     """
     if not _check_torch_installed() or not _check_sam2_installed():
         return False
     if _check_yolo_installed() and _check_sam1_installed():
         return True
     return _check_sam3_installed() and _check_weights_downloaded()
+
+
+def is_sam3_masking_ready() -> bool:
+    """Fast runtime check for SAM 3 cubemap masking readiness.
+
+    SAM 3 cubemap masking requires only torch + sam3 + weights.
+    Does NOT require SAM v2, YOLO, or SAM v1.
+    """
+    return _check_torch_installed() and _check_sam3_installed() and _check_weights_downloaded()
 
 
 def verify_hf_token(token: str) -> bool:
@@ -513,7 +549,10 @@ def install_premium_tier(on_output=None) -> bool:
     Downloads SAM 3 weights eagerly after install.
     """
     ok = _run_uv_command([
-        "add", "sam3",
+        "sync",
+        "--locked",
+        "--no-dev",
+        "--extra", "sam3-masking",
     ], on_output=on_output)
     if not ok:
         return False
