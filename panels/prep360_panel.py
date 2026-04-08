@@ -248,6 +248,9 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("sam3_install_button_text", self._get_sam3_install_button_text)
         model.bind_func("sam3_install_disabled", self._get_sam3_install_disabled)
         model.bind_func("show_sam3_install_button", self._show_sam3_install_button)
+        model.bind_func("show_sam3_check_button", self._show_sam3_check_button)
+        model.bind_func("show_sam3_external_actions", self._show_sam3_external_actions)
+        model.bind_func("show_sam3_local_actions", self._show_sam3_local_actions)
         model.bind_func("show_sam3_saved_token_notice", self._show_sam3_saved_token_notice)
         model.bind_func("sam3_saved_token_text", self._get_sam3_saved_token_text)
         model.bind_func("show_sam3_account_step", self._show_sam3_account_step)
@@ -481,6 +484,24 @@ class Plugin360Panel(lf.ui.Panel):
             "needs_weights",
             "error",
         }
+
+    def _show_sam3_check_button(self) -> bool:
+        return (
+            self._setup_state.has_token
+            or self._sam3_setup_report.access_status in {"pending", "granted", "network_error"}
+            or self._sam3_setup_report.runtime_status in {"installed", "broken"}
+        )
+
+    def _show_sam3_external_actions(self) -> bool:
+        return True
+
+    def _show_sam3_local_actions(self) -> bool:
+        return (
+            self._show_sam3_token_actions()
+            or self._show_sam3_token_editor()
+            or self._show_sam3_check_button()
+            or self._show_sam3_install_button()
+        )
 
     def _show_sam3_saved_token_notice(self) -> bool:
         return self._setup_state.has_token and not self._sam3_edit_token

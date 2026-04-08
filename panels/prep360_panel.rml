@@ -176,9 +176,8 @@
         <div class="setting-row" data-if="show_sam3_saved_token_notice">
           <span class="status-text status-muted">{{sam3_saved_token_text}}</span>
         </div>
-        <div class="setting-row" data-if="show_sam3_token_actions">
-          <button class="btn btn--secondary btn--compact" data-event-click="toggle_sam3_token_editor" data-attr-disabled="install_busy">{{sam3_change_token_button_text}}</button>
-          <button class="btn btn--secondary btn--compact" data-event-click="forget_hf_token" data-attr-disabled="install_busy">Forget Saved Token</button>
+        <div class="setting-row" data-if="show_sam3_external_actions">
+          <span class="prop-label">HuggingFace</span>
         </div>
         <div class="setting-row" data-if="show_sam3_account_step">
           <button class="btn btn--secondary btn--compact" data-event-click="open_hf_signup">1. Open HuggingFace</button>
@@ -190,14 +189,21 @@
           <span class="prop-label">3. Token</span>
           <input type="text" data-value="hf_token_input" />
         </div>
-        <div class="setting-row" data-if="show_sam3_token_editor">
-          <button class="btn btn--secondary btn--compact" data-event-click="verify_hf_token" data-attr-disabled="install_busy">Verify Access</button>
-          <span class="status-text status-muted">{{hf_verify_text}}</span>
-        </div>
         <div class="setting-row">
           <button class="btn btn--secondary btn--compact" data-event-click="open_hf_tokens">Open HuggingFace Tokens Page</button>
         </div>
-        <div class="setting-row">
+        <div class="setting-row" data-if="show_sam3_local_actions">
+          <span class="prop-label">In Plugin</span>
+        </div>
+        <div class="setting-row" data-if="show_sam3_token_actions">
+          <button class="btn btn--secondary btn--compact" data-event-click="toggle_sam3_token_editor" data-attr-disabled="install_busy">{{sam3_change_token_button_text}}</button>
+          <button class="btn btn--secondary btn--compact" data-event-click="forget_hf_token" data-attr-disabled="install_busy">Forget Saved Token</button>
+        </div>
+        <div class="setting-row" data-if="show_sam3_token_editor">
+          <button class="btn btn-primary btn--compact" data-event-click="verify_hf_token" data-attr-disabled="install_busy">Verify Access</button>
+          <span class="status-text status-muted">{{hf_verify_text}}</span>
+        </div>
+        <div class="setting-row" data-if="show_sam3_check_button">
           <button class="btn btn--secondary btn--compact" data-event-click="check_sam3_setup" data-attr-disabled="install_busy">{{sam3_check_button_text}}</button>
         </div>
         <div class="setting-row" data-if="show_sam3_install_button">
