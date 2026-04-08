@@ -231,7 +231,7 @@
         </div>
         <div class="setting-row">
           <span class="prop-label">Backend</span>
-          <span class="status-text status-muted">SAM 3 (0.9B params)</span>
+          <span class="status-text status-muted">{{masking_backend_text}}</span>
         </div>
         <div class="setting-row">
           <span class="prop-label">Prompts</span>
