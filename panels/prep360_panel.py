@@ -123,6 +123,7 @@ class Plugin360Panel(lf.ui.Panel):
 
         # Masking
         self._setup_state: MaskingSetupState = check_masking_setup()
+        self._masking_method_idx: int = 0  # 0=FullCircle, 1=SAM 3 Cubemap
         self._masking_available: bool = self._setup_state.masking_ready
         self._enable_masking: bool = self._masking_available
         self._enable_diagnostics: bool = False
@@ -203,13 +204,21 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("est_frames_text", self._get_est_frames_text)
 
         # -- Masking --
+        model.bind("masking_method_idx", lambda: str(self._masking_method_idx), self._set_masking_method)
         model.bind("enable_masking", lambda: self._enable_masking, self._set_enable_masking)
         model.bind("enable_diagnostics", lambda: self._enable_diagnostics, self._set_enable_diagnostics)
         model.bind("mask_prompts_str", lambda: self._mask_prompts_str, self._set_mask_prompts)
+        model.bind("hf_token_input", lambda: self._hf_token_input, self._set_hf_token_input)
+        model.bind_func("hf_verify_text", lambda: self._hf_verify_text)
         model.bind_func("masking_available", lambda: self._masking_available)
         model.bind_func("masking_backend_text", self._get_masking_backend_text)
+        # FullCircle conditional states
+        model.bind_func("show_masking_fullcircle", lambda: self._masking_method_idx == 0)
         model.bind_func("show_masking_install", lambda: not self._setup_state.masking_ready)
         model.bind_func("show_masking_controls", lambda: self._setup_state.masking_ready)
+        # SAM 3 conditional states
+        model.bind_func("show_masking_sam3_setup", lambda: self._masking_method_idx == 1 and not self._setup_state.sam3_ready)
+        model.bind_func("show_masking_sam3_ready", lambda: self._masking_method_idx == 1 and self._setup_state.sam3_ready)
         model.bind_func("install_button_text", lambda: self._install_button_text)
         model.bind_func("install_busy", lambda: self._install_busy)
 
@@ -252,6 +261,12 @@ class Plugin360Panel(lf.ui.Panel):
         # Masking setup events
         model.bind_event("install_masking_deps", self._on_install_default_tier)
         model.bind_event("install_video_tracking", self._on_install_video_tracking)
+        # SAM 3 / HuggingFace setup events
+        model.bind_event("install_premium_tier", self._on_install_premium_tier)
+        model.bind_event("open_hf_signup", self._on_open_hf_signup)
+        model.bind_event("open_hf_model", self._on_open_hf_model)
+        model.bind_event("open_hf_tokens", self._on_open_hf_tokens)
+        model.bind_event("verify_hf_token", self._on_verify_hf_token)
         model.bind_func("show_video_tracking_install",
                          lambda: False)
 
@@ -711,6 +726,20 @@ class Plugin360Panel(lf.ui.Panel):
     def _set_mask_prompts(self, val):
         self._mask_prompts_str = str(val)
 
+    def _set_masking_method(self, val):
+        try:
+            idx = int(val)
+            if idx in (0, 1):
+                self._masking_method_idx = idx
+                # Refresh masking availability for the selected method
+                if idx == 1:
+                    self._masking_available = self._setup_state.sam3_ready
+                else:
+                    self._masking_available = self._setup_state.masking_ready
+                self._enable_masking = self._enable_masking and self._masking_available
+        except (ValueError, TypeError):
+            pass
+
     def _get_masking_backend_text(self):
         level = self._setup_state.capability_level
         if level == 3:
@@ -818,6 +847,37 @@ class Plugin360Panel(lf.ui.Panel):
             self._masking_available = self._setup_state.masking_ready
             if ok:
                 self._install_button_text = "Video tracking installed"
+                self._enable_masking = self._masking_available
+            else:
+                self._install_button_text = "Install failed — retry"
+                self._enable_masking = False
+            if self._handle:
+                self._handle.dirty_all()
+
+        threading.Thread(target=_install, daemon=True).start()
+
+    def _on_install_premium_tier(self, handle, event, args):
+        del handle, event, args
+        if self._install_busy:
+            return
+        self._install_busy = True
+        self._install_button_text = "Installing SAM 3..."
+        if self._handle:
+            self._handle.dirty_all()
+
+        def _install():
+            def _progress(msg):
+                self._install_button_text = msg
+                if self._handle:
+                    self._handle.dirty_all()
+
+            ok = install_premium_tier(on_output=_progress)
+            self._install_busy = False
+            self._setup_state = check_masking_setup()
+            # SAM 3 install sets SAM 3 availability, not FullCircle
+            self._masking_available = self._setup_state.sam3_ready
+            if ok:
+                self._install_button_text = "SAM 3 installed"
                 self._enable_masking = self._masking_available
             else:
                 self._install_button_text = "Install failed — retry"
@@ -1036,6 +1096,11 @@ class Plugin360Panel(lf.ui.Panel):
         sharpness_modes = ["none", "basic", "best"]
         blur_metric = BLUR_METRICS[self._blur_metric_idx]["value"]
 
+        # Pin masking_method and mask_backend explicitly by UI selection —
+        # do not pass active_backend through, which can auto-promote to sam3
+        masking_method = "sam3_cubemap" if self._masking_method_idx == 1 else "fullcircle"
+        mask_backend = "sam3" if self._masking_method_idx == 1 else "yolo_sam1"
+
         config = PipelineConfig(
             video_path=self._video_path,
             output_dir=self._output_path,
@@ -1046,9 +1111,10 @@ class Plugin360Panel(lf.ui.Panel):
             blur_scale_width=sharpness_preset["scale_width"],
             quality=self._jpeg_quality,
             enable_masking=self._enable_masking and self._masking_available,
+            masking_method=masking_method,
             enable_diagnostics=self._enable_diagnostics,
             mask_prompts=prompts if prompts else ["person"],
-            mask_backend=self._setup_state.active_backend,
+            mask_backend=mask_backend,
             preset_name=preset_name,
             output_size=self._output_size,
             jpeg_quality=self._jpeg_quality,
