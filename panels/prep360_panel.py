@@ -50,8 +50,6 @@ PRESET_LABELS = [
     "Cubemap (6 views)",
 ]
 
-CUBEMAP_PRESET_IDX = PRESET_NAMES.index("cubemap")
-
 COLMAP_MATCHERS = ["sequential", "exhaustive"]
 MATCH_BUDGET_TIERS = ["fast", "balanced", "default", "high", "custom"]
 
@@ -989,12 +987,6 @@ class Plugin360Panel(lf.ui.Panel):
             idx = int(val)
             if idx in (0, 1):
                 self._masking_method_idx = idx
-                if idx == 1 and self._preset_idx != CUBEMAP_PRESET_IDX:
-                    self._preset_idx = CUBEMAP_PRESET_IDX
-                    self._sam3_notice_text = (
-                        "SAM 3 uses the Cubemap preset in this version, "
-                        "so the preset was switched to Cubemap."
-                    )
                 self._refresh_masking_availability()
         except (ValueError, TypeError):
             pass
@@ -1242,14 +1234,7 @@ class Plugin360Panel(lf.ui.Panel):
         try:
             idx = int(val)
             if 0 <= idx < len(PRESET_NAMES):
-                if self._masking_method_idx == 1 and idx != CUBEMAP_PRESET_IDX:
-                    self._preset_idx = CUBEMAP_PRESET_IDX
-                    self._sam3_notice_text = (
-                        "SAM 3 uses the Cubemap preset in this version. "
-                        "The preset stays on Cubemap while SAM 3 is selected."
-                    )
-                else:
-                    self._preset_idx = idx
+                self._preset_idx = idx
         except (ValueError, TypeError):
             pass
 
