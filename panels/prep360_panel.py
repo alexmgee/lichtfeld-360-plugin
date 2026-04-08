@@ -993,7 +993,7 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _get_masking_backend_text(self):
         if self._masking_method_idx == 1:
-            return "SAM 3 (~900M params)"
+            return "SAM 3 (large model)"
         if self._setup_state.fullcircle_ready:
             return "Default (YOLO + SAM v1 + SAM v2)"
         if self._setup_state.default_tier_ready:
