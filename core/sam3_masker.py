@@ -15,6 +15,7 @@ Pipeline per ERP frame:
 from __future__ import annotations
 
 import json
+import shutil
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -53,6 +54,7 @@ class Sam3MaskerResult:
     mask_dir: str = ""
     erp_mask_dir: str = ""
     diagnostics_path: str = ""
+    diagnostics_error: str = ""
     backend_name: str = ""
 
 
@@ -161,10 +163,12 @@ class Sam3CubemapMasker:
         result.erp_mask_dir = str(erp_masks_root) if erp_masks_root is not None else ""
 
         if self.config.enable_diagnostics:
+            primary_diag_path = masks_root / "masking_diagnostics.json"
             try:
-                diag_path = masks_root / "masking_diagnostics.json"
-                self._write_diagnostics(diag_path, result, frame_diagnostics)
-                result.diagnostics_path = str(diag_path)
+                self._write_diagnostics(primary_diag_path, result, frame_diagnostics)
+                if erp_masks_root is not None:
+                    self._copy_diagnostics_to_erp_masks(primary_diag_path, erp_masks_root)
+                result.diagnostics_path = str(primary_diag_path)
                 if progress_callback:
                     progress_callback(
                         len(frame_files),
@@ -172,7 +176,18 @@ class Sam3CubemapMasker:
                         f"Mask diagnostics ready: {result.diagnostics_path}",
                     )
             except Exception as exc:
+                result.diagnostics_error = str(exc)
                 logger.warning("Failed to write SAM 3 diagnostics: %s", exc)
+                fallback_written = self._write_fallback_diagnostics(
+                    primary_diag_path,
+                    result,
+                    frame_diagnostics,
+                    str(exc),
+                )
+                if fallback_written and erp_masks_root is not None:
+                    self._copy_diagnostics_to_erp_masks(primary_diag_path, erp_masks_root)
+                if fallback_written:
+                    result.diagnostics_path = str(primary_diag_path)
 
         if progress_callback:
             progress_callback(len(frame_files), len(frame_files), "SAM 3 masking complete")
@@ -346,6 +361,40 @@ class Sam3CubemapMasker:
         }
         path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
         logger.info("SAM 3 diagnostics written to %s", path)
+
+    @staticmethod
+    def _copy_diagnostics_to_erp_masks(primary_path: Path, erp_masks_root: Path) -> None:
+        """Mirror diagnostics beside ERP masks for easier run inspection."""
+        erp_masks_root.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(primary_path, erp_masks_root / primary_path.name)
+
+    @staticmethod
+    def _write_fallback_diagnostics(
+        path: Path,
+        result: Sam3MaskerResult,
+        frames: list[dict[str, Any]],
+        error_text: str,
+    ) -> bool:
+        """Best-effort fallback so diagnostics failures stay visible on disk."""
+        fallback_doc = {
+            "version": 1,
+            "mode": "sam3_cubemap",
+            "backend": result.backend_name,
+            "total_frames": int(result.total_frames),
+            "masked_frames": int(result.masked_frames),
+            "frames_written": len(frames),
+            "summary": build_mask_diagnostics_summary(frames),
+            "frames": frames,
+            "error": error_text,
+            "partial": True,
+        }
+        try:
+            path.write_text(json.dumps(fallback_doc, indent=2), encoding="utf-8")
+            logger.warning("Wrote fallback SAM 3 diagnostics to %s", path)
+            return True
+        except Exception as fallback_exc:
+            logger.warning("Failed to write fallback SAM 3 diagnostics: %s", fallback_exc)
+            return False
 
     def _write_per_view_masks(
         self,

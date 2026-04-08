@@ -240,6 +240,7 @@ class TestSam3CubemapMaskerPipeline:
                 frames_dir=str(frames_dir),
                 output_dir=str(output_dir),
                 view_config=VIEW_PRESETS["cubemap"],
+                erp_mask_dir=str(output_dir / "erp_masks"),
             )
 
             assert result.success
@@ -247,6 +248,7 @@ class TestSam3CubemapMaskerPipeline:
 
             diag_path = Path(result.diagnostics_path)
             assert diag_path.exists()
+            assert (output_dir / "erp_masks" / "masking_diagnostics.json").exists()
 
             doc = json.loads(diag_path.read_text(encoding="utf-8"))
             assert doc["mode"] == "sam3_cubemap"
