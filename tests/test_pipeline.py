@@ -10,6 +10,7 @@ import uuid
 
 import cv2
 import numpy as np
+import pytest
 
 from core.colmap_runner import ColmapResult
 from core.pipeline import (
@@ -29,10 +30,11 @@ def test_build_runtime_view_config_cubemap():
     assert vc.jpeg_quality == 90
 
 
-def test_build_runtime_view_config_default():
-    cfg = PipelineConfig(preset_name="default", output_size=2048, jpeg_quality=95)
+@pytest.mark.parametrize("preset_name", ["default", "low", "medium", "high", "ultra"])
+def test_build_runtime_view_config_freeview_presets(preset_name):
+    cfg = PipelineConfig(preset_name=preset_name, output_size=2048, jpeg_quality=95)
     vc = _build_runtime_view_config(cfg)
-    assert vc.total_views() == VIEW_PRESETS["default"].total_views()
+    assert vc.total_views() == VIEW_PRESETS[preset_name].total_views()
     assert vc.output_size == 2048
 
 
@@ -214,7 +216,17 @@ def test_sam3_route_preserves_mask_result_contract_for_cubemap_output(monkeypatc
         shutil.rmtree(tmp_path, ignore_errors=True)
 
 
-def test_sam3_route_supports_default_output_preset(monkeypatch):
+@pytest.mark.parametrize(
+    ("preset_name", "expected_views"),
+    [
+        ("default", 16),
+        ("low", 10),
+        ("medium", 14),
+        ("high", 20),
+        ("ultra", 24),
+    ],
+)
+def test_sam3_route_supports_freeview_output_presets(monkeypatch, preset_name, expected_views):
     tmp_root = Path.cwd() / "tmp" / "pytest"
     tmp_root.mkdir(parents=True, exist_ok=True)
 
@@ -226,7 +238,7 @@ def test_sam3_route_supports_default_output_preset(monkeypatch):
             output_dir=str(tmp_path / "out"),
             enable_masking=True,
             masking_method="sam3_cubemap",
-            preset_name="default",
+            preset_name=preset_name,
             enable_overlap_masks=True,
             enable_diagnostics=True,
         )
@@ -308,10 +320,10 @@ def test_sam3_route_supports_default_output_preset(monkeypatch):
                 return ColmapResult(
                     success=True,
                     reconstruction_path=str(sparse_dir),
-                    num_registered_images=16,
+                    num_registered_images=expected_views,
                     num_registered_frames=1,
                     num_complete_frames=1,
-                    views_per_frame=16,
+                    views_per_frame=expected_views,
                 )
 
         monkeypatch.setattr("core.pipeline.is_sam3_masking_ready", lambda: True)
@@ -328,9 +340,9 @@ def test_sam3_route_supports_default_output_preset(monkeypatch):
 
         assert result.success
         assert result.mask_backend_name == "Sam3Backend"
-        assert result.views_per_frame == 16
-        assert result.num_output_images == 16
-        assert overlap_calls == [(16, cfg.output_size)]
+        assert result.views_per_frame == expected_views
+        assert result.num_output_images == expected_views
+        assert overlap_calls == [(expected_views, cfg.output_size)]
         assert (Path(cfg.output_dir) / "extracted" / "masks" / "frame_00001.png").exists()
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
