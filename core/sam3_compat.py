@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 from typing import Any
 
 _IMAGE_IMPORT_STUBS_ACTIVE = False
+_BPE_FILENAME = "bpe_simple_vocab_16e6.txt.gz"
 
 
 def _register_stub(module_name: str, **attrs: Any) -> None:
@@ -71,12 +73,44 @@ def import_sam3_image_api():
     return build_sam3_image_model, Sam3Processor
 
 
+def get_sam3_bpe_path() -> str:
+    """Return a usable BPE vocabulary path for the SAM3 tokenizer.
+
+    The editable clone used by Reconstruction Zone resolves this asset via
+    package resources. The PyPI wheel currently installed in the plugin venv
+    expects a relative ``../assets`` path that is not present on disk. We
+    therefore fall back to a vendored copy inside this plugin when needed.
+    """
+    candidates: list[Path] = []
+    try:
+        import sam3  # type: ignore[import-untyped]
+
+        package_dir = Path(sam3.__file__).resolve().parent
+        candidates.append(package_dir / "assets" / _BPE_FILENAME)
+        candidates.append(package_dir.parent / "assets" / _BPE_FILENAME)
+    except ImportError:
+        pass
+
+    plugin_root = Path(__file__).resolve().parent.parent
+    candidates.append(plugin_root / "core" / "assets" / _BPE_FILENAME)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    raise FileNotFoundError(
+        f"SAM3 tokenizer vocabulary not found. Expected one of: "
+        f"{', '.join(str(path) for path in candidates)}"
+    )
+
+
 def sam3_image_api_available() -> bool:
     """Return True if the image-model API is importable in this runtime."""
     try:
         import_sam3_image_api()
+        get_sam3_bpe_path()
         return True
-    except ImportError:
+    except (ImportError, FileNotFoundError):
         return False
 
 

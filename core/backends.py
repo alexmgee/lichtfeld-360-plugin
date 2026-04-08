@@ -17,7 +17,11 @@ from typing import Any, Protocol
 import cv2
 import numpy as np
 
-from .sam3_compat import import_sam3_image_api, sam3_video_api_available
+from .sam3_compat import (
+    get_sam3_bpe_path,
+    import_sam3_image_api,
+    sam3_video_api_available,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -438,7 +442,7 @@ class Sam3Backend:
                 logger.warning("Could not patch SAM 3 decoder attention: %s", exc)
 
         logger.info("Loading SAM 3 image model (FA3=%s)...", fa3_available)
-        self._model = build_model()
+        self._model = build_model(bpe_path=get_sam3_bpe_path())
         self._model = self._model.to(self._device)
         self._model.eval()
         self._processor = processor_cls(
