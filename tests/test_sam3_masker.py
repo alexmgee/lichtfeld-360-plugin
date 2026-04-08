@@ -76,17 +76,21 @@ class TestSam3CubemapMaskerPipeline:
             masker, _ = self._make_masker_with_mock_backend()
 
             output_dir = tmp_path / "output"
+            erp_masks_dir = tmp_path / "erp_masks"
             result = masker.process_frames(
                 frames_dir=str(frames_dir),
                 output_dir=str(output_dir),
                 view_config=view_config,
+                erp_mask_dir=str(erp_masks_dir),
             )
 
             assert result.success
             assert result.total_frames == 1
+            assert result.erp_mask_dir == str(erp_masks_dir)
 
             masks_dir = output_dir / "masks"
             assert masks_dir.exists()
+            assert (erp_masks_dir / "frame_00001.png").exists()
 
             # Cubemap preset has 6 views
             views = view_config.get_all_views()

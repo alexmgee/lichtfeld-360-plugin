@@ -131,8 +131,15 @@ def test_sam3_route_preserves_mask_result_contract_for_cubemap_output(monkeypatc
             def initialize(self):
                 return None
 
-            def process_frames(self, frames_dir, output_dir, view_config, progress_callback=None):
+            def process_frames(self, frames_dir, output_dir, view_config, erp_mask_dir=None, progress_callback=None):
                 masks_root = Path(output_dir) / "masks"
+                if erp_mask_dir:
+                    erp_root = Path(erp_mask_dir)
+                    erp_root.mkdir(parents=True, exist_ok=True)
+                    cv2.imwrite(
+                        str(erp_root / "frame_00001.png"),
+                        np.full((128, 256), 255, dtype=np.uint8),
+                    )
                 for _yaw, _pitch, _fov, view_name, _flip_v in view_config.get_all_views():
                     view_dir = masks_root / view_name
                     view_dir.mkdir(parents=True, exist_ok=True)
@@ -202,6 +209,7 @@ def test_sam3_route_preserves_mask_result_contract_for_cubemap_output(monkeypatc
         assert result.mask_backend_name == "Sam3Backend"
         assert result.mask_diagnostics_path.endswith("masking_diagnostics.json")
         assert overlap_calls == [(6, cfg.output_size)]
+        assert (Path(cfg.output_dir) / "extracted" / "masks" / "frame_00001.png").exists()
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
 
@@ -239,8 +247,15 @@ def test_sam3_route_supports_default_output_preset(monkeypatch):
             def initialize(self):
                 return None
 
-            def process_frames(self, frames_dir, output_dir, view_config, progress_callback=None):
+            def process_frames(self, frames_dir, output_dir, view_config, erp_mask_dir=None, progress_callback=None):
                 masks_root = Path(output_dir) / "masks"
+                if erp_mask_dir:
+                    erp_root = Path(erp_mask_dir)
+                    erp_root.mkdir(parents=True, exist_ok=True)
+                    cv2.imwrite(
+                        str(erp_root / "frame_00001.png"),
+                        np.full((128, 256), 255, dtype=np.uint8),
+                    )
                 for _yaw, _pitch, _fov, view_name, _flip_v in view_config.get_all_views():
                     view_dir = masks_root / view_name
                     view_dir.mkdir(parents=True, exist_ok=True)
@@ -316,5 +331,6 @@ def test_sam3_route_supports_default_output_preset(monkeypatch):
         assert result.views_per_frame == 16
         assert result.num_output_images == 16
         assert overlap_calls == [(16, cfg.output_size)]
+        assert (Path(cfg.output_dir) / "extracted" / "masks" / "frame_00001.png").exists()
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)

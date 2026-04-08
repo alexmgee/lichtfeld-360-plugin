@@ -51,6 +51,7 @@ class Sam3MaskerResult:
     total_frames: int = 0
     masked_frames: int = 0
     mask_dir: str = ""
+    erp_mask_dir: str = ""
     diagnostics_path: str = ""
     backend_name: str = ""
 
@@ -87,6 +88,7 @@ class Sam3CubemapMasker:
         frames_dir: str,
         output_dir: str,
         view_config: Any,
+        erp_mask_dir: str | None = None,
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> Sam3MaskerResult:
         """Process extracted ERP frames through cubemap SAM 3 pipeline.
@@ -96,6 +98,8 @@ class Sam3CubemapMasker:
             output_dir: Root output directory. Masks written to
                 output_dir/masks/{view_id}/{frame_id}.png.
             view_config: ViewConfig with preset geometry.
+            erp_mask_dir: Optional directory to also persist merged ERP
+                keep-masks ({frame_id}.png) before reframing.
             progress_callback: Optional (current, total, message) callback.
 
         Returns:
@@ -107,6 +111,7 @@ class Sam3CubemapMasker:
         frames_path = Path(frames_dir)
         out_path = Path(output_dir)
         masks_root = out_path / "masks"
+        erp_masks_root = Path(erp_mask_dir) if erp_mask_dir else None
 
         frame_files = sorted(
             f for f in frames_path.iterdir()
@@ -135,6 +140,9 @@ class Sam3CubemapMasker:
             if erp_keep_mask is not None and np.any(erp_keep_mask < 255):
                 result.masked_frames += 1
 
+            if erp_masks_root is not None:
+                self._write_erp_mask(erp_keep_mask, erp_masks_root, frame_file.stem)
+
             # Reframe ERP keep-mask into per-view plugin masks
             per_view_diag = self._write_per_view_masks(
                 erp_keep_mask, view_config, masks_root, frame_file.stem,
@@ -150,6 +158,7 @@ class Sam3CubemapMasker:
 
         result.success = True
         result.mask_dir = str(masks_root)
+        result.erp_mask_dir = str(erp_masks_root) if erp_masks_root is not None else ""
 
         if self.config.enable_diagnostics:
             try:
@@ -371,6 +380,17 @@ class Sam3CubemapMasker:
             per_view_removed_pct[view_name] = self._coverage_pct(pinhole_mask == 0)
 
         return per_view_removed_pct
+
+    @staticmethod
+    def _write_erp_mask(
+        erp_keep_mask: np.ndarray,
+        erp_masks_root: Path,
+        frame_stem: str,
+    ) -> None:
+        """Persist the merged ERP keep-mask for artifact parity/debugging."""
+        erp_masks_root.mkdir(parents=True, exist_ok=True)
+        mask_path = erp_masks_root / f"{frame_stem}.png"
+        cv2.imwrite(str(mask_path), erp_keep_mask)
 
     def cleanup(self) -> None:
         """Release SAM 3 backend resources."""
