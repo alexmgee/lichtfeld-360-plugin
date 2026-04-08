@@ -132,7 +132,7 @@ class Plugin360Panel(lf.ui.Panel):
         self._sam3_setup_report: Sam3SetupReport = check_sam3_setup(
             setup_state=self._setup_state
         )
-        self._masking_method_idx: int = 0  # 0=FullCircle, 1=SAM 3 Cubemap
+        self._masking_method_idx: int = 0  # 0=Default, 1=SAM 3
         self._masking_available: bool = self._setup_state.fullcircle_ready
         self._enable_masking: bool = False
         self._enable_diagnostics: bool = False
@@ -141,7 +141,7 @@ class Plugin360Panel(lf.ui.Panel):
         self._hf_verify_text: str = self._sam3_setup_report.message
         self._hf_verify_ok: bool = False
         self._install_busy: bool = False
-        self._install_button_text: str = "Repair FullCircle"
+        self._install_button_text: str = "Repair Default Masking"
         self._sam3_check_button_text: str = "Check Setup"
 
         # Reframe
@@ -241,6 +241,7 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("sam3_check_button_text", lambda: self._sam3_check_button_text)
         model.bind_func("sam3_install_button_text", self._get_sam3_install_button_text)
         model.bind_func("sam3_install_disabled", self._get_sam3_install_disabled)
+        model.bind_func("show_sam3_prereq_steps", self._show_sam3_prereq_steps)
         model.bind_func("install_button_text", lambda: self._install_button_text)
         model.bind_func("install_busy", lambda: self._install_busy)
 
@@ -406,13 +407,13 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _get_fullcircle_status_text(self) -> str:
         if self._setup_state.fullcircle_ready:
-            return "FullCircle is ready on this install. No HuggingFace account required."
-        return "FullCircle runtime is missing or damaged. Repair the local masking runtime."
+            return "Default masking is ready on this install. No HuggingFace account required."
+        return "Default masking runtime is missing or damaged. Repair the local masking runtime."
 
     def _get_sam3_reassurance_text(self) -> str:
         if self._setup_state.fullcircle_ready:
-            return "FullCircle remains available while SAM 3 setup is incomplete."
-        return "FullCircle runtime needs repair on this install."
+            return "Default masking remains available while SAM 3 setup is incomplete."
+        return "Default masking runtime needs repair on this install."
 
     def _get_sam3_install_button_text(self) -> str:
         if self._install_busy and self._masking_method_idx == 1:
@@ -432,6 +433,9 @@ class Plugin360Panel(lf.ui.Panel):
             "needs_weights",
             "error",
         }
+
+    def _show_sam3_prereq_steps(self) -> bool:
+        return self._sam3_setup_report.access_status != "granted"
 
     def _get_est_frames_text(self) -> str:
         if not self._video_info:
@@ -884,10 +888,10 @@ class Plugin360Panel(lf.ui.Panel):
         if self._masking_method_idx == 1:
             return "SAM 3 (0.9B params)"
         if self._setup_state.fullcircle_ready:
-            return "FullCircle (YOLO + SAM v1 + SAM v2)"
+            return "Default (YOLO + SAM v1 + SAM v2)"
         if self._setup_state.default_tier_ready:
-            return "FullCircle runtime needs repair"
-        return "FullCircle runtime unavailable"
+            return "Default runtime needs repair"
+        return "Default runtime unavailable"
 
     def _set_hf_token_input(self, val):
         self._hf_token_input = str(val)
@@ -973,7 +977,7 @@ class Plugin360Panel(lf.ui.Panel):
         if self._install_busy:
             return
         self._install_busy = True
-        self._install_button_text = "Repairing FullCircle..."
+        self._install_button_text = "Repairing Default Masking..."
         if self._handle:
             self._handle.dirty_all()
 
@@ -987,7 +991,7 @@ class Plugin360Panel(lf.ui.Panel):
             self._install_busy = False
             self._sync_setup_state(auto_enable=ok)
             if ok:
-                self._install_button_text = "FullCircle repaired"
+                self._install_button_text = "Default Masking Repaired"
             else:
                 self._install_button_text = "Repair failed — retry"
                 self._enable_masking = False

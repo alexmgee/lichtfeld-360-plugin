@@ -253,6 +253,8 @@ def _build_sam3_setup_report(
     access_status = access_status or ("granted" if state.has_access else "unknown")
     runtime_status = runtime_status or ("installed" if state.has_sam3 else "missing")
     weights_status = weights_status or ("present" if state.has_weights else "missing")
+    if access_status == "granted" and token_status == "saved":
+        token_status = "verified"
 
     if runtime_status == "broken":
         return Sam3SetupReport(
