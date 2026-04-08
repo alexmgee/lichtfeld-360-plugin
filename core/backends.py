@@ -17,6 +17,8 @@ from typing import Any, Protocol
 import cv2
 import numpy as np
 
+from .sam3_compat import import_sam3_image_api, sam3_video_api_available
+
 logger = logging.getLogger(__name__)
 
 # ── Optional imports ──────────────────────────────────────────
@@ -25,6 +27,8 @@ HAS_YOLO = False
 HAS_SAM1 = False
 HAS_SAM3 = False
 HAS_TORCH = False
+build_sam3_image_model: Any | None = None
+Sam3Processor: Any | None = None
 
 try:
     import torch
@@ -44,10 +48,17 @@ try:
 except ImportError:
     pass
 
-try:
-    from sam3 import build_sam3_image_model  # type: ignore[import-untyped]
-    from sam3.model.sam3_image_processor import Sam3Processor  # type: ignore[import-untyped]
+def _load_sam3_image_api() -> tuple[Any, Any]:
+    """Load and cache the SAM3 image API with plugin compatibility shims."""
+    global HAS_SAM3, build_sam3_image_model, Sam3Processor
+    if build_sam3_image_model is None or Sam3Processor is None:
+        build_sam3_image_model, Sam3Processor = import_sam3_image_api()
     HAS_SAM3 = True
+    return build_sam3_image_model, Sam3Processor
+
+
+try:
+    _load_sam3_image_api()
 except ImportError:
     pass
 
@@ -399,10 +410,12 @@ class Sam3Backend:
         self._processor: Any = None
 
     def initialize(self) -> None:
-        if not HAS_SAM3:
+        try:
+            build_model, processor_cls = _load_sam3_image_api()
+        except ImportError as exc:
             raise ImportError(
                 "SAM 3 not available. Install via plugin settings."
-            )
+            ) from exc
 
         # Flash Attention 3 detection + fallback
         fa3_available = False
@@ -425,10 +438,12 @@ class Sam3Backend:
                 logger.warning("Could not patch SAM 3 decoder attention: %s", exc)
 
         logger.info("Loading SAM 3 image model (FA3=%s)...", fa3_available)
-        self._model = build_sam3_image_model()
+        self._model = build_model()
         self._model = self._model.to(self._device)
         self._model.eval()
-        self._processor = Sam3Processor(self._model, confidence_threshold=self._confidence_threshold)
+        self._processor = processor_cls(
+            self._model, confidence_threshold=self._confidence_threshold,
+        )
         logger.info("SAM 3 backend ready")
 
     def detect_and_segment(
@@ -558,9 +573,8 @@ except ImportError:
 
 HAS_SAM3_VIDEO = False
 try:
-    from sam3.model_builder import build_sam3_multiplex_video_predictor  # type: ignore[import-untyped]
-    HAS_SAM3_VIDEO = True
-except ImportError:
+    HAS_SAM3_VIDEO = sam3_video_api_available()
+except Exception:
     pass
 
 
