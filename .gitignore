@@ -16,7 +16,11 @@ CLAUDE.md
 .claude/
 dev/
 dev/bp_harness_output/
-docs/
+docs/*
+!docs/specs/
+docs/specs/*
+!docs/specs/2026-04-08-masking-setup-ux-proposal.md
+!docs/specs/2026-04-08-masking-setup-ux-implementation-plan.md
 tests/*
 !tests/conftest.py
 !tests/test_backends.py

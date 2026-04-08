@@ -334,14 +334,13 @@ def _download_sam1_weights(on_output=None) -> None:
 
 
 def _install_sam2_runtime(on_output=None) -> bool:
-    """Install and verify the SAM v2 runtime used by operator masking."""
+    """Repair or bootstrap the shipped SAM v2 runtime used by FullCircle."""
     _quarantine_broken_sam2_namespace(on_output=on_output)
 
     ok = _run_uv_command([
         "sync",
         "--locked",
         "--no-dev",
-        "--extra", "video-tracking",
     ], on_output=on_output)
     if not ok:
         return False
@@ -360,18 +359,18 @@ def _install_sam2_runtime(on_output=None) -> bool:
 
 
 def install_default_tier(on_output=None) -> bool:
-    """Install the full operator masking stack into the plugin venv.
+    """Repair or bootstrap the shipped FullCircle runtime in the plugin venv.
 
-    This now installs the base image backend dependencies and the SAM v2
-    video-tracking runtime together. The plugin may run without masking,
-    but once masking is installed or requested the full stack is required.
+    FullCircle is expected to ship as part of the normal plugin runtime.
+    This helper remains as a repair/bootstrap path for damaged or partial
+    environments and still ensures the local SAM v1 weights are available.
     """
     if not _install_sam2_runtime(on_output=on_output):
         return False
 
     _download_sam1_weights(on_output=on_output)
     if on_output:
-        on_output("Masking stack installed. SAM v2 model weights download on first use.")
+        on_output("FullCircle runtime ready. SAM v2 model weights download on first use.")
     return True
 
 
@@ -528,11 +527,11 @@ def ensure_sam2_c_extension() -> None:
 
 
 def install_video_tracking(on_output=None) -> bool:
-    """Install or repair the SAM v2 runtime used by operator masking."""
+    """Legacy alias to repair the shipped SAM v2 runtime used by FullCircle."""
     if not _install_sam2_runtime(on_output=on_output):
         return False
     if on_output:
-        on_output("SAM v2 installed. Model weights download on first use.")
+        on_output("SAM v2 runtime ready. Model weights download on first use.")
     return True
 
 
