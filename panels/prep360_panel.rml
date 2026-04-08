@@ -106,12 +106,12 @@
       <div class="setting-row setting-row--dropdown setting-row--dropdown-high">
         <span class="prop-label">Method</span>
         <select data-value="masking_method_idx">
-          <option value="0">FullCircle</option>
-          <option value="1">SAM 3 Cubemap</option>
+          <option value="0">Default</option>
+          <option value="1">SAM 3</option>
         </select>
       </div>
 
-      <!-- FullCircle path -->
+      <!-- Default path -->
       <div data-if="show_masking_fullcircle">
         <div data-if="show_masking_install">
           <div class="setting-row">
@@ -167,21 +167,21 @@
           <span class="prop-label">Weights</span>
           <span class="status-text status-muted">{{sam3_weights_status_text}}</span>
         </div>
-        <div class="setting-row">
+        <div class="setting-row" data-if="show_sam3_prereq_steps">
           <button class="btn btn--secondary btn--compact" data-event-click="open_hf_signup">1. Create HuggingFace Account</button>
         </div>
-        <div class="setting-row">
+        <div class="setting-row" data-if="show_sam3_prereq_steps">
           <button class="btn btn--secondary btn--compact" data-event-click="open_hf_model">2. Request SAM 3 Access</button>
         </div>
-        <div class="setting-row">
+        <div class="setting-row" data-if="show_sam3_prereq_steps">
           <span class="prop-label">3. Token</span>
           <input type="text" data-value="hf_token_input" />
         </div>
-        <div class="setting-row">
+        <div class="setting-row" data-if="show_sam3_prereq_steps">
           <button class="btn btn--secondary btn--compact" data-event-click="verify_hf_token" data-attr-disabled="install_busy">Verify Access</button>
           <span class="status-text status-muted">{{hf_verify_text}}</span>
         </div>
-        <div class="setting-row">
+        <div class="setting-row" data-if="show_sam3_prereq_steps">
           <button class="btn btn--secondary btn--compact" data-event-click="open_hf_tokens">Open Tokens Page</button>
         </div>
         <div class="setting-row">
@@ -195,7 +195,7 @@
       <!-- SAM 3 path — ready -->
       <div data-if="show_masking_sam3_ready">
         <div class="setting-row">
-          <span class="status-text status-muted">SAM 3 is ready. FullCircle remains available as the local fallback path.</span>
+          <span class="status-text status-muted">SAM 3 is ready. Default masking remains available as the local fallback path.</span>
         </div>
         <div class="setting-row">
           <span class="prop-label">Enable</span>
