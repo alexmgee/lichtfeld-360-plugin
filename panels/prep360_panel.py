@@ -144,6 +144,7 @@ class Plugin360Panel(lf.ui.Panel):
         self._install_button_text: str = "Repair Default Masking"
         self._sam3_check_button_text: str = "Check Setup"
         self._sam3_edit_token: bool = False
+        self._sam3_notice_text: str = ""
 
         # Reframe
         self._preset_idx: int = 0
@@ -233,15 +234,20 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("show_masking_sam3_setup", lambda: self._masking_method_idx == 1 and not self._setup_state.sam3_ready)
         model.bind_func("show_masking_sam3_ready", lambda: self._masking_method_idx == 1 and self._setup_state.sam3_ready)
         model.bind_func("sam3_status_message", lambda: self._sam3_setup_report.message)
+        model.bind_func("show_sam3_notice", lambda: bool(self._sam3_notice_text))
+        model.bind_func("sam3_notice_text", lambda: self._sam3_notice_text)
         model.bind_func("sam3_next_action_text", lambda: self._sam3_setup_report.next_action)
         model.bind_func("sam3_token_status_text", lambda: self._format_sam3_status(self._sam3_setup_report.token_status))
         model.bind_func("sam3_access_status_text", lambda: self._format_sam3_status(self._sam3_setup_report.access_status))
         model.bind_func("sam3_runtime_status_text", lambda: self._format_sam3_status(self._sam3_setup_report.runtime_status))
-        model.bind_func("sam3_weights_status_text", lambda: self._format_sam3_status(self._sam3_setup_report.weights_status))
+        model.bind_func("sam3_weights_status_text", self._get_sam3_weights_status_text)
+        model.bind_func("show_sam3_cached_weights_note", self._show_sam3_cached_weights_note)
+        model.bind_func("sam3_cached_weights_note_text", self._get_sam3_cached_weights_note_text)
         model.bind_func("sam3_reassurance_text", self._get_sam3_reassurance_text)
         model.bind_func("sam3_check_button_text", lambda: self._sam3_check_button_text)
         model.bind_func("sam3_install_button_text", self._get_sam3_install_button_text)
         model.bind_func("sam3_install_disabled", self._get_sam3_install_disabled)
+        model.bind_func("show_sam3_install_button", self._show_sam3_install_button)
         model.bind_func("show_sam3_saved_token_notice", self._show_sam3_saved_token_notice)
         model.bind_func("sam3_saved_token_text", self._get_sam3_saved_token_text)
         model.bind_func("show_sam3_account_step", self._show_sam3_account_step)
@@ -354,6 +360,7 @@ class Plugin360Panel(lf.ui.Panel):
             self._install_busy,
             self._install_button_text,
             self._sam3_check_button_text,
+            self._sam3_notice_text,
             (
                 self._sam3_setup_report.token_status,
                 self._sam3_setup_report.access_status,
@@ -432,6 +439,23 @@ class Plugin360Panel(lf.ui.Panel):
             )
         return "Using a saved HuggingFace token from this machine."
 
+    def _get_sam3_weights_status_text(self) -> str:
+        if (
+            self._sam3_setup_report.weights_status == "present"
+            and self._sam3_setup_report.access_status != "granted"
+        ):
+            return "Cached Locally"
+        return self._format_sam3_status(self._sam3_setup_report.weights_status)
+
+    def _show_sam3_cached_weights_note(self) -> bool:
+        return (
+            self._sam3_setup_report.weights_status == "present"
+            and self._sam3_setup_report.access_status != "granted"
+        )
+
+    def _get_sam3_cached_weights_note_text(self) -> str:
+        return "SAM 3 files are already cached on this machine from an earlier setup."
+
     def _get_sam3_install_button_text(self) -> str:
         if self._install_busy and self._masking_method_idx == 1:
             return self._install_button_text
@@ -446,6 +470,13 @@ class Plugin360Panel(lf.ui.Panel):
         if self._install_busy:
             return True
         return self._sam3_setup_report.overall_stage not in {
+            "ready_to_install",
+            "needs_weights",
+            "error",
+        }
+
+    def _show_sam3_install_button(self) -> bool:
+        return self._sam3_setup_report.overall_stage in {
             "ready_to_install",
             "needs_weights",
             "error",
@@ -941,7 +972,7 @@ class Plugin360Panel(lf.ui.Panel):
     def _on_open_hf_signup(self, handle, event, args):
         del handle, event, args
         import webbrowser
-        webbrowser.open("https://huggingface.co/join")
+        webbrowser.open("https://huggingface.co/")
 
     def _on_open_hf_model(self, handle, event, args):
         del handle, event, args
@@ -957,6 +988,7 @@ class Plugin360Panel(lf.ui.Panel):
         del handle, event, args
         if self._install_busy:
             return
+        self._sam3_notice_text = ""
         token = self._hf_token_input.strip()
         if not token:
             self._sam3_setup_report = verify_hf_token_detailed("")
@@ -991,6 +1023,7 @@ class Plugin360Panel(lf.ui.Panel):
         del handle, event, args
         if self._install_busy:
             return
+        self._sam3_notice_text = ""
         self._install_busy = True
         self._sam3_check_button_text = "Checking..."
         if self._handle:
@@ -1022,6 +1055,7 @@ class Plugin360Panel(lf.ui.Panel):
         if not self._sam3_edit_token:
             self._hf_token_input = ""
             self._hf_verify_text = self._sam3_setup_report.message
+        self._sam3_notice_text = ""
         if self._handle:
             self._handle.dirty_all()
 
@@ -1042,7 +1076,10 @@ class Plugin360Panel(lf.ui.Panel):
                 self._sam3_edit_token = True
                 self._sam3_check_button_text = "Check Setup"
                 self._sync_setup_state()
-                self._hf_verify_text = "Saved HuggingFace token removed."
+                self._sam3_notice_text = "Saved HuggingFace token removed."
+                if self._sam3_setup_report.weights_status == "present":
+                    self._sam3_notice_text += " Cached SAM 3 files were kept on this machine."
+                self._hf_verify_text = self._sam3_setup_report.message
                 self._hf_verify_ok = False
             else:
                 self._hf_verify_text = "Could not remove the saved HuggingFace token."
@@ -1111,6 +1148,7 @@ class Plugin360Panel(lf.ui.Panel):
         del handle, event, args
         if self._install_busy:
             return
+        self._sam3_notice_text = ""
         self._install_busy = True
         self._install_button_text = "Installing SAM 3..."
         if self._handle:
