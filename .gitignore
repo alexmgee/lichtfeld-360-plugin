@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+.pytest_tmp*/
 settings.json
 *.egg-info/
 masking_setup_debug.txt
@@ -16,4 +17,8 @@ CLAUDE.md
 dev/
 dev/bp_harness_output/
 docs/
-tests/
+tests/*
+!tests/conftest.py
+!tests/test_setup_checks.py
+!tests/test_pipeline.py
+!tests/test_sam3_masker.py

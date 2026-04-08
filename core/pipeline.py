@@ -375,6 +375,21 @@ class PipelineJob:
             finally:
                 sam3_masker.cleanup()
 
+            if not sam3_result.success:
+                error = getattr(sam3_result, "error", "") or "unknown error"
+                raise RuntimeError(f"SAM 3 cubemap masking failed: {error}")
+
+            # Normalize the SAM 3 helper output to the shared MaskResult contract
+            # so overlap-mask generation and pipeline reporting keep working.
+            mask_result = MaskResult(
+                success=sam3_result.success,
+                total_frames=sam3_result.total_frames,
+                masked_frames=sam3_result.masked_frames,
+                masks_dir=sam3_result.mask_dir,
+                diagnostics_path=getattr(sam3_result, "diagnostics_path", ""),
+                backend_name=getattr(sam3_result, "backend_name", "Sam3Backend"),
+            )
+
             if self._check_cancel():
                 raise RuntimeError("Cancelled")
 
