@@ -364,6 +364,7 @@ class PipelineJob:
                     frames_dir=str(frames_dir),
                     output_dir=str(out),
                     view_config=view_config,
+                    erp_mask_dir=str(extracted_dir / "masks"),
                     progress_callback=_sam3_progress,
                 )
             finally:
