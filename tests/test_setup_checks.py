@@ -3,14 +3,19 @@
 """Tests for masking setup state detection (two-tier system)."""
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from core.setup_checks import (
     MaskingSetupState,
     _install_sam2_runtime,
     check_masking_setup,
+    check_sam3_setup,
     install_default_tier,
     install_video_tracking,
+    make_sam3_install_failure_report,
+    verify_hf_token_detailed,
 )
 
 
@@ -195,3 +200,82 @@ def test_install_video_tracking_is_legacy_repair_alias():
 
     mock_repair.assert_called_once_with(on_output=progress)
     progress.assert_called_with("SAM v2 runtime ready. Model weights download on first use.")
+
+
+def test_check_sam3_setup_needs_token():
+    report = check_sam3_setup(setup_state=MaskingSetupState())
+
+    assert report.token_status == "missing"
+    assert report.overall_stage == "needs_token"
+    assert "token" in report.next_action.lower()
+
+
+def test_check_sam3_setup_ready_to_install():
+    report = check_sam3_setup(
+        setup_state=MaskingSetupState(
+            has_torch=True,
+            has_token=True,
+            has_access=True,
+        )
+    )
+
+    assert report.access_status == "granted"
+    assert report.runtime_status == "missing"
+    assert report.overall_stage == "ready_to_install"
+
+
+def test_check_sam3_setup_needs_weights():
+    report = check_sam3_setup(
+        setup_state=MaskingSetupState(
+            has_torch=True,
+            has_token=True,
+            has_access=True,
+            has_sam3=True,
+            has_weights=False,
+        )
+    )
+
+    assert report.runtime_status == "installed"
+    assert report.weights_status == "missing"
+    assert report.overall_stage == "needs_weights"
+
+
+def test_verify_hf_token_detailed_invalid_token():
+    fake_hf = SimpleNamespace(
+        login=lambda token: None,
+        model_info=Mock(side_effect=Exception("401 Unauthorized")),
+    )
+
+    with patch.dict(sys.modules, {"huggingface_hub": fake_hf}), \
+         patch("core.setup_checks.check_masking_setup", return_value=MaskingSetupState()):
+        report = verify_hf_token_detailed("hf_bad_token")
+
+    assert report.token_status == "invalid"
+    assert report.access_status == "unknown"
+    assert report.overall_stage == "needs_token"
+
+
+def test_verify_hf_token_detailed_access_pending():
+    fake_hf = SimpleNamespace(
+        login=lambda token: None,
+        model_info=Mock(side_effect=Exception("403 gated repo")),
+    )
+
+    with patch.dict(sys.modules, {"huggingface_hub": fake_hf}), \
+         patch("core.setup_checks.check_masking_setup", return_value=MaskingSetupState(has_torch=True)):
+        report = verify_hf_token_detailed("hf_pending_token")
+
+    assert report.token_status == "verified"
+    assert report.access_status == "pending"
+    assert report.overall_stage == "needs_access"
+
+
+def test_make_sam3_install_failure_report_marks_runtime_broken():
+    report = make_sam3_install_failure_report(
+        "sam3 import failed",
+        setup_state=MaskingSetupState(has_torch=True, has_token=True, has_access=True),
+    )
+
+    assert report.runtime_status == "broken"
+    assert report.overall_stage == "error"
+    assert "Retry" in report.next_action
