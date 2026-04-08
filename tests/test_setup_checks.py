@@ -3,9 +3,15 @@
 """Tests for masking setup state detection (two-tier system)."""
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from core.setup_checks import MaskingSetupState, check_masking_setup
+from core.setup_checks import (
+    MaskingSetupState,
+    _install_sam2_runtime,
+    check_masking_setup,
+    install_default_tier,
+    install_video_tracking,
+)
 
 
 def test_setup_state_all_missing():
@@ -150,3 +156,42 @@ def test_torch_missing_nothing_works():
         assert not state.sam3_ready
         assert state.active_backend is None
         assert state.capability_level == 0
+
+
+def test_install_sam2_runtime_repairs_shipped_fullcircle_runtime():
+    progress = Mock()
+
+    with patch("core.setup_checks._quarantine_broken_sam2_namespace"), \
+         patch("core.setup_checks._run_uv_command", return_value=True) as mock_sync, \
+         patch("core.setup_checks._check_sam2_installed", return_value=True), \
+         patch("core.setup_checks._install_sam2_c_extension"):
+        assert _install_sam2_runtime(on_output=progress)
+
+    mock_sync.assert_called_once_with(
+        ["sync", "--locked", "--no-dev"],
+        on_output=progress,
+    )
+
+
+def test_install_default_tier_reports_fullcircle_runtime_ready():
+    progress = Mock()
+
+    with patch("core.setup_checks._install_sam2_runtime", return_value=True) as mock_repair, \
+         patch("core.setup_checks._download_sam1_weights") as mock_weights:
+        assert install_default_tier(on_output=progress)
+
+    mock_repair.assert_called_once_with(on_output=progress)
+    mock_weights.assert_called_once_with(on_output=progress)
+    progress.assert_called_with(
+        "FullCircle runtime ready. SAM v2 model weights download on first use."
+    )
+
+
+def test_install_video_tracking_is_legacy_repair_alias():
+    progress = Mock()
+
+    with patch("core.setup_checks._install_sam2_runtime", return_value=True) as mock_repair:
+        assert install_video_tracking(on_output=progress)
+
+    mock_repair.assert_called_once_with(on_output=progress)
+    progress.assert_called_with("SAM v2 runtime ready. Model weights download on first use.")
