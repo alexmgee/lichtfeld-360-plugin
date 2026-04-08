@@ -112,6 +112,20 @@ class MaskingSetupState:
         return 0
 
 
+@dataclass
+class Sam3SetupReport:
+    """User-facing SAM 3 setup status for the panel onboarding flow."""
+
+    token_status: str = "missing"       # missing | saved | verified | invalid | network_error
+    access_status: str = "unknown"      # unknown | pending | granted | network_error
+    runtime_status: str = "missing"     # missing | installed | broken
+    weights_status: str = "missing"     # missing | present | failed
+    overall_stage: str = "needs_token"  # needs_token | needs_access | ready_to_install | needs_weights | ready | error
+    message: str = ""
+    next_action: str = ""
+    detail: str = ""
+
+
 def _check_torch_installed() -> bool:
     try:
         import torch  # noqa: F401
@@ -184,6 +198,37 @@ def _check_hf_access() -> bool:
         return False
 
 
+def _classify_hf_access_exception(exc: Exception, *, token_verified: bool) -> tuple[str, str, str]:
+    """Map HuggingFace verification failures to user-facing setup states."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+
+    if any(term in text for term in (
+        "401", "unauthorized", "invalid token", "invalid user token",
+        "authentication", "whoami",
+    )):
+        return "invalid", "unknown", "HuggingFace rejected this token."
+
+    if any(term in text for term in (
+        "403", "forbidden", "gated", "awaiting review", "access to model",
+        "restricted", "not in the authorized list", "not have access",
+    )):
+        return ("verified" if token_verified else "saved"), "pending", (
+            "SAM 3 model access is still pending HuggingFace approval."
+        )
+
+    if any(term in text for term in (
+        "timed out", "connection", "network", "dns", "ssl", "temporarily unavailable",
+        "name or service not known", "connection aborted", "connection reset",
+    )):
+        return ("verified" if token_verified else "saved"), "network_error", (
+            "Could not reach HuggingFace to verify SAM 3 access."
+        )
+
+    return ("verified" if token_verified else "saved"), "unknown", (
+        "Could not verify SAM 3 access."
+    )
+
+
 def _check_weights_downloaded() -> bool:
     """Check if SAM 3 weights exist in HuggingFace cache."""
     try:
@@ -192,6 +237,167 @@ def _check_weights_downloaded() -> bool:
         return result is not None and isinstance(result, str)
     except Exception:
         return False
+
+
+def _build_sam3_setup_report(
+    state: MaskingSetupState,
+    *,
+    token_status: str | None = None,
+    access_status: str | None = None,
+    runtime_status: str | None = None,
+    weights_status: str | None = None,
+    detail: str = "",
+) -> Sam3SetupReport:
+    """Build a SAM 3 onboarding report from current setup state."""
+    token_status = token_status or ("saved" if state.has_token else "missing")
+    access_status = access_status or ("granted" if state.has_access else "unknown")
+    runtime_status = runtime_status or ("installed" if state.has_sam3 else "missing")
+    weights_status = weights_status or ("present" if state.has_weights else "missing")
+
+    if runtime_status == "broken":
+        return Sam3SetupReport(
+            token_status=token_status,
+            access_status=access_status,
+            runtime_status=runtime_status,
+            weights_status=weights_status,
+            overall_stage="error",
+            message="SAM 3 install failed.",
+            next_action="Retry the install, then click Re-check Setup.",
+            detail=detail,
+        )
+
+    if token_status == "missing":
+        return Sam3SetupReport(
+            token_status=token_status,
+            access_status="unknown",
+            runtime_status=runtime_status,
+            weights_status=weights_status,
+            overall_stage="needs_token",
+            message="SAM 3 setup needs a HuggingFace token.",
+            next_action="Paste a HuggingFace token, then click Verify Access.",
+            detail=detail,
+        )
+
+    if token_status == "invalid":
+        return Sam3SetupReport(
+            token_status=token_status,
+            access_status="unknown",
+            runtime_status=runtime_status,
+            weights_status=weights_status,
+            overall_stage="needs_token",
+            message="HuggingFace rejected this token.",
+            next_action="Create a new token and verify access again.",
+            detail=detail,
+        )
+
+    if access_status == "network_error" or token_status == "network_error":
+        return Sam3SetupReport(
+            token_status=token_status,
+            access_status=access_status,
+            runtime_status=runtime_status,
+            weights_status=weights_status,
+            overall_stage="needs_access",
+            message="Could not verify SAM 3 access right now.",
+            next_action="Check your connection, then click Re-check Setup.",
+            detail=detail,
+        )
+
+    if access_status == "pending":
+        return Sam3SetupReport(
+            token_status=token_status,
+            access_status=access_status,
+            runtime_status=runtime_status,
+            weights_status=weights_status,
+            overall_stage="needs_access",
+            message="SAM 3 model access is still pending approval.",
+            next_action="Wait for HuggingFace approval, then click Re-check Setup.",
+            detail=detail,
+        )
+
+    if access_status != "granted":
+        return Sam3SetupReport(
+            token_status=token_status,
+            access_status=access_status,
+            runtime_status=runtime_status,
+            weights_status=weights_status,
+            overall_stage="needs_access",
+            message="SAM 3 access has not been verified yet.",
+            next_action="Click Check Setup or verify your HuggingFace token.",
+            detail=detail,
+        )
+
+    if runtime_status != "installed":
+        return Sam3SetupReport(
+            token_status=token_status,
+            access_status=access_status,
+            runtime_status=runtime_status,
+            weights_status=weights_status,
+            overall_stage="ready_to_install",
+            message="SAM 3 access is approved and ready to install.",
+            next_action="Click Install SAM 3 to add the runtime.",
+            detail=detail,
+        )
+
+    if weights_status != "present":
+        return Sam3SetupReport(
+            token_status=token_status,
+            access_status=access_status,
+            runtime_status=runtime_status,
+            weights_status=weights_status,
+            overall_stage="needs_weights",
+            message="SAM 3 runtime is installed but the model weights are missing.",
+            next_action="Click Install SAM 3 to download the weights.",
+            detail=detail,
+        )
+
+    return Sam3SetupReport(
+        token_status=token_status,
+        access_status=access_status,
+        runtime_status=runtime_status,
+        weights_status=weights_status,
+        overall_stage="ready",
+        message="SAM 3 is ready to use.",
+        next_action="Enable masking to use SAM 3 Cubemap.",
+        detail=detail,
+    )
+
+
+def check_sam3_setup(
+    *,
+    setup_state: MaskingSetupState | None = None,
+    force_access_check: bool = False,
+) -> Sam3SetupReport:
+    """Return a user-facing SAM 3 setup report for onboarding and repair UX."""
+    state = setup_state or check_masking_setup()
+    token_status = "saved" if state.has_token else "missing"
+    access_status = "granted" if state.has_access else "unknown"
+    detail = ""
+
+    if force_access_check and state.has_token:
+        try:
+            from huggingface_hub import get_token, model_info
+
+            token = get_token()
+            if token:
+                info = model_info(SAM3_MODEL_ID, token=token)
+                if info is not None:
+                    access_status = "granted"
+                    token_status = "verified"
+                    state.has_access = True
+                    global _hf_access_cache
+                    _hf_access_cache = True
+        except Exception as exc:
+            token_status, access_status, detail = _classify_hf_access_exception(
+                exc,
+                token_verified=True,
+            )
+
+    return _build_sam3_setup_report(
+        state,
+        token_status=token_status,
+        access_status=access_status,
+        detail=detail,
+    )
 
 
 def check_masking_setup() -> MaskingSetupState:
@@ -238,18 +444,75 @@ def verify_hf_token(token: str) -> bool:
     Saves the token via huggingface_hub.login() if valid.
     Returns True if token is valid and has model access.
     """
+    report = verify_hf_token_detailed(token)
+    return report.access_status == "granted"
+
+
+def verify_hf_token_detailed(token: str) -> Sam3SetupReport:
+    """Verify a HuggingFace token and return a detailed SAM 3 setup report."""
     global _hf_access_cache
+
+    token = token.strip()
+    if not token:
+        return _build_sam3_setup_report(
+            check_masking_setup(),
+            token_status="missing",
+        )
+
     try:
         from huggingface_hub import login, model_info
+
         login(token=token)
         info = model_info(SAM3_MODEL_ID, token=token)
         if info is not None:
             _hf_access_cache = True
-            return True
-        return False
+            state = check_masking_setup()
+            state.has_token = True
+            state.has_access = True
+            return _build_sam3_setup_report(
+                state,
+                token_status="verified",
+                access_status="granted",
+            )
     except Exception as exc:
         logger.warning("HF token verification failed: %s", exc)
-        return False
+        token_status, access_status, detail = _classify_hf_access_exception(
+            exc,
+            token_verified=True,
+        )
+        state = check_masking_setup()
+        state.has_token = token_status not in {"missing", "invalid"}
+        state.has_access = access_status == "granted"
+        return _build_sam3_setup_report(
+            state,
+            token_status=token_status,
+            access_status=access_status,
+            detail=detail,
+        )
+
+    state = check_masking_setup()
+    state.has_token = True
+    return _build_sam3_setup_report(
+        state,
+        token_status="verified",
+        access_status="unknown",
+    )
+
+
+def make_sam3_install_failure_report(
+    detail: str = "",
+    *,
+    setup_state: MaskingSetupState | None = None,
+) -> Sam3SetupReport:
+    """Create a SAM 3 report for local runtime/install failures."""
+    state = setup_state or check_masking_setup()
+    return _build_sam3_setup_report(
+        state,
+        access_status="granted" if state.has_access else "unknown",
+        runtime_status="broken",
+        weights_status="failed" if not state.has_weights else "present",
+        detail=detail,
+    )
 
 
 def download_model_weights() -> bool:

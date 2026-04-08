@@ -27,8 +27,9 @@ from ..core.mask_diagnostics import (
     load_mask_diagnostics_document,
 )
 from ..core.setup_checks import (
-    MaskingSetupState, check_masking_setup, verify_hf_token, download_model_weights,
+    MaskingSetupState, Sam3SetupReport, check_masking_setup, check_sam3_setup,
     install_default_tier, install_premium_tier, install_video_tracking,
+    make_sam3_install_failure_report, verify_hf_token_detailed,
 )
 from ..core.pipeline import PipelineConfig, PipelineJob, PipelineResult
 from ..core.presets import VIEW_PRESETS
@@ -128,16 +129,20 @@ class Plugin360Panel(lf.ui.Panel):
 
         # Masking
         self._setup_state: MaskingSetupState = check_masking_setup()
+        self._sam3_setup_report: Sam3SetupReport = check_sam3_setup(
+            setup_state=self._setup_state
+        )
         self._masking_method_idx: int = 0  # 0=FullCircle, 1=SAM 3 Cubemap
         self._masking_available: bool = self._setup_state.fullcircle_ready
-        self._enable_masking: bool = self._masking_available
+        self._enable_masking: bool = False
         self._enable_diagnostics: bool = False
         self._mask_prompts_str: str = "person"
         self._hf_token_input: str = ""
-        self._hf_verify_text: str = ""
+        self._hf_verify_text: str = self._sam3_setup_report.message
         self._hf_verify_ok: bool = False
         self._install_busy: bool = False
-        self._install_button_text: str = "Install Masking"
+        self._install_button_text: str = "Repair FullCircle"
+        self._sam3_check_button_text: str = "Check Setup"
 
         # Reframe
         self._preset_idx: int = 0
@@ -217,6 +222,8 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("hf_verify_text", lambda: self._hf_verify_text)
         model.bind_func("masking_available", lambda: self._masking_available)
         model.bind_func("masking_backend_text", self._get_masking_backend_text)
+        model.bind_func("fullcircle_status_text", self._get_fullcircle_status_text)
+        model.bind_func("fullcircle_action_text", lambda: self._install_button_text)
         # FullCircle conditional states
         model.bind_func("show_masking_fullcircle", lambda: self._masking_method_idx == 0)
         model.bind_func("show_masking_install", lambda: not self._setup_state.fullcircle_ready)
@@ -224,6 +231,16 @@ class Plugin360Panel(lf.ui.Panel):
         # SAM 3 conditional states
         model.bind_func("show_masking_sam3_setup", lambda: self._masking_method_idx == 1 and not self._setup_state.sam3_ready)
         model.bind_func("show_masking_sam3_ready", lambda: self._masking_method_idx == 1 and self._setup_state.sam3_ready)
+        model.bind_func("sam3_status_message", lambda: self._sam3_setup_report.message)
+        model.bind_func("sam3_next_action_text", lambda: self._sam3_setup_report.next_action)
+        model.bind_func("sam3_token_status_text", lambda: self._format_sam3_status(self._sam3_setup_report.token_status))
+        model.bind_func("sam3_access_status_text", lambda: self._format_sam3_status(self._sam3_setup_report.access_status))
+        model.bind_func("sam3_runtime_status_text", lambda: self._format_sam3_status(self._sam3_setup_report.runtime_status))
+        model.bind_func("sam3_weights_status_text", lambda: self._format_sam3_status(self._sam3_setup_report.weights_status))
+        model.bind_func("sam3_reassurance_text", self._get_sam3_reassurance_text)
+        model.bind_func("sam3_check_button_text", lambda: self._sam3_check_button_text)
+        model.bind_func("sam3_install_button_text", self._get_sam3_install_button_text)
+        model.bind_func("sam3_install_disabled", self._get_sam3_install_disabled)
         model.bind_func("install_button_text", lambda: self._install_button_text)
         model.bind_func("install_busy", lambda: self._install_busy)
 
@@ -272,6 +289,7 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_event("open_hf_model", self._on_open_hf_model)
         model.bind_event("open_hf_tokens", self._on_open_hf_tokens)
         model.bind_event("verify_hf_token", self._on_verify_hf_token)
+        model.bind_event("check_sam3_setup", self._on_check_sam3_setup)
         model.bind_func("show_video_tracking_install",
                          lambda: False)
 
@@ -316,8 +334,26 @@ class Plugin360Panel(lf.ui.Panel):
             self._extract_fps,
             self._extract_sharpness_idx,
             self._blur_metric_idx,
+            self._masking_method_idx,
+            self._masking_available,
             self._enable_masking,
+            self._enable_diagnostics,
             self._mask_prompts_str,
+            self._hf_token_input,
+            self._hf_verify_text,
+            self._install_busy,
+            self._install_button_text,
+            self._sam3_check_button_text,
+            (
+                self._sam3_setup_report.token_status,
+                self._sam3_setup_report.access_status,
+                self._sam3_setup_report.runtime_status,
+                self._sam3_setup_report.weights_status,
+                self._sam3_setup_report.overall_stage,
+                self._sam3_setup_report.message,
+                self._sam3_setup_report.next_action,
+                self._sam3_setup_report.detail,
+            ),
             self._preset_idx,
             self._output_size_idx,
             self._jpeg_quality,
@@ -349,6 +385,53 @@ class Plugin360Panel(lf.ui.Panel):
     def _get_current_view_config(self):
         name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "default"
         return VIEW_PRESETS.get(name, VIEW_PRESETS["default"])
+
+    @staticmethod
+    def _format_sam3_status(status: str) -> str:
+        labels = {
+            "missing": "Missing",
+            "saved": "Saved",
+            "verified": "Verified",
+            "invalid": "Invalid",
+            "unknown": "Unknown",
+            "pending": "Pending Approval",
+            "granted": "Granted",
+            "network_error": "Network Error",
+            "installed": "Installed",
+            "broken": "Broken",
+            "present": "Present",
+            "failed": "Failed",
+        }
+        return labels.get(status, status.replace("_", " ").title())
+
+    def _get_fullcircle_status_text(self) -> str:
+        if self._setup_state.fullcircle_ready:
+            return "FullCircle is ready on this install. No HuggingFace account required."
+        return "FullCircle runtime is missing or damaged. Repair the local masking runtime."
+
+    def _get_sam3_reassurance_text(self) -> str:
+        if self._setup_state.fullcircle_ready:
+            return "FullCircle remains available while SAM 3 setup is incomplete."
+        return "FullCircle runtime needs repair on this install."
+
+    def _get_sam3_install_button_text(self) -> str:
+        if self._install_busy and self._masking_method_idx == 1:
+            return self._install_button_text
+        stage = self._sam3_setup_report.overall_stage
+        if stage == "needs_weights":
+            return "Download Weights"
+        if stage == "error":
+            return "Retry Install"
+        return "Install SAM 3"
+
+    def _get_sam3_install_disabled(self) -> bool:
+        if self._install_busy:
+            return True
+        return self._sam3_setup_report.overall_stage not in {
+            "ready_to_install",
+            "needs_weights",
+            "error",
+        }
 
     def _get_est_frames_text(self) -> str:
         if not self._video_info:
@@ -772,6 +855,22 @@ class Plugin360Panel(lf.ui.Panel):
         else:
             self._enable_masking = self._enable_masking and ready
 
+    def _sync_setup_state(
+        self,
+        *,
+        force_access_check: bool = False,
+        auto_enable: bool = False,
+    ) -> None:
+        state = check_masking_setup()
+        self._setup_state = state
+        self._sam3_setup_report = check_sam3_setup(
+            setup_state=state,
+            force_access_check=force_access_check,
+        )
+        self._hf_verify_text = self._sam3_setup_report.message
+        self._hf_verify_ok = self._sam3_setup_report.access_status == "granted"
+        self._refresh_masking_availability(auto_enable=auto_enable)
+
     def _set_masking_method(self, val):
         try:
             idx = int(val)
@@ -782,14 +881,13 @@ class Plugin360Panel(lf.ui.Panel):
             pass
 
     def _get_masking_backend_text(self):
-        level = self._setup_state.capability_level
-        if level == 3:
-            return "Masking ready (SAM 3 + SAM v2 installed)"
-        if level == 2:
-            return "Masking ready (SAM v2 installed)"
-        if level == 1:
-            return "Core deps present — SAM v2 still required"
-        return "Not installed"
+        if self._masking_method_idx == 1:
+            return "SAM 3 (0.9B params)"
+        if self._setup_state.fullcircle_ready:
+            return "FullCircle (YOLO + SAM v1 + SAM v2)"
+        if self._setup_state.default_tier_ready:
+            return "FullCircle runtime needs repair"
+        return "FullCircle runtime unavailable"
 
     def _set_hf_token_input(self, val):
         self._hf_token_input = str(val)
@@ -813,36 +911,69 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _on_verify_hf_token(self, handle, event, args):
         del handle, event, args
+        if self._install_busy:
+            return
         token = self._hf_token_input.strip()
         if not token:
-            self._hf_verify_text = "Please paste a token"
+            self._sam3_setup_report = verify_hf_token_detailed("")
+            self._hf_verify_text = self._sam3_setup_report.message
             self._hf_verify_ok = False
             if self._handle:
                 self._handle.dirty_all()
             return
-        self._hf_verify_text = "Verifying..."
+        self._install_busy = True
+        self._sam3_check_button_text = "Verifying..."
+        self._hf_verify_text = "Verifying HuggingFace access..."
         if self._handle:
             self._handle.dirty_all()
 
         def _verify():
-            if verify_hf_token(token):
-                self._hf_verify_text = "Access verified"
-                self._hf_verify_ok = True
-                self._setup_state = check_masking_setup()
-            else:
-                self._hf_verify_text = "Access denied or pending. Check your email and try again."
-                self._hf_verify_ok = False
+            report = verify_hf_token_detailed(token)
+            self._setup_state = check_masking_setup()
+            self._sam3_setup_report = report
+            self._hf_verify_text = report.message
+            self._hf_verify_ok = report.access_status == "granted"
+            self._refresh_masking_availability()
+            self._install_busy = False
+            self._sam3_check_button_text = "Re-check Setup"
             if self._handle:
                 self._handle.dirty_all()
 
         threading.Thread(target=_verify, daemon=True).start()
+
+    def _on_check_sam3_setup(self, handle, event, args):
+        del handle, event, args
+        if self._install_busy:
+            return
+        self._install_busy = True
+        self._sam3_check_button_text = "Checking..."
+        if self._handle:
+            self._handle.dirty_all()
+
+        def _check():
+            state = check_masking_setup()
+            report = check_sam3_setup(
+                setup_state=state,
+                force_access_check=True,
+            )
+            self._setup_state = state
+            self._sam3_setup_report = report
+            self._hf_verify_text = report.message
+            self._hf_verify_ok = report.access_status == "granted"
+            self._refresh_masking_availability()
+            self._install_busy = False
+            self._sam3_check_button_text = "Re-check Setup"
+            if self._handle:
+                self._handle.dirty_all()
+
+        threading.Thread(target=_check, daemon=True).start()
 
     def _on_install_default_tier(self, handle, event, args):
         del handle, event, args
         if self._install_busy:
             return
         self._install_busy = True
-        self._install_button_text = "Installing..."
+        self._install_button_text = "Repairing FullCircle..."
         if self._handle:
             self._handle.dirty_all()
 
@@ -854,12 +985,11 @@ class Plugin360Panel(lf.ui.Panel):
 
             ok = install_default_tier(on_output=_progress)
             self._install_busy = False
-            self._setup_state = check_masking_setup()
-            self._refresh_masking_availability(auto_enable=ok)
+            self._sync_setup_state(auto_enable=ok)
             if ok:
-                self._install_button_text = "Masking installed"
+                self._install_button_text = "FullCircle repaired"
             else:
-                self._install_button_text = "Install failed — retry"
+                self._install_button_text = "Repair failed — retry"
                 self._enable_masking = False
             if self._handle:
                 self._handle.dirty_all()
@@ -871,7 +1001,7 @@ class Plugin360Panel(lf.ui.Panel):
         if self._install_busy:
             return
         self._install_busy = True
-        self._install_button_text = "Installing video tracking..."
+        self._install_button_text = "Repairing SAM v2 runtime..."
         if self._handle:
             self._handle.dirty_all()
 
@@ -883,12 +1013,11 @@ class Plugin360Panel(lf.ui.Panel):
 
             ok = install_video_tracking(on_output=_progress)
             self._install_busy = False
-            self._setup_state = check_masking_setup()
-            self._refresh_masking_availability(auto_enable=ok)
+            self._sync_setup_state(auto_enable=ok)
             if ok:
-                self._install_button_text = "Video tracking installed"
+                self._install_button_text = "SAM v2 runtime repaired"
             else:
-                self._install_button_text = "Install failed — retry"
+                self._install_button_text = "Repair failed — retry"
                 self._enable_masking = False
             if self._handle:
                 self._handle.dirty_all()
@@ -905,20 +1034,36 @@ class Plugin360Panel(lf.ui.Panel):
             self._handle.dirty_all()
 
         def _install():
+            last_progress = ""
+
             def _progress(msg):
+                nonlocal last_progress
+                last_progress = msg
                 self._install_button_text = msg
                 if self._handle:
                     self._handle.dirty_all()
 
             ok = install_premium_tier(on_output=_progress)
             self._install_busy = False
-            self._setup_state = check_masking_setup()
-            self._refresh_masking_availability(auto_enable=ok)
+            state = check_masking_setup()
+            self._setup_state = state
             if ok:
+                self._sam3_setup_report = check_sam3_setup(setup_state=state)
+                self._hf_verify_text = self._sam3_setup_report.message
+                self._hf_verify_ok = self._sam3_setup_report.access_status == "granted"
+                self._refresh_masking_availability(auto_enable=True)
                 self._install_button_text = "SAM 3 installed"
             else:
-                self._install_button_text = "Install failed — retry"
+                self._sam3_setup_report = make_sam3_install_failure_report(
+                    last_progress or "SAM 3 install appears incomplete.",
+                    setup_state=state,
+                )
+                self._hf_verify_text = self._sam3_setup_report.message
+                self._hf_verify_ok = False
+                self._refresh_masking_availability()
+                self._install_button_text = "Retry Install"
                 self._enable_masking = False
+            self._sam3_check_button_text = "Re-check Setup"
             if self._handle:
                 self._handle.dirty_all()
 
