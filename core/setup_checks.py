@@ -7,6 +7,8 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from .sam3_compat import sam3_image_api_available, sam3_video_api_available
+
 logger = logging.getLogger(__name__)
 
 SAM3_MODEL_ID = "facebook/sam3"
@@ -143,19 +145,11 @@ def _check_sam2_installed() -> bool:
 
 
 def _check_sam3_installed() -> bool:
-    try:
-        from sam3.model_builder import build_sam3_image_model  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    return sam3_image_api_available()
 
 
 def _check_sam3_video_installed() -> bool:
-    try:
-        from sam3.model_builder import build_sam3_multiplex_video_predictor  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    return sam3_video_api_available()
 
 
 def _check_hf_token() -> bool:
@@ -555,6 +549,12 @@ def install_premium_tier(on_output=None) -> bool:
         "--extra", "sam3-masking",
     ], on_output=on_output)
     if not ok:
+        return False
+
+    if not _check_sam3_installed():
+        logger.error("sam3 install completed but image API is still unavailable")
+        if on_output:
+            on_output("SAM 3 install appears incomplete: image API import failed.")
         return False
 
     # Eagerly download SAM 3 weights

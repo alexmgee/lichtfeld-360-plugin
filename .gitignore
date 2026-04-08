@@ -19,6 +19,8 @@ dev/bp_harness_output/
 docs/
 tests/*
 !tests/conftest.py
+!tests/test_backends.py
+!tests/test_sam3_compat.py
 !tests/test_setup_checks.py
 !tests/test_pipeline.py
 !tests/test_sam3_masker.py
