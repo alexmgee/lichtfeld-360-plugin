@@ -211,6 +211,9 @@
         <div class="setting-row" data-if="show_sam3_install_button">
           <button class="btn btn-primary" data-event-click="install_premium_tier" data-attr-disabled="sam3_install_disabled">{{sam3_install_button_text}}</button>
         </div>
+        <div class="progress-row" data-if="show_sam3_install_progress">
+          <progress max="1" data-attr-value="sam3_install_progress_value"></progress>
+        </div>
       </div>
 
       <!-- SAM 3 path — ready -->
