@@ -331,12 +331,6 @@ class PipelineJob:
                         "SAM 3 masking requires sam3 + weights. "
                         "Install SAM 3 via the plugin settings panel."
                     )
-                if cfg.preset_name != "cubemap":
-                    raise RuntimeError(
-                        "SAM 3 uses the Cubemap preset in this version. "
-                        "Set Preset to Cubemap to continue, or choose "
-                        "Default masking for the Default preset."
-                    )
             else:
                 # FullCircle requires the full stack including SAM v2
                 if not is_masking_available():
@@ -347,11 +341,10 @@ class PipelineJob:
 
         # ── SAM 3 cubemap path ─────────────────────────────────────
         if (cfg.enable_masking
-                and cfg.masking_method == "sam3_cubemap"
-                and is_cubemap):
+                and cfg.masking_method == "sam3_cubemap"):
             from .sam3_masker import Sam3CubemapMasker, Sam3MaskerConfig
 
-            self._update("masking", 20.0, "Initializing SAM 3 cubemap masker...")
+            self._update("masking", 20.0, "Initializing SAM 3 masker...")
 
             sam3_cfg = Sam3MaskerConfig(
                 prompts=cfg.mask_prompts,
@@ -394,9 +387,9 @@ class PipelineJob:
             if self._check_cancel():
                 raise RuntimeError("Cancelled")
 
-            # SAM 3 masker writes masks directly to out/masks/{view_id}/
-            # Now reframe images only (no mask reframe needed)
-            self._update("reframe", 35.0, "Reframing to cubemap views...")
+            # SAM 3 masker writes final per-view masks to out/masks/{view_id}/
+            # using the selected output preset. Now reframe images only.
+            self._update("reframe", 35.0, "Reframing to output views...")
             reframer = Reframer(view_config)
 
             def _reframe_progress(cur: int, total: int, filename: str) -> None:
