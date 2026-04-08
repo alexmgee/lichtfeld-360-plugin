@@ -75,18 +75,24 @@
           <span class="slider-value">{{extract_fps_str}}</span>
         </div>
       </div>
+      <div class="setting-row">
+        <span class="prop-label"></span>
+        <span class="status-text status-muted">{{est_frames_text}}</span>
+      </div>
       <div class="setting-row setting-row--dropdown setting-row--dropdown-high">
         <span class="prop-label">Sharpness</span>
         <select data-value="extract_sharpness_idx">
           <option value="0">None</option>
-          <option value="1">Low</option>
-          <option value="2">Medium</option>
-          <option value="3">High</option>
+          <option value="1">Basic</option>
+          <option value="2">Best</option>
         </select>
       </div>
-      <div class="setting-row">
-        <span class="prop-label">Est. Frames</span>
-        <span class="status-text status-muted">{{est_frames_text}}</span>
+      <div class="setting-row setting-row--dropdown">
+        <span class="prop-label">Blur Metric</span>
+        <select data-value="blur_metric_idx">
+          <option value="0">Tenengrad</option>
+          <option value="1">Laplacian</option>
+        </select>
       </div>
     </div>
 
@@ -98,7 +104,7 @@
     <div class="section-content" id="sec-masking">
       <div data-if="show_masking_install">
         <div class="setting-row">
-          <span class="status-text status-muted">Masking removes the camera operator from 360 footage.</span>
+          <span class="status-text status-muted">Masking requires the full stack, including SAM v2 video tracking.</span>
         </div>
         <div class="setting-row">
           <button class="btn btn-primary" data-event-click="install_masking_deps" data-attr-disabled="install_busy">{{install_button_text}}</button>
@@ -108,6 +114,10 @@
         <div class="setting-row">
           <span class="prop-label">Enable</span>
           <input type="checkbox" data-checked="enable_masking" />
+        </div>
+        <div class="setting-row">
+          <span class="prop-label">Diagnostics</span>
+          <input type="checkbox" data-checked="enable_diagnostics" />
         </div>
         <div class="setting-row">
           <span class="prop-label">Backend</span>

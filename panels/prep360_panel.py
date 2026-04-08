@@ -21,7 +21,6 @@ except ImportError:
 
 from ..core.analyzer import VideoAnalyzer, VideoInfo
 from ..core.colmap_runner import MATCH_BUDGETS
-from ..core.masker import is_masking_available
 from ..core.setup_checks import (
     MaskingSetupState, check_masking_setup, verify_hf_token, download_model_weights,
     install_default_tier, install_premium_tier, install_video_tracking,
@@ -63,16 +62,20 @@ SCRUB_FIELD_SPECS = {
     ),
 }
 
-# Extraction sharpness presets: (label, use_blur, scale_width, scene_threshold)
-# - Interval: no blur analysis, just extract at FPS rate
-# - Sharp: fast blur check at very low res, no scene splitting
-# - Sharpest: full blur analysis with scene-aware chunking
-# - Sharpest+: thorough analysis at higher resolution
+# Extraction sharpness tiers
+# - None: no analysis, fixed-interval extraction
+# - Basic: ~10 candidates per interval, OpenCV scoring
+# - Best: score every frame with OpenCV
 EXTRACT_SHARPNESS_PRESETS = [
-    {"label": "None",    "use_blur": False, "scale_width": 0,    "scene_threshold": 0.0},
-    {"label": "Low",     "use_blur": True,  "scale_width": 480,  "scene_threshold": 0.0},
-    {"label": "Medium",  "use_blur": True,  "scale_width": 640,  "scene_threshold": 0.5},
-    {"label": "High",    "use_blur": True,  "scale_width": 1280, "scene_threshold": 0.3},
+    {"label": "None",  "scale_width": 0,   "scene_threshold": 0.0},
+    {"label": "Basic", "scale_width": 640, "scene_threshold": 0.3},
+    {"label": "Best",  "scale_width": 640, "scene_threshold": 0.3},
+]
+
+# Blur metric options
+BLUR_METRICS = [
+    {"label": "Tenengrad", "value": "tenengrad"},
+    {"label": "Laplacian", "value": "laplacian"},
 ]
 
 # Human-readable coverage descriptions per preset
@@ -115,13 +118,15 @@ class Plugin360Panel(lf.ui.Panel):
 
         # Extraction
         self._extract_fps: float = 1.0
-        self._extract_sharpness_idx: int = 3  # default: High
+        self._extract_sharpness_idx: int = 2  # default: Best
+        self._blur_metric_idx: int = 0        # default: Tenengrad
 
         # Masking
-        self._masking_available: bool = is_masking_available()
-        self._enable_masking: bool = self._masking_available
-        self._mask_prompts_str: str = "person"
         self._setup_state: MaskingSetupState = check_masking_setup()
+        self._masking_available: bool = self._setup_state.masking_ready
+        self._enable_masking: bool = self._masking_available
+        self._enable_diagnostics: bool = False
+        self._mask_prompts_str: str = "person"
         self._hf_token_input: str = ""
         self._hf_verify_text: str = ""
         self._hf_verify_ok: bool = False
@@ -194,15 +199,17 @@ class Plugin360Panel(lf.ui.Panel):
         # -- Extraction (range sliders need two-way bindings for data-value) --
         model.bind("extract_fps_str", lambda: f"{self._extract_fps:.1f}", self._set_extract_fps)
         model.bind("extract_sharpness_idx", lambda: str(self._extract_sharpness_idx), self._set_extract_sharpness)
+        model.bind("blur_metric_idx", lambda: str(self._blur_metric_idx), self._set_blur_metric)
         model.bind_func("est_frames_text", self._get_est_frames_text)
 
         # -- Masking --
         model.bind("enable_masking", lambda: self._enable_masking, self._set_enable_masking)
+        model.bind("enable_diagnostics", lambda: self._enable_diagnostics, self._set_enable_diagnostics)
         model.bind("mask_prompts_str", lambda: self._mask_prompts_str, self._set_mask_prompts)
         model.bind_func("masking_available", lambda: self._masking_available)
         model.bind_func("masking_backend_text", self._get_masking_backend_text)
-        model.bind_func("show_masking_install", lambda: not self._setup_state.default_tier_ready)
-        model.bind_func("show_masking_controls", lambda: self._setup_state.default_tier_ready)
+        model.bind_func("show_masking_install", lambda: not self._setup_state.masking_ready)
+        model.bind_func("show_masking_controls", lambda: self._setup_state.masking_ready)
         model.bind_func("install_button_text", lambda: self._install_button_text)
         model.bind_func("install_busy", lambda: self._install_busy)
 
@@ -246,7 +253,7 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_event("install_masking_deps", self._on_install_default_tier)
         model.bind_event("install_video_tracking", self._on_install_video_tracking)
         model.bind_func("show_video_tracking_install",
-                         lambda: self._setup_state.capability_level == 1)
+                         lambda: False)
 
         self._handle = model.get_handle()
 
@@ -288,6 +295,7 @@ class Plugin360Panel(lf.ui.Panel):
             self._video_path,
             self._extract_fps,
             self._extract_sharpness_idx,
+            self._blur_metric_idx,
             self._enable_masking,
             self._mask_prompts_str,
             self._preset_idx,
@@ -324,14 +332,14 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _get_est_frames_text(self) -> str:
         if not self._video_info:
-            return "Load a video first"
+            return "Select a video source"
         interval = 1.0 / max(0.1, self._extract_fps)
         base = VideoAnalyzer.estimate_frame_count(self._video_info, interval)
         preset = EXTRACT_SHARPNESS_PRESETS[self._extract_sharpness_idx]
         if preset["scene_threshold"] > 0:
             extra = int(base * 0.2)
-            return f"~{base}\u2013{base + extra} frames"
-        return f"~{base} frames"
+            return f"Estimated frames   ~{base}\u2013{base + extra}"
+        return f"Estimated frames   ~{base}"
 
     def _get_coverage_text(self) -> str:
         name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "default"
@@ -489,6 +497,8 @@ class Plugin360Panel(lf.ui.Panel):
             lines.append(f"Video backend: {result.video_backend_name}{suffix}")
         if result.video_backend_error:
             lines.append(f"Video backend error: {result.video_backend_error}")
+        if result.mask_diagnostics_path:
+            lines.append(f"Mask diagnostics: {result.mask_diagnostics_path}")
 
         output_root = Path(self._output_path) if self._output_path else None
         if output_root:
@@ -620,6 +630,8 @@ class Plugin360Panel(lf.ui.Panel):
             lines.append(f"Video backend: {result.video_backend_name}{suffix}")
         if result.video_backend_error:
             lines.append(f"Video backend error: {result.video_backend_error}")
+        if result.mask_diagnostics_path:
+            lines.append(f"Mask diagnostics: {result.mask_diagnostics_path}")
 
         if result.views_per_frame > 0:
             dropped_frames = max(result.num_source_frames - result.num_registered_frames, 0)
@@ -674,6 +686,14 @@ class Plugin360Panel(lf.ui.Panel):
         except (ValueError, TypeError):
             pass
 
+    def _set_blur_metric(self, val):
+        try:
+            v = int(float(val))
+            if 0 <= v < len(BLUR_METRICS):
+                self._blur_metric_idx = v
+        except (ValueError, TypeError):
+            pass
+
     def _set_jpeg_quality(self, val):
         try:
             v = int(float(val))
@@ -683,7 +703,10 @@ class Plugin360Panel(lf.ui.Panel):
             pass
 
     def _set_enable_masking(self, val):
-        self._enable_masking = bool(val)
+        self._enable_masking = bool(val) and self._masking_available
+
+    def _set_enable_diagnostics(self, val):
+        self._enable_diagnostics = bool(val)
 
     def _set_mask_prompts(self, val):
         self._mask_prompts_str = str(val)
@@ -691,11 +714,11 @@ class Plugin360Panel(lf.ui.Panel):
     def _get_masking_backend_text(self):
         level = self._setup_state.capability_level
         if level == 3:
-            return "Using SAM 3"
+            return "Masking ready (SAM 3 + SAM v2 installed)"
         if level == 2:
-            return "Masking ready (video tracking)"
+            return "Masking ready (SAM v2 installed)"
         if level == 1:
-            return "Masking ready"
+            return "Core deps present — SAM v2 still required"
         return "Not installed"
 
     def _set_hf_token_input(self, val):
@@ -761,13 +784,14 @@ class Plugin360Panel(lf.ui.Panel):
 
             ok = install_default_tier(on_output=_progress)
             self._install_busy = False
+            self._setup_state = check_masking_setup()
+            self._masking_available = self._setup_state.masking_ready
             if ok:
-                self._install_button_text = "Installed"
-                self._masking_available = True
-                self._enable_masking = True
+                self._install_button_text = "Masking installed"
+                self._enable_masking = self._masking_available
             else:
                 self._install_button_text = "Install failed — retry"
-            self._setup_state = check_masking_setup()
+                self._enable_masking = False
             if self._handle:
                 self._handle.dirty_all()
 
@@ -790,11 +814,14 @@ class Plugin360Panel(lf.ui.Panel):
 
             ok = install_video_tracking(on_output=_progress)
             self._install_busy = False
+            self._setup_state = check_masking_setup()
+            self._masking_available = self._setup_state.masking_ready
             if ok:
                 self._install_button_text = "Video tracking installed"
+                self._enable_masking = self._masking_available
             else:
                 self._install_button_text = "Install failed — retry"
-            self._setup_state = check_masking_setup()
+                self._enable_masking = False
             if self._handle:
                 self._handle.dirty_all()
 
@@ -1006,17 +1033,20 @@ class Plugin360Panel(lf.ui.Panel):
 
         prompts = [p.strip() for p in self._mask_prompts_str.split(",") if p.strip()]
         sharpness_preset = EXTRACT_SHARPNESS_PRESETS[self._extract_sharpness_idx]
-        sharpness_modes = ["none", "fast", "normal", "maximum"]
+        sharpness_modes = ["none", "basic", "best"]
+        blur_metric = BLUR_METRICS[self._blur_metric_idx]["value"]
 
         config = PipelineConfig(
             video_path=self._video_path,
             output_dir=self._output_path,
             interval=1.0 / max(0.1, self._extract_fps),
             extraction_sharpness=sharpness_modes[self._extract_sharpness_idx],
+            blur_metric=blur_metric,
             scene_threshold=sharpness_preset["scene_threshold"],
             blur_scale_width=sharpness_preset["scale_width"],
             quality=self._jpeg_quality,
             enable_masking=self._enable_masking and self._masking_available,
+            enable_diagnostics=self._enable_diagnostics,
             mask_prompts=prompts if prompts else ["person"],
             mask_backend=self._setup_state.active_backend,
             preset_name=preset_name,

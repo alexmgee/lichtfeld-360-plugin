@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Alex Gee
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Centralized masking setup state detection for two-tier backends."""
+"""Centralized masking setup state detection for operator masking."""
 from __future__ import annotations
 
 import logging
@@ -23,7 +23,7 @@ class MaskingSetupState:
     has_yolo: bool = False
     has_sam1: bool = False
 
-    # Video tracking (SAM v2, optional)
+    # Video tracking (SAM v2, required for operator masking runs)
     has_sam2: bool = False
 
     # Premium tier (SAM 3)
@@ -54,8 +54,13 @@ class MaskingSetupState:
         return None
 
     @property
+    def masking_ready(self) -> bool:
+        """Operator masking requires an image backend plus SAM v2 tracking."""
+        return self.active_backend is not None and self.has_sam2
+
+    @property
     def is_ready(self) -> bool:
-        return self.active_backend is not None
+        return self.masking_ready
 
     @property
     def first_incomplete_step(self) -> int:
@@ -66,23 +71,23 @@ class MaskingSetupState:
 
     @property
     def video_tracking_ready(self) -> bool:
-        """Pass 2 uses SAM v2 temporal tracking."""
-        return self.default_tier_ready and self.has_sam2
+        """Operator masking runtime is ready for SAM v2 temporal tracking."""
+        return self.masking_ready
 
     @property
     def capability_level(self) -> int:
         """Masking capability level for UI reporting.
 
         0 = nothing installed
-        1 = YOLO+SAM v1 (Pass 1 + fallback Pass 2)
-        2 = YOLO+SAM v1 + SAM v2 (full video tracking)
-        3 = SAM 3 (premium)
+        1 = image backend only (not enough for masking runs)
+        2 = full masking stack (image backend + SAM v2)
+        3 = SAM 3 image backend + SAM v2
         """
-        if self.premium_tier_ready:
+        if self.premium_tier_ready and self.has_sam2:
             return 3
-        if self.video_tracking_ready:
+        if self.masking_ready:
             return 2
-        if self.default_tier_ready:
+        if self.active_backend is not None:
             return 1
         return 0
 
@@ -184,6 +189,19 @@ def check_masking_setup() -> MaskingSetupState:
     )
 
 
+def is_operator_masking_ready() -> bool:
+    """Fast runtime check for operator masking readiness.
+
+    Operator masking is considered available only when at least one
+    image backend is importable and SAM v2 temporal tracking is present.
+    """
+    if not _check_torch_installed() or not _check_sam2_installed():
+        return False
+    if _check_yolo_installed() and _check_sam1_installed():
+        return True
+    return _check_sam3_installed() and _check_weights_downloaded()
+
+
 def verify_hf_token(token: str) -> bool:
     """Verify a HuggingFace token has access to SAM 3.
 
@@ -265,21 +283,8 @@ def _run_uv_command(args: list[str], on_output=None) -> bool:
     return proc.returncode == 0
 
 
-def install_default_tier(on_output=None) -> bool:
-    """Install YOLO + SAM v1 + torch into the plugin venv.
-
-    Syncs the locked project environment without the dev group.
-    PyTorch CUDA wheel selection is encoded in pyproject.toml/uv.lock.
-    Downloads SAM v1 ViT-H weights eagerly after install.
-    """
-    ok = _run_uv_command([
-        "sync",
-        "--locked",
-        "--no-dev",
-    ], on_output=on_output)
-    if not ok:
-        return False
-
+def _download_sam1_weights(on_output=None) -> None:
+    """Best-effort eager download of SAM v1 ViT-H weights."""
     # Eagerly download SAM v1 ViT-H weights
     try:
         import os
@@ -297,6 +302,46 @@ def install_default_tier(on_output=None) -> bool:
     except Exception as exc:
         logger.warning("SAM v1 weight download failed (will retry on first use): %s", exc)
 
+
+def _install_sam2_runtime(on_output=None) -> bool:
+    """Install and verify the SAM v2 runtime used by operator masking."""
+    _quarantine_broken_sam2_namespace(on_output=on_output)
+
+    ok = _run_uv_command([
+        "sync",
+        "--locked",
+        "--no-dev",
+        "--extra", "video-tracking",
+    ], on_output=on_output)
+    if not ok:
+        return False
+
+    if not _check_sam2_installed():
+        logger.error("sam2 install completed but sam2.build_sam is still unavailable")
+        if on_output:
+            on_output("SAM v2 install appears incomplete: sam2.build_sam is missing.")
+        return False
+
+    # Install bundled _C.pyd (CUDA connected-components extension) into
+    # the sam2 package.  Without this, SAM v2 skips mask hole-filling
+    # post-processing and emits a warning on every propagation call.
+    _install_sam2_c_extension(on_output=on_output)
+    return True
+
+
+def install_default_tier(on_output=None) -> bool:
+    """Install the full operator masking stack into the plugin venv.
+
+    This now installs the base image backend dependencies and the SAM v2
+    video-tracking runtime together. The plugin may run without masking,
+    but once masking is installed or requested the full stack is required.
+    """
+    if not _install_sam2_runtime(on_output=on_output):
+        return False
+
+    _download_sam1_weights(on_output=on_output)
+    if on_output:
+        on_output("Masking stack installed. SAM v2 model weights download on first use.")
     return True
 
 
@@ -453,34 +498,9 @@ def ensure_sam2_c_extension() -> None:
 
 
 def install_video_tracking(on_output=None) -> bool:
-    """Install SAM v2 for video tracking on synthetic views.
-
-    Requires torch already installed (from default tier).
-    Syncs the locked optional ``video-tracking`` extra instead of
-    mutating the environment ad hoc with ``uv add sam2``.
-    """
-    _quarantine_broken_sam2_namespace(on_output=on_output)
-
-    ok = _run_uv_command([
-        "sync",
-        "--locked",
-        "--no-dev",
-        "--extra", "video-tracking",
-    ], on_output=on_output)
-    if not ok:
+    """Install or repair the SAM v2 runtime used by operator masking."""
+    if not _install_sam2_runtime(on_output=on_output):
         return False
-
-    if not _check_sam2_installed():
-        logger.error("sam2 install completed but sam2.build_sam is still unavailable")
-        if on_output:
-            on_output("SAM v2 install appears incomplete: sam2.build_sam is missing.")
-        return False
-
-    # Install bundled _C.pyd (CUDA connected-components extension) into
-    # the sam2 package.  Without this, SAM v2 skips mask hole-filling
-    # post-processing and emits a warning on every propagation call.
-    _install_sam2_c_extension(on_output=on_output)
-
     if on_output:
         on_output("SAM v2 installed. Model weights download on first use.")
     return True

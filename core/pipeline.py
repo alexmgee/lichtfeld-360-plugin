@@ -52,7 +52,8 @@ class PipelineConfig:
 
     # Extraction
     interval: float = 2.0
-    extraction_sharpness: str = "normal"   # none, fast, normal, maximum
+    extraction_sharpness: str = "best"     # none, basic, best
+    blur_metric: str = "tenengrad"         # tenengrad, laplacian
     scene_threshold: float = 0.3
     blur_scale_width: int = 640
     quality: int = 95
@@ -64,6 +65,7 @@ class PipelineConfig:
     mask_prompts: list[str] = field(default_factory=lambda: ["person"])
     mask_backend: Optional[str] = None  # "sam3", "yolo_sam1", or None (auto)
     enable_overlap_masks: bool = True  # Voronoi anti-overlap masks for COLMAP
+    enable_diagnostics: bool = False  # Write masking_diagnostics.json alongside masks
 
     # Reframe
     preset_name: str = "default"
@@ -103,6 +105,7 @@ class PipelineResult:
     video_backend_name: str = ""
     used_fallback_video_backend: bool = False
     video_backend_error: str = ""
+    mask_diagnostics_path: str = ""
     elapsed_sec: float = 0.0
     error: str = ""
 
@@ -267,12 +270,16 @@ class PipelineJob:
         # ===================================================================
         # Stage 1: Sharpest Frame Extraction (0-20%)
         # ===================================================================
-        self._update("extraction", 0.0, "Extracting sharpest frames...")
+        if cfg.extraction_sharpness == "none":
+            self._update("extraction", 0.0, "Extracting frames...")
+        else:
+            self._update("extraction", 0.0, "Extracting sharpest frames...")
 
         extractor = SharpestExtractor()
         extract_config = SharpestConfig(
             interval=cfg.interval,
             extraction_sharpness=cfg.extraction_sharpness,
+            blur_metric=cfg.blur_metric,
             scene_threshold=cfg.scene_threshold,
             scale_width=cfg.blur_scale_width,
             quality=cfg.quality,
@@ -314,6 +321,12 @@ class PipelineJob:
         mask_result: Optional[MaskResult] = None
         is_cubemap = cfg.preset_name == "cubemap"
 
+        if cfg.enable_masking and not is_masking_available():
+            raise RuntimeError(
+                "Operator masking requires the full masking stack, including "
+                "SAM v2 video tracking. Install masking before enabling it."
+            )
+
         if is_cubemap and cfg.enable_masking and is_masking_available():
             # ── Cubemap path: reframe images first, then mask all faces directly ──
 
@@ -352,6 +365,7 @@ class PipelineJob:
                 backend_preference=cfg.mask_backend,
                 views=view_config.get_all_views(),
                 enable_synthetic=False,  # no synthetic pipeline for cubemap
+                enable_diagnostics=cfg.enable_diagnostics,
             )
             masker = Masker(mask_cfg)
             masker.initialize()
@@ -389,6 +403,7 @@ class PipelineJob:
                     output_size=cfg.output_size,
                     backend_preference=cfg.mask_backend,
                     views=view_config.get_all_views(),
+                    enable_diagnostics=cfg.enable_diagnostics,
                 )
                 masker = Masker(mask_cfg)
                 masker.initialize()
@@ -445,7 +460,10 @@ class PipelineJob:
         # extract duplicate features. Written to a temporary directory
         # (extracted/colmap_masks/) that COLMAP reads from. The permanent
         # masks/ directory keeps operator-only masks for LFS training.
-        colmap_masks_dir: Optional[Path] = None
+        colmap_masks_dir = extracted_dir / "colmap_masks"
+        if colmap_masks_dir.exists():
+            import shutil
+            shutil.rmtree(colmap_masks_dir, ignore_errors=True)
         if cfg.enable_masking and cfg.enable_overlap_masks and mask_result and mask_result.success:
             self._update("overlap_masks", 55.0, "Computing overlap masks...")
             views = view_config.get_all_views()
@@ -454,10 +472,7 @@ class PipelineJob:
                 import cv2
                 import shutil
                 operator_masks_dir = out / "masks"
-                colmap_masks_dir = extracted_dir / "colmap_masks"
                 # Copy operator masks to temp dir, then AND with Voronoi
-                if colmap_masks_dir.exists():
-                    shutil.rmtree(colmap_masks_dir)
                 shutil.copytree(operator_masks_dir, colmap_masks_dir)
                 for view_name, voronoi_mask in overlap_masks.items():
                     view_mask_dir = colmap_masks_dir / view_name
@@ -512,7 +527,7 @@ class PipelineJob:
         # Pass mask directory to COLMAP if masks were generated.
         # Use Voronoi-combined masks (colmap_masks_dir) if available,
         # otherwise fall back to operator-only masks.
-        effective_mask_path = colmap_masks_dir or (out / "masks")
+        effective_mask_path = colmap_masks_dir if colmap_masks_dir.is_dir() else (out / "masks")
         runner = ColmapRunner(
             images_dir=str(images_dir),
             output_dir=str(out),
@@ -523,12 +538,12 @@ class PipelineJob:
             cancel_check=self._check_cancel,
         )
 
-        colmap_result = runner.run()
-
-        # Clean up temporary COLMAP masks
-        if colmap_masks_dir and colmap_masks_dir.is_dir():
-            import shutil
-            shutil.rmtree(colmap_masks_dir)
+        try:
+            colmap_result = runner.run()
+        finally:
+            if colmap_masks_dir.is_dir():
+                import shutil
+                shutil.rmtree(colmap_masks_dir, ignore_errors=True)
 
         if not colmap_result.success:
             raise RuntimeError(f"COLMAP failed: {colmap_result.error}")
@@ -589,5 +604,6 @@ class PipelineJob:
                 mask_result.used_fallback_video_backend if mask_result else False
             ),
             video_backend_error=mask_result.video_backend_error if mask_result else "",
+            mask_diagnostics_path=mask_result.diagnostics_path if mask_result else "",
             elapsed_sec=elapsed,
         )
