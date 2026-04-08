@@ -45,7 +45,7 @@ except ImportError:
     pass
 
 try:
-    from sam3.model_builder import build_sam3_image_model  # type: ignore[import-untyped]
+    from sam3 import build_sam3_image_model  # type: ignore[import-untyped]
     from sam3.model.sam3_image_processor import Sam3Processor  # type: ignore[import-untyped]
     HAS_SAM3 = True
 except ImportError:
@@ -392,19 +392,43 @@ class Sam3Backend:
     image, not a video sequence.
     """
 
-    def __init__(self, device: str = "cuda") -> None:
+    def __init__(self, device: str = "cuda", confidence_threshold: float = 0.3) -> None:
         self._device = device
+        self._confidence_threshold = confidence_threshold
         self._model: Any = None
         self._processor: Any = None
 
     def initialize(self) -> None:
         if not HAS_SAM3:
             raise ImportError(
-                "SAM 3 not available. Install: uv add sam3"
+                "SAM 3 not available. Install via plugin settings."
             )
-        logger.info("Loading SAM 3 image model...")
-        self._model = build_sam3_image_model(device=self._device)
-        self._processor = Sam3Processor(self._model)
+
+        # Flash Attention 3 detection + fallback
+        fa3_available = False
+        try:
+            from flash_attn_interface import flash_attn_func  # noqa: F401
+            fa3_available = True
+        except ImportError:
+            pass
+
+        if not fa3_available:
+            try:
+                from sam3.model import decoder as _dec
+                from torch.nn.attention import sdpa_kernel, SDPBackend
+                _orig_sdpa_kernel = sdpa_kernel
+                _dec.sdpa_kernel = lambda *a, **kw: _orig_sdpa_kernel(
+                    [SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.FLASH_ATTENTION]
+                )
+                logger.info("Patched SAM 3 decoder to allow MATH attention fallback")
+            except Exception as exc:
+                logger.warning("Could not patch SAM 3 decoder attention: %s", exc)
+
+        logger.info("Loading SAM 3 image model (FA3=%s)...", fa3_available)
+        self._model = build_sam3_image_model()
+        self._model = self._model.to(self._device)
+        self._model.eval()
+        self._processor = Sam3Processor(self._model, confidence_threshold=self._confidence_threshold)
         logger.info("SAM 3 backend ready")
 
     def detect_and_segment(
@@ -428,6 +452,7 @@ class Sam3Backend:
         combined = np.zeros((h, w), dtype=np.uint8)
         for prompt_text in targets:
             try:
+                self._processor.reset_all_prompts(state)
                 output = self._processor.set_text_prompt(
                     state=state, prompt=prompt_text
                 )
@@ -458,19 +483,41 @@ class Sam3Backend:
         detection_confidence: float = 0.35,
     ) -> list[list[tuple[np.ndarray, float]]]:
         """Per-image detection via SAM 3. Returns bounding boxes from mask contours."""
+        from PIL import Image as PILImage
+
         all_detections: list[list[tuple[np.ndarray, float]]] = []
         for image in images:
-            mask = self.detect_and_segment(image, ["person"], detection_confidence)
+            h, w = image.shape[:2]
+            pil_img = PILImage.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+            state = self._processor.set_image(pil_img)
+
             detections: list[tuple[np.ndarray, float]] = []
-            if mask.sum() > 0:
-                contours, _ = cv2.findContours(
-                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
-                )
-                for cnt in contours:
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    if w * h > 100:
-                        box = np.array([x, y, x + w, y + h])
-                        detections.append((box, 1.0))
+            self._processor.reset_all_prompts(state)
+            output = self._processor.set_text_prompt(state=state, prompt="person")
+            masks = output.get("masks")
+            scores = output.get("scores")
+
+            if masks is not None and len(masks) > 0:
+                for i, mask in enumerate(masks):
+                    score = float(scores[i].cpu()) if scores is not None and i < len(scores) else 1.0
+                    if hasattr(mask, "cpu"):
+                        arr = mask.cpu().numpy()
+                    else:
+                        arr = np.array(mask)
+                    if arr.ndim == 3:
+                        arr = arr[0]
+                    binary = (arr > 0.5).astype(np.uint8)
+                    if binary.shape[:2] != (h, w):
+                        binary = cv2.resize(binary, (w, h), interpolation=cv2.INTER_NEAREST)
+                    contours, _ = cv2.findContours(
+                        binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+                    )
+                    for cnt in contours:
+                        x, y, cw, ch = cv2.boundingRect(cnt)
+                        if cw * ch > 100:
+                            box = np.array([x, y, x + cw, y + ch])
+                            detections.append((box, score))
+
             all_detections.append(detections)
         return all_detections
 
