@@ -357,6 +357,7 @@ class PipelineJob:
                 prompts=cfg.mask_prompts,
                 confidence_threshold=0.3,
                 output_size=cfg.output_size,
+                enable_diagnostics=cfg.enable_diagnostics,
             )
             sam3_masker = Sam3CubemapMasker(sam3_cfg)
             sam3_masker.initialize()

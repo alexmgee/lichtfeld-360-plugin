@@ -14,8 +14,10 @@ Pipeline per ERP frame:
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,6 +25,7 @@ import cv2
 import numpy as np
 
 from .cubemap_projection import CubemapProjection
+from .mask_diagnostics import build_mask_diagnostics_summary
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,7 @@ class Sam3MaskerConfig:
     fill_holes: bool = True
     output_size: int = 1920
     face_size: int | None = None  # None = auto (min(1024, w // 4))
+    enable_diagnostics: bool = False
 
 
 @dataclass
@@ -47,6 +51,8 @@ class Sam3MaskerResult:
     total_frames: int = 0
     masked_frames: int = 0
     mask_dir: str = ""
+    diagnostics_path: str = ""
+    backend_name: str = ""
 
 
 class Sam3CubemapMasker:
@@ -111,6 +117,8 @@ class Sam3CubemapMasker:
             return Sam3MaskerResult(success=True, total_frames=0)
 
         result = Sam3MaskerResult(total_frames=len(frame_files))
+        result.backend_name = type(self._backend).__name__ if self._backend is not None else ""
+        frame_diagnostics: list[dict[str, Any]] = []
 
         for i, frame_file in enumerate(frame_files):
             if progress_callback:
@@ -122,18 +130,40 @@ class Sam3CubemapMasker:
                 continue
 
             # Geometry-aware cubemap pipeline → COLMAP-polarity ERP keep-mask
-            erp_keep_mask = self._process_single_erp(erp)
+            erp_keep_mask, frame_diag = self._process_single_erp(erp)
 
             if erp_keep_mask is not None and np.any(erp_keep_mask < 255):
                 result.masked_frames += 1
 
             # Reframe ERP keep-mask into per-view plugin masks
-            self._write_per_view_masks(
+            per_view_diag = self._write_per_view_masks(
                 erp_keep_mask, view_config, masks_root, frame_file.stem,
             )
+            if self.config.enable_diagnostics:
+                frame_diag["frame"] = frame_file.stem
+                frame_diag["per_view_removed_pct"] = per_view_diag
+                frame_diag["views_with_removed_pixels"] = sum(
+                    1 for value in per_view_diag.values() if value > 0.0
+                )
+                frame_diag["flags"] = self._build_frame_flags(frame_diag)
+                frame_diagnostics.append(frame_diag)
 
         result.success = True
         result.mask_dir = str(masks_root)
+
+        if self.config.enable_diagnostics:
+            try:
+                diag_path = masks_root / "masking_diagnostics.json"
+                self._write_diagnostics(diag_path, result, frame_diagnostics)
+                result.diagnostics_path = str(diag_path)
+                if progress_callback:
+                    progress_callback(
+                        len(frame_files),
+                        len(frame_files),
+                        f"Mask diagnostics ready: {result.diagnostics_path}",
+                    )
+            except Exception as exc:
+                logger.warning("Failed to write SAM 3 diagnostics: %s", exc)
 
         if progress_callback:
             progress_callback(len(frame_files), len(frame_files), "SAM 3 masking complete")
@@ -144,7 +174,7 @@ class Sam3CubemapMasker:
         )
         return result
 
-    def _process_single_erp(self, erp: np.ndarray) -> np.ndarray:
+    def _process_single_erp(self, erp: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
         """Process one ERP frame. Returns COLMAP-polarity mask (255=keep, 0=remove).
 
         Follows reconstruction-zone's geometry-aware cubemap pipeline:
@@ -157,6 +187,10 @@ class Sam3CubemapMasker:
         h, w = erp.shape[:2]
         face_size = self.config.face_size or min(1024, w // 4)
         cubemap = CubemapProjection(face_size)
+        diagnostics: dict[str, Any] = {
+            "source_size": {"width": int(w), "height": int(h)},
+            "face_size": int(face_size),
+        }
 
         # 1. ERP → cubemap faces
         faces = cubemap.equirect2cubemap(erp)
@@ -164,6 +198,7 @@ class Sam3CubemapMasker:
         # 2. SAM 3 per-face detection
         face_masks: dict[str, np.ndarray] = {}
         total_detections = 0
+        face_coverage_pct: dict[str, float] = {}
         for face_name, face_img in faces.items():
             detection = self._backend.detect_and_segment(
                 face_img,
@@ -171,6 +206,7 @@ class Sam3CubemapMasker:
                 detection_confidence=self.config.confidence_threshold,
             )
             face_masks[face_name] = detection
+            face_coverage_pct[face_name] = self._coverage_pct(detection > 0)
             if detection.sum() > 0:
                 total_detections += 1
                 logger.debug("  %s: detected", face_name)
@@ -178,10 +214,10 @@ class Sam3CubemapMasker:
         # 3. Merge face masks → ERP detection mask (0/1 uint8)
         erp_detection = cubemap.cubemap2equirect(face_masks, (w, h))
 
-        coverage = float(np.sum(erp_detection > 0) / erp_detection.size * 100)
+        coverage_pre = self._coverage_pct(erp_detection > 0)
         logger.info(
             "Cubemap merge: %d/6 faces with detections, %.1f%% ERP coverage",
-            total_detections, coverage,
+            total_detections, coverage_pre,
         )
 
         # 4. Full-resolution ERP postprocess (dilation + fill-holes)
@@ -189,11 +225,17 @@ class Sam3CubemapMasker:
         #    that are invisible at 1024px face level become bridgeable at
         #    full ERP resolution.
         erp_detection = self._postprocess_erp_mask(erp_detection)
+        coverage_post = self._coverage_pct(erp_detection > 0)
 
         # 5. Convert: detection (1=detected) → COLMAP polarity (255=keep, 0=remove)
         erp_keep_mask = ((erp_detection == 0).astype(np.uint8)) * 255
 
-        return erp_keep_mask
+        diagnostics["faces_with_detections"] = int(total_detections)
+        diagnostics["face_detection_pct"] = face_coverage_pct
+        diagnostics["erp_detection_coverage_pct_pre"] = coverage_pre
+        diagnostics["erp_detection_coverage_pct_post"] = coverage_post
+
+        return erp_keep_mask, diagnostics
 
     def _postprocess_erp_mask(self, mask: np.ndarray) -> np.ndarray:
         """Full-resolution ERP postprocess: dilation then fill-holes.
@@ -246,13 +288,63 @@ class Sam3CubemapMasker:
         holes = ((closed == 0) & (exterior == 0)).astype(np.uint8)
         return np.maximum(mask, holes)
 
+    @staticmethod
+    def _coverage_pct(mask: np.ndarray) -> float:
+        """Percent of pixels that are active in a boolean/binary mask."""
+        if mask.size == 0:
+            return 0.0
+        active = np.count_nonzero(mask)
+        return round(float(active / mask.size * 100.0), 3)
+
+    @staticmethod
+    def _build_frame_flags(frame_diag: dict[str, Any]) -> list[str]:
+        """Flag suspicious or notable frame outcomes for quick triage."""
+        flags: list[str] = []
+        if int(frame_diag.get("faces_with_detections", 0)) == 0:
+            flags.append("no_face_detections")
+        if float(frame_diag.get("erp_detection_coverage_pct_post", 0.0)) >= 60.0:
+            flags.append("high_erp_detection_coverage")
+        per_view = frame_diag.get("per_view_removed_pct", {})
+        if any(float(value) >= 50.0 for value in per_view.values()):
+            flags.append("heavy_removed_view")
+        return flags
+
+    def _write_diagnostics(
+        self,
+        path: Path,
+        result: Sam3MaskerResult,
+        frames: list[dict[str, Any]],
+    ) -> None:
+        """Write a JSON diagnostics summary for SAM 3 cubemap masking."""
+        doc = {
+            "version": 1,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mode": "sam3_cubemap",
+            "backend": result.backend_name,
+            "prompts": list(self.config.prompts),
+            "confidence_threshold": float(self.config.confidence_threshold),
+            "dilation_px": int(self.config.dilation_px),
+            "fill_holes": bool(self.config.fill_holes),
+            "output_size": int(self.config.output_size),
+            "face_size": int(self.config.face_size) if self.config.face_size is not None else None,
+            "total_frames": int(result.total_frames),
+            "masked_frames": int(result.masked_frames),
+            "frames_with_face_detections": sum(
+                1 for frame in frames if int(frame.get("faces_with_detections", 0)) > 0
+            ),
+            "summary": build_mask_diagnostics_summary(frames),
+            "frames": frames,
+        }
+        path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        logger.info("SAM 3 diagnostics written to %s", path)
+
     def _write_per_view_masks(
         self,
         erp_keep_mask: np.ndarray,
         view_config: Any,
         masks_root: Path,
         frame_stem: str,
-    ) -> None:
+    ) -> dict[str, float]:
         """Reframe ERP keep-mask into per-view plugin masks.
 
         Uses the standalone reframe_view() with mode="nearest" for binary masks.
@@ -261,6 +353,7 @@ class Sam3CubemapMasker:
         from .reframer import reframe_view
 
         views = view_config.get_all_views()
+        per_view_removed_pct: dict[str, float] = {}
 
         for yaw, pitch, fov, view_name, flip_v in views:
             view_dir = masks_root / view_name
@@ -275,6 +368,9 @@ class Sam3CubemapMasker:
 
             mask_path = view_dir / f"{frame_stem}.png"
             cv2.imwrite(str(mask_path), pinhole_mask)
+            per_view_removed_pct[view_name] = self._coverage_pct(pinhole_mask == 0)
+
+        return per_view_removed_pct
 
     def cleanup(self) -> None:
         """Release SAM 3 backend resources."""

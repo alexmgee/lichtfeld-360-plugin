@@ -21,6 +21,11 @@ except ImportError:
 
 from ..core.analyzer import VideoAnalyzer, VideoInfo
 from ..core.colmap_runner import MATCH_BUDGETS
+from ..core.mask_diagnostics import (
+    format_mask_diagnostics_overview,
+    get_mask_diagnostics_summary,
+    load_mask_diagnostics_document,
+)
 from ..core.setup_checks import (
     MaskingSetupState, check_masking_setup, verify_hf_token, download_model_weights,
     install_default_tier, install_premium_tier, install_video_tracking,
@@ -491,6 +496,27 @@ class Plugin360Panel(lf.ui.Panel):
             if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}
         )
 
+    def _load_mask_diagnostics_summary(self, path: str) -> dict | None:
+        """Best-effort load of a mask diagnostics summary for reporting."""
+        doc = load_mask_diagnostics_document(path)
+        return get_mask_diagnostics_summary(doc)
+
+    def _append_mask_diagnostics_lines(self, lines: list[str], path: str) -> dict | None:
+        """Append human-readable masking diagnostics lines to a report."""
+        if not path:
+            return None
+
+        lines.append(f"Mask diagnostics: {path}")
+        doc = load_mask_diagnostics_document(path)
+        if not doc:
+            lines.append("  Mask diagnostics summary: unavailable")
+            return None
+
+        for line in format_mask_diagnostics_overview(doc):
+            lines.append(f"  {line}")
+
+        return get_mask_diagnostics_summary(doc)
+
     def _build_failure_report(
         self,
         result: PipelineResult,
@@ -513,7 +539,7 @@ class Plugin360Panel(lf.ui.Panel):
         if result.video_backend_error:
             lines.append(f"Video backend error: {result.video_backend_error}")
         if result.mask_diagnostics_path:
-            lines.append(f"Mask diagnostics: {result.mask_diagnostics_path}")
+            self._append_mask_diagnostics_lines(lines, result.mask_diagnostics_path)
 
         output_root = Path(self._output_path) if self._output_path else None
         if output_root:
@@ -553,6 +579,8 @@ class Plugin360Panel(lf.ui.Panel):
         lines.append(f"Max. matches: {self._colmap_max_num_matches:,} per pair")
         if result.preset_signature:
             lines.append(f"Preset geometry: {result.preset_signature}")
+        if result.mask_diagnostics_path:
+            self._append_mask_diagnostics_lines(lines, result.mask_diagnostics_path)
 
         output_root = Path(self._output_path) if self._output_path else None
         if output_root:
@@ -590,15 +618,18 @@ class Plugin360Panel(lf.ui.Panel):
             return
 
         timing_path = Path(self._output_path) / "timing.json"
+        mask_diagnostics_summary = self._load_mask_diagnostics_summary(
+            result.mask_diagnostics_path
+        )
         timing_output = {
             "success": False,
             "total_sec": round(total, 3),
             "stages": timing_dict,
-                "result": {
-                    "source_frames": result.num_source_frames,
-                    "output_images": result.num_output_images,
-                    "aligned_cameras": result.num_aligned_cameras,
-                    "matcher": matcher,
+            "result": {
+                "source_frames": result.num_source_frames,
+                "output_images": result.num_output_images,
+                "aligned_cameras": result.num_aligned_cameras,
+                "matcher": matcher,
                 "match_budget_tier": tier,
                 "max_num_matches": self._colmap_max_num_matches,
                 "preset_geometry": result.preset_signature,
@@ -609,17 +640,19 @@ class Plugin360Panel(lf.ui.Panel):
                 "dropped_rig_frames": max(
                     result.num_source_frames - result.num_registered_frames, 0
                 ),
-                    "registered_images_by_view": result.registered_images_by_view,
-                    "expected_images_by_view": result.expected_images_by_view,
-                    "partial_frame_examples": result.partial_frame_examples,
-                    "dropped_frame_examples": result.dropped_frame_examples,
-                    "mask_backend": result.mask_backend_name,
-                    "video_backend": result.video_backend_name,
-                    "used_fallback_video_backend": result.used_fallback_video_backend,
-                    "video_backend_error": result.video_backend_error,
-                    "error": self._error_message,
-                },
-            }
+                "registered_images_by_view": result.registered_images_by_view,
+                "expected_images_by_view": result.expected_images_by_view,
+                "partial_frame_examples": result.partial_frame_examples,
+                "dropped_frame_examples": result.dropped_frame_examples,
+                "mask_backend": result.mask_backend_name,
+                "mask_diagnostics_path": result.mask_diagnostics_path,
+                "mask_diagnostics_summary": mask_diagnostics_summary,
+                "video_backend": result.video_backend_name,
+                "used_fallback_video_backend": result.used_fallback_video_backend,
+                "video_backend_error": result.video_backend_error,
+                "error": self._error_message,
+            },
+        }
         if report_error:
             timing_output["report_error"] = report_error
         timing_path.write_text(json.dumps(timing_output, indent=2))
@@ -646,7 +679,7 @@ class Plugin360Panel(lf.ui.Panel):
         if result.video_backend_error:
             lines.append(f"Video backend error: {result.video_backend_error}")
         if result.mask_diagnostics_path:
-            lines.append(f"Mask diagnostics: {result.mask_diagnostics_path}")
+            self._append_mask_diagnostics_lines(lines, result.mask_diagnostics_path)
 
         if result.views_per_frame > 0:
             dropped_frames = max(result.num_source_frames - result.num_registered_frames, 0)
@@ -1357,6 +1390,9 @@ class Plugin360Panel(lf.ui.Panel):
             # Write timing.json
             try:
                 timing_path = Path(self._output_path) / "timing.json"
+                mask_diagnostics_summary = self._load_mask_diagnostics_summary(
+                    result.mask_diagnostics_path
+                )
                 timing_output = {
                     "success": True,
                     "total_sec": round(total, 3),
@@ -1381,6 +1417,8 @@ class Plugin360Panel(lf.ui.Panel):
                         "partial_frame_examples": result.partial_frame_examples,
                         "dropped_frame_examples": result.dropped_frame_examples,
                         "mask_backend": result.mask_backend_name,
+                        "mask_diagnostics_path": result.mask_diagnostics_path,
+                        "mask_diagnostics_summary": mask_diagnostics_summary,
                         "video_backend": result.video_backend_name,
                         "used_fallback_video_backend": result.used_fallback_video_backend,
                         "video_backend_error": result.video_backend_error,

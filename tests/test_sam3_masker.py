@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Tests for Sam3CubemapMasker — geometry-aware cubemap SAM 3 helper."""
 
+import json
 import numpy as np
 from unittest.mock import MagicMock
 from pathlib import Path
@@ -195,6 +196,73 @@ class TestSam3CubemapMaskerPipeline:
 
             # 6 cubemap faces × 1 frame = 6 calls
             assert mock.detect_and_segment.call_count == 6
+        finally:
+            shutil.rmtree(tmp_path, ignore_errors=True)
+
+    def test_diagnostics_written_when_enabled(self):
+        """Diagnostics mode should write masking_diagnostics.json with frame stats."""
+        from core.presets import VIEW_PRESETS
+        from core.sam3_masker import Sam3CubemapMasker, Sam3MaskerConfig
+
+        tmp_path = _make_temp_workspace()
+        try:
+            erp = _make_erp()
+            frames_dir = tmp_path / "frames"
+            frames_dir.mkdir()
+            cv2.imwrite(str(frames_dir / "frame_00001.jpg"), erp)
+
+            config = Sam3MaskerConfig(
+                prompts=["person"],
+                confidence_threshold=0.3,
+                output_size=512,
+                enable_diagnostics=True,
+            )
+            masker = Sam3CubemapMasker(config)
+
+            mock_backend = MagicMock()
+
+            def _detect_front_only(image, targets, **kwargs):
+                h, w = image.shape[:2]
+                mask = np.zeros((h, w), dtype=np.uint8)
+                mask[h // 4:h // 2, w // 4:w // 2] = 1
+                return mask
+
+            mock_backend.detect_and_segment.side_effect = _detect_front_only
+            masker._backend = mock_backend
+            masker._initialized = True
+
+            output_dir = tmp_path / "output"
+            result = masker.process_frames(
+                frames_dir=str(frames_dir),
+                output_dir=str(output_dir),
+                view_config=VIEW_PRESETS["cubemap"],
+            )
+
+            assert result.success
+            assert result.diagnostics_path
+
+            diag_path = Path(result.diagnostics_path)
+            assert diag_path.exists()
+
+            doc = json.loads(diag_path.read_text(encoding="utf-8"))
+            assert doc["mode"] == "sam3_cubemap"
+            assert doc["backend"] == "MagicMock"
+            assert doc["total_frames"] == 1
+            assert doc["masked_frames"] == 1
+            assert "summary" in doc
+            assert len(doc["frames"]) == 1
+
+            summary = doc["summary"]
+            assert summary["flagged_frames"] >= 0
+            assert "avg_erp_detection_coverage_pct_post" in summary
+            assert "avg_face_detection_pct" in summary
+
+            frame = doc["frames"][0]
+            assert frame["frame"] == "frame_00001"
+            assert frame["faces_with_detections"] == 6
+            assert "erp_detection_coverage_pct_post" in frame
+            assert "per_view_removed_pct" in frame
+            assert isinstance(frame["flags"], list)
         finally:
             shutil.rmtree(tmp_path, ignore_errors=True)
 
