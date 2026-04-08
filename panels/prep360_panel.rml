@@ -145,6 +145,9 @@
         <div class="setting-row">
           <span class="status-text status-muted">{{sam3_status_message}}</span>
         </div>
+        <div class="setting-row" data-if="show_sam3_notice">
+          <span class="status-text status-muted">{{sam3_notice_text}}</span>
+        </div>
         <div class="setting-row">
           <span class="status-text status-muted">{{sam3_next_action_text}}</span>
         </div>
@@ -167,6 +170,9 @@
           <span class="prop-label">Weights</span>
           <span class="status-text status-muted">{{sam3_weights_status_text}}</span>
         </div>
+        <div class="setting-row" data-if="show_sam3_cached_weights_note">
+          <span class="status-text status-muted">{{sam3_cached_weights_note_text}}</span>
+        </div>
         <div class="setting-row" data-if="show_sam3_saved_token_notice">
           <span class="status-text status-muted">{{sam3_saved_token_text}}</span>
         </div>
@@ -175,7 +181,7 @@
           <button class="btn btn--secondary btn--compact" data-event-click="forget_hf_token" data-attr-disabled="install_busy">Forget Saved Token</button>
         </div>
         <div class="setting-row" data-if="show_sam3_account_step">
-          <button class="btn btn--secondary btn--compact" data-event-click="open_hf_signup">1. Create HuggingFace Account</button>
+          <button class="btn btn--secondary btn--compact" data-event-click="open_hf_signup">1. Open HuggingFace</button>
         </div>
         <div class="setting-row" data-if="show_sam3_request_access_step">
           <button class="btn btn--secondary btn--compact" data-event-click="open_hf_model">2. Request SAM 3 Access</button>
@@ -188,13 +194,13 @@
           <button class="btn btn--secondary btn--compact" data-event-click="verify_hf_token" data-attr-disabled="install_busy">Verify Access</button>
           <span class="status-text status-muted">{{hf_verify_text}}</span>
         </div>
-        <div class="setting-row" data-if="show_sam3_token_editor">
-          <button class="btn btn--secondary btn--compact" data-event-click="open_hf_tokens">Open Tokens Page</button>
+        <div class="setting-row">
+          <button class="btn btn--secondary btn--compact" data-event-click="open_hf_tokens">Open HuggingFace Tokens Page</button>
         </div>
         <div class="setting-row">
           <button class="btn btn--secondary btn--compact" data-event-click="check_sam3_setup" data-attr-disabled="install_busy">{{sam3_check_button_text}}</button>
         </div>
-        <div class="setting-row">
+        <div class="setting-row" data-if="show_sam3_install_button">
           <button class="btn btn-primary" data-event-click="install_premium_tier" data-attr-disabled="sam3_install_disabled">{{sam3_install_button_text}}</button>
         </div>
       </div>
