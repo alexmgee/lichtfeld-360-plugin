@@ -333,9 +333,9 @@ class PipelineJob:
                     )
                 if cfg.preset_name != "cubemap":
                     raise RuntimeError(
-                        "SAM 3 masking is currently cubemap-only. "
-                        "Select the Cubemap preset to use SAM 3, or "
-                        "switch to the FullCircle masking method."
+                        "SAM 3 uses the Cubemap preset in this version. "
+                        "Set Preset to Cubemap to continue, or choose "
+                        "Default masking for the Default preset."
                     )
             else:
                 # FullCircle requires the full stack including SAM v2
