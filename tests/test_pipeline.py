@@ -112,6 +112,7 @@ def test_sam3_cubemap_route_preserves_mask_result_contract(monkeypatch):
             masking_method="sam3_cubemap",
             preset_name="cubemap",
             enable_overlap_masks=True,
+            enable_diagnostics=True,
         )
 
         overlap_calls: list[tuple[int, int]] = []
@@ -145,7 +146,7 @@ def test_sam3_cubemap_route_preserves_mask_result_contract(monkeypatch):
                     masked_frames=1,
                     mask_dir=str(masks_root),
                     backend_name="Sam3Backend",
-                    diagnostics_path="",
+                    diagnostics_path=str(masks_root / "masking_diagnostics.json"),
                 )
 
             def cleanup(self):
@@ -199,6 +200,7 @@ def test_sam3_cubemap_route_preserves_mask_result_contract(monkeypatch):
 
         assert result.success
         assert result.mask_backend_name == "Sam3Backend"
+        assert result.mask_diagnostics_path.endswith("masking_diagnostics.json")
         assert overlap_calls == [(6, cfg.output_size)]
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)

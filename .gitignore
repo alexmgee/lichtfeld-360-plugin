@@ -24,3 +24,4 @@ tests/*
 !tests/test_setup_checks.py
 !tests/test_pipeline.py
 !tests/test_sam3_masker.py
+!tests/test_mask_diagnostics.py
