@@ -28,7 +28,7 @@ from ..core.mask_diagnostics import (
 )
 from ..core.setup_checks import (
     MaskingSetupState, Sam3SetupReport, check_masking_setup, check_sam3_setup,
-    install_default_tier, install_premium_tier, install_video_tracking,
+    forget_hf_token, install_default_tier, install_premium_tier, install_video_tracking,
     make_sam3_install_failure_report, verify_hf_token_detailed,
 )
 from ..core.pipeline import PipelineConfig, PipelineJob, PipelineResult
@@ -143,6 +143,7 @@ class Plugin360Panel(lf.ui.Panel):
         self._install_busy: bool = False
         self._install_button_text: str = "Repair Default Masking"
         self._sam3_check_button_text: str = "Check Setup"
+        self._sam3_edit_token: bool = False
 
         # Reframe
         self._preset_idx: int = 0
@@ -241,7 +242,13 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("sam3_check_button_text", lambda: self._sam3_check_button_text)
         model.bind_func("sam3_install_button_text", self._get_sam3_install_button_text)
         model.bind_func("sam3_install_disabled", self._get_sam3_install_disabled)
-        model.bind_func("show_sam3_prereq_steps", self._show_sam3_prereq_steps)
+        model.bind_func("show_sam3_saved_token_notice", self._show_sam3_saved_token_notice)
+        model.bind_func("sam3_saved_token_text", self._get_sam3_saved_token_text)
+        model.bind_func("show_sam3_account_step", self._show_sam3_account_step)
+        model.bind_func("show_sam3_request_access_step", self._show_sam3_request_access_step)
+        model.bind_func("show_sam3_token_editor", self._show_sam3_token_editor)
+        model.bind_func("show_sam3_token_actions", self._show_sam3_token_actions)
+        model.bind_func("sam3_change_token_button_text", self._get_sam3_change_token_button_text)
         model.bind_func("install_button_text", lambda: self._install_button_text)
         model.bind_func("install_busy", lambda: self._install_busy)
 
@@ -291,6 +298,8 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_event("open_hf_tokens", self._on_open_hf_tokens)
         model.bind_event("verify_hf_token", self._on_verify_hf_token)
         model.bind_event("check_sam3_setup", self._on_check_sam3_setup)
+        model.bind_event("toggle_sam3_token_editor", self._on_toggle_sam3_token_editor)
+        model.bind_event("forget_hf_token", self._on_forget_hf_token)
         model.bind_func("show_video_tracking_install",
                          lambda: False)
 
@@ -415,6 +424,14 @@ class Plugin360Panel(lf.ui.Panel):
             return "Default masking remains available while SAM 3 setup is incomplete."
         return "Default masking runtime needs repair on this install."
 
+    def _get_sam3_saved_token_text(self) -> str:
+        if self._sam3_setup_report.access_status == "granted":
+            return (
+                "Using a saved HuggingFace token from this machine. "
+                "Change or forget it below if you want to test first-run setup."
+            )
+        return "Using a saved HuggingFace token from this machine."
+
     def _get_sam3_install_button_text(self) -> str:
         if self._install_busy and self._masking_method_idx == 1:
             return self._install_button_text
@@ -434,8 +451,29 @@ class Plugin360Panel(lf.ui.Panel):
             "error",
         }
 
-    def _show_sam3_prereq_steps(self) -> bool:
+    def _show_sam3_saved_token_notice(self) -> bool:
+        return self._setup_state.has_token and not self._sam3_edit_token
+
+    def _show_sam3_account_step(self) -> bool:
+        return not self._setup_state.has_token and self._show_sam3_token_editor()
+
+    def _show_sam3_request_access_step(self) -> bool:
         return self._sam3_setup_report.access_status != "granted"
+
+    def _show_sam3_token_editor(self) -> bool:
+        return (
+            self._sam3_edit_token
+            or not self._setup_state.has_token
+            or self._sam3_setup_report.token_status in {"missing", "invalid"}
+        )
+
+    def _show_sam3_token_actions(self) -> bool:
+        return self._setup_state.has_token or self._sam3_edit_token
+
+    def _get_sam3_change_token_button_text(self) -> str:
+        if self._sam3_edit_token:
+            return "Cancel Token Change"
+        return "Change Token"
 
     def _get_est_frames_text(self) -> str:
         if not self._video_info:
@@ -873,6 +911,8 @@ class Plugin360Panel(lf.ui.Panel):
         )
         self._hf_verify_text = self._sam3_setup_report.message
         self._hf_verify_ok = self._sam3_setup_report.access_status == "granted"
+        if not self._setup_state.has_token:
+            self._sam3_edit_token = False
         self._refresh_masking_availability(auto_enable=auto_enable)
 
     def _set_masking_method(self, val):
@@ -933,10 +973,12 @@ class Plugin360Panel(lf.ui.Panel):
 
         def _verify():
             report = verify_hf_token_detailed(token)
+            self._hf_token_input = ""
             self._setup_state = check_masking_setup()
             self._sam3_setup_report = report
             self._hf_verify_text = report.message
             self._hf_verify_ok = report.access_status == "granted"
+            self._sam3_edit_token = report.access_status != "granted"
             self._refresh_masking_availability()
             self._install_busy = False
             self._sam3_check_button_text = "Re-check Setup"
@@ -971,6 +1013,43 @@ class Plugin360Panel(lf.ui.Panel):
                 self._handle.dirty_all()
 
         threading.Thread(target=_check, daemon=True).start()
+
+    def _on_toggle_sam3_token_editor(self, handle, event, args):
+        del handle, event, args
+        if self._install_busy:
+            return
+        self._sam3_edit_token = not self._sam3_edit_token
+        if not self._sam3_edit_token:
+            self._hf_token_input = ""
+            self._hf_verify_text = self._sam3_setup_report.message
+        if self._handle:
+            self._handle.dirty_all()
+
+    def _on_forget_hf_token(self, handle, event, args):
+        del handle, event, args
+        if self._install_busy:
+            return
+        self._install_busy = True
+        self._hf_verify_text = "Removing saved HuggingFace token..."
+        if self._handle:
+            self._handle.dirty_all()
+
+        def _forget():
+            ok = forget_hf_token()
+            self._install_busy = False
+            if ok:
+                self._hf_token_input = ""
+                self._sam3_edit_token = True
+                self._sam3_check_button_text = "Check Setup"
+                self._sync_setup_state()
+                self._hf_verify_text = "Saved HuggingFace token removed."
+                self._hf_verify_ok = False
+            else:
+                self._hf_verify_text = "Could not remove the saved HuggingFace token."
+            if self._handle:
+                self._handle.dirty_all()
+
+        threading.Thread(target=_forget, daemon=True).start()
 
     def _on_install_default_tier(self, handle, event, args):
         del handle, event, args

@@ -12,6 +12,7 @@ from core.setup_checks import (
     _install_sam2_runtime,
     check_masking_setup,
     check_sam3_setup,
+    forget_hf_token,
     install_default_tier,
     install_video_tracking,
     make_sam3_install_failure_report,
@@ -268,6 +269,16 @@ def test_verify_hf_token_detailed_access_pending():
     assert report.token_status == "verified"
     assert report.access_status == "pending"
     assert report.overall_stage == "needs_access"
+
+
+def test_forget_hf_token_clears_saved_login_cache():
+    fake_hf = SimpleNamespace(logout=Mock())
+
+    with patch.dict(sys.modules, {"huggingface_hub": fake_hf}), \
+         patch("core.setup_checks._hf_access_cache", True):
+        assert forget_hf_token()
+
+    fake_hf.logout.assert_called_once_with()
 
 
 def test_make_sam3_install_failure_report_marks_runtime_broken():
