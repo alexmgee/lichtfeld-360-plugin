@@ -126,6 +126,8 @@ class Sam3CubemapMasker:
         result = Sam3MaskerResult(total_frames=len(frame_files))
         result.backend_name = type(self._backend).__name__ if self._backend is not None else ""
         frame_diagnostics: list[dict[str, Any]] = []
+        prev_detection_mask: np.ndarray | None = None
+        prev_frame_diag: dict[str, Any] | None = None
 
         for i, frame_file in enumerate(frame_files):
             if progress_callback:
@@ -155,8 +157,42 @@ class Sam3CubemapMasker:
                 frame_diag["views_with_removed_pixels"] = sum(
                     1 for value in per_view_diag.values() if value > 0.0
                 )
+                current_detection_mask = (erp_keep_mask == 0)
+                frame_diag["temporal_iou_prev_pct"] = self._mask_iou_pct(
+                    current_detection_mask,
+                    prev_detection_mask,
+                )
+                if prev_frame_diag is None:
+                    frame_diag["coverage_delta_prev_pct"] = None
+                    frame_diag["views_delta_prev"] = None
+                    frame_diag["face_distribution_jump_pct"] = None
+                    frame_diag["dominant_face_changed"] = False
+                else:
+                    frame_diag["coverage_delta_prev_pct"] = round(
+                        abs(
+                            float(frame_diag.get("erp_detection_coverage_pct_post", 0.0))
+                            - float(prev_frame_diag.get("erp_detection_coverage_pct_post", 0.0))
+                        ),
+                        3,
+                    )
+                    frame_diag["views_delta_prev"] = int(
+                        abs(
+                            int(frame_diag.get("views_with_removed_pixels", 0))
+                            - int(prev_frame_diag.get("views_with_removed_pixels", 0))
+                        )
+                    )
+                    frame_diag["face_distribution_jump_pct"] = self._face_distribution_jump_pct(
+                        frame_diag.get("face_share_pct") or {},
+                        prev_frame_diag.get("face_share_pct") or {},
+                    )
+                    frame_diag["dominant_face_changed"] = (
+                        str(frame_diag.get("dominant_face_name", "")) !=
+                        str(prev_frame_diag.get("dominant_face_name", ""))
+                    )
                 frame_diag["flags"] = self._build_frame_flags(frame_diag)
                 frame_diagnostics.append(frame_diag)
+                prev_detection_mask = current_detection_mask
+                prev_frame_diag = frame_diag
 
         result.success = True
         result.mask_dir = str(masks_root)
@@ -259,7 +295,7 @@ class Sam3CubemapMasker:
         diagnostics["erp_detection_coverage_pct_pre"] = coverage_pre
         diagnostics["erp_detection_coverage_pct_post"] = coverage_post
         diagnostics.update(self._component_metrics(erp_detection))
-        diagnostics["down_face_share_pct"] = self._down_face_share_pct(face_coverage_pct)
+        diagnostics.update(self._face_distribution_metrics(face_coverage_pct))
 
         return erp_keep_mask, diagnostics
 
@@ -332,32 +368,87 @@ class Sam3CubemapMasker:
                 "component_count": 0,
                 "largest_component_share_pct": 0.0,
                 "secondary_component_share_pct": 0.0,
+                "tiny_component_count": 0,
+                "tiny_component_share_pct": 0.0,
             }
 
-        labels, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
         component_sizes = sorted(
             (
                 int(stats[idx, cv2.CC_STAT_AREA])
-                for idx in range(1, labels)
+                for idx in range(1, num_labels)
             ),
             reverse=True,
         )
         largest = component_sizes[0] if component_sizes else 0
         secondary = sum(component_sizes[1:]) if len(component_sizes) > 1 else 0
+        tiny_threshold = max(64, int(active * 0.02))
+        tiny_sizes = [size for size in component_sizes[1:] if size <= tiny_threshold]
         return {
             "component_count": int(len(component_sizes)),
             "largest_component_share_pct": round(float(largest / active * 100.0), 3),
             "secondary_component_share_pct": round(float(secondary / active * 100.0), 3),
+            "tiny_component_count": int(len(tiny_sizes)),
+            "tiny_component_share_pct": round(float(sum(tiny_sizes) / active * 100.0), 3),
         }
 
     @staticmethod
-    def _down_face_share_pct(face_detection_pct: dict[str, float]) -> float:
-        """Percent of total face detections that landed on the cubemap down face."""
+    def _face_distribution_metrics(face_detection_pct: dict[str, float]) -> dict[str, Any]:
+        """Describe how detections are distributed across cubemap faces."""
         total = sum(float(value) for value in face_detection_pct.values())
         if total <= 0.0:
-            return 0.0
-        down = float(face_detection_pct.get("down", 0.0))
-        return round(float(down / total * 100.0), 3)
+            return {
+                "face_share_pct": {
+                    str(name): 0.0 for name in face_detection_pct.keys()
+                },
+                "dominant_face_name": "",
+                "dominant_face_share_pct": 0.0,
+                "down_face_share_pct": 0.0,
+            }
+
+        face_share_pct = {
+            str(name): round(float(value / total * 100.0), 3)
+            for name, value in face_detection_pct.items()
+        }
+        dominant_face_name = max(
+            face_share_pct.items(),
+            key=lambda item: (float(item[1]), item[0]),
+        )[0]
+        return {
+            "face_share_pct": face_share_pct,
+            "dominant_face_name": dominant_face_name,
+            "dominant_face_share_pct": float(face_share_pct.get(dominant_face_name, 0.0)),
+            "down_face_share_pct": float(face_share_pct.get("down", 0.0)),
+        }
+
+    @staticmethod
+    def _mask_iou_pct(current_mask: np.ndarray, previous_mask: np.ndarray | None) -> float | None:
+        """IoU between current and previous ERP detection masks as a percent."""
+        if previous_mask is None:
+            return None
+        current = current_mask.astype(bool)
+        previous = previous_mask.astype(bool)
+        union = np.logical_or(current, previous)
+        union_count = int(np.count_nonzero(union))
+        if union_count == 0:
+            return 100.0
+        intersection = np.logical_and(current, previous)
+        return round(float(np.count_nonzero(intersection) / union_count * 100.0), 3)
+
+    @staticmethod
+    def _face_distribution_jump_pct(
+        current_shares: dict[str, float],
+        previous_shares: dict[str, float],
+    ) -> float | None:
+        """Half-L1 distance between consecutive face-share distributions."""
+        if not previous_shares:
+            return None
+        face_names = sorted(set(current_shares.keys()) | set(previous_shares.keys()))
+        total_delta = sum(
+            abs(float(current_shares.get(name, 0.0)) - float(previous_shares.get(name, 0.0)))
+            for name in face_names
+        )
+        return round(float(total_delta / 2.0), 3)
 
     @staticmethod
     def _build_frame_flags(frame_diag: dict[str, Any]) -> list[str]:
@@ -380,7 +471,7 @@ class Sam3CubemapMasker:
     ) -> None:
         """Write a JSON diagnostics summary for SAM 3 cubemap masking."""
         doc = {
-            "version": 2,
+            "version": 3,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "mode": "sam3_cubemap",
             "backend": result.backend_name,
@@ -416,7 +507,7 @@ class Sam3CubemapMasker:
     ) -> bool:
         """Best-effort fallback so diagnostics failures stay visible on disk."""
         fallback_doc = {
-            "version": 2,
+            "version": 3,
             "mode": "sam3_cubemap",
             "backend": result.backend_name,
             "total_frames": int(result.total_frames),

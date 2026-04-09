@@ -64,6 +64,25 @@ def _high_outlier_score(
     return round(float(max(score, 0.0)), 3)
 
 
+def _low_outlier_score(
+    value: float,
+    center: float,
+    spread: float,
+    *,
+    abs_floor: float,
+    rel_floor: float,
+) -> float:
+    """Return a soft outlier score for values unusually low within a clip."""
+    delta = float(center) - float(value)
+    if delta <= abs_floor:
+        return 0.0
+
+    fallback = max(abs_floor, abs(float(center)) * rel_floor, 1e-6)
+    scale = float(spread) if float(spread) > 1e-6 else fallback
+    score = delta / scale
+    return round(float(max(score, 0.0)), 3)
+
+
 def _rank_unusual_frames(frames: list[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], Counter[str]]:
     """Identify frames that are unusual relative to the rest of the clip.
 
@@ -97,6 +116,43 @@ def _rank_unusual_frames(frames: list[Mapping[str, Any]]) -> tuple[list[dict[str
         float(frame.get("secondary_component_share_pct", 0.0))
         for frame in frames
     ]
+    tiny_component_counts = [
+        float(frame.get("tiny_component_count", 0.0))
+        for frame in frames
+    ]
+    tiny_component_share = [
+        float(frame.get("tiny_component_share_pct", 0.0))
+        for frame in frames
+    ]
+    temporal_iou_prev = [
+        (
+            float(frame["temporal_iou_prev_pct"])
+            if frame.get("temporal_iou_prev_pct") is not None else None
+        )
+        for frame in frames
+    ]
+    face_distribution_jumps = [
+        float(frame.get("face_distribution_jump_pct", 0.0) or 0.0)
+        for frame in frames
+    ]
+    dominant_face_changed = [
+        bool(frame.get("dominant_face_changed", False))
+        for frame in frames
+    ]
+
+    coverage_jumps = [0.0]
+    view_jumps = [0.0]
+    for idx in range(1, len(frames)):
+        coverage_jumps.append(
+            float(frames[idx].get("coverage_delta_prev_pct"))
+            if frames[idx].get("coverage_delta_prev_pct") is not None
+            else abs(post_coverages[idx] - post_coverages[idx - 1])
+        )
+        view_jumps.append(
+            float(frames[idx].get("views_delta_prev"))
+            if frames[idx].get("views_delta_prev") is not None
+            else abs(views_removed[idx] - views_removed[idx - 1])
+        )
 
     post_median = _median(post_coverages)
     post_mad = _mad(post_coverages, post_median)
@@ -110,17 +166,20 @@ def _rank_unusual_frames(frames: list[Mapping[str, Any]]) -> tuple[list[dict[str
     component_mad = _mad(component_counts, component_median)
     secondary_median = _median(secondary_component_share)
     secondary_mad = _mad(secondary_component_share, secondary_median)
-
-    coverage_jumps = [0.0]
-    view_jumps = [0.0]
-    for idx in range(1, len(frames)):
-        coverage_jumps.append(abs(post_coverages[idx] - post_coverages[idx - 1]))
-        view_jumps.append(abs(views_removed[idx] - views_removed[idx - 1]))
+    tiny_count_median = _median(tiny_component_counts)
+    tiny_count_mad = _mad(tiny_component_counts, tiny_count_median)
+    tiny_share_median = _median(tiny_component_share)
+    tiny_share_mad = _mad(tiny_component_share, tiny_share_median)
 
     coverage_jump_median = _median(coverage_jumps[1:])
     coverage_jump_mad = _mad(coverage_jumps[1:], coverage_jump_median)
     view_jump_median = _median(view_jumps[1:])
     view_jump_mad = _mad(view_jumps[1:], view_jump_median)
+    temporal_iou_values = [value for value in temporal_iou_prev[1:] if value is not None]
+    temporal_iou_median = _median(temporal_iou_values)
+    temporal_iou_mad = _mad(temporal_iou_values, temporal_iou_median)
+    face_jump_median = _median(face_distribution_jumps[1:])
+    face_jump_mad = _mad(face_distribution_jumps[1:], face_jump_median)
 
     unusual_frames: list[dict[str, Any]] = []
     reason_counts: Counter[str] = Counter()
@@ -128,6 +187,37 @@ def _rank_unusual_frames(frames: list[Mapping[str, Any]]) -> tuple[list[dict[str
     for idx, frame in enumerate(frames):
         reasons: list[str] = []
         score = 0.0
+        tiny_blob_score = max(
+            _high_outlier_score(
+                tiny_component_counts[idx],
+                tiny_count_median,
+                tiny_count_mad,
+                abs_floor=1.0,
+                rel_floor=0.5,
+            ),
+            _high_outlier_score(
+                tiny_component_share[idx],
+                tiny_share_median,
+                tiny_share_mad,
+                abs_floor=2.0,
+                rel_floor=0.35,
+            ),
+        )
+        low_temporal_iou_score = 0.0
+        if temporal_iou_prev[idx] is not None:
+            low_temporal_iou_score = _low_outlier_score(
+                float(temporal_iou_prev[idx]),
+                temporal_iou_median,
+                temporal_iou_mad,
+                abs_floor=max(5.0, (100.0 - temporal_iou_median) * 0.15),
+                rel_floor=0.15,
+            )
+        dominant_face_flip_score = 0.0
+        if dominant_face_changed[idx]:
+            jump_value = face_distribution_jumps[idx]
+            flip_floor = max(12.0, face_jump_median + max(4.0, 2.0 * face_jump_mad))
+            if jump_value >= flip_floor:
+                dominant_face_flip_score = 3.25
 
         reason_specs = [
             (
@@ -191,7 +281,11 @@ def _rank_unusual_frames(frames: list[Mapping[str, Any]]) -> tuple[list[dict[str
                 ),
             ),
             (
-                "coverage_jump",
+                "tiny_blob_noise_rel",
+                tiny_blob_score,
+            ),
+            (
+                "temporal_coverage_jump",
                 _high_outlier_score(
                     coverage_jumps[idx],
                     coverage_jump_median,
@@ -201,7 +295,7 @@ def _rank_unusual_frames(frames: list[Mapping[str, Any]]) -> tuple[list[dict[str
                 ),
             ),
             (
-                "view_jump",
+                "temporal_view_jump",
                 _high_outlier_score(
                     view_jumps[idx],
                     view_jump_median,
@@ -210,6 +304,24 @@ def _rank_unusual_frames(frames: list[Mapping[str, Any]]) -> tuple[list[dict[str
                     rel_floor=0.5,
                 ),
             ),
+            (
+                "low_temporal_iou_rel",
+                low_temporal_iou_score,
+            ),
+            (
+                "face_distribution_jump",
+                _high_outlier_score(
+                    face_distribution_jumps[idx],
+                    face_jump_median,
+                    face_jump_mad,
+                    abs_floor=max(6.0, face_jump_median * 1.4),
+                    rel_floor=0.35,
+                ),
+            ),
+            (
+                "dominant_face_flip",
+                dominant_face_flip_score,
+            ),
         ]
 
         for reason, reason_score in reason_specs:
@@ -217,7 +329,16 @@ def _rank_unusual_frames(frames: list[Mapping[str, Any]]) -> tuple[list[dict[str
                 reasons.append(reason)
                 score += reason_score
 
-        if reasons and (len(reasons) >= 2 or score >= 4.0):
+        priority_reasons = {
+            "low_temporal_iou_rel",
+            "tiny_blob_noise_rel",
+            "dominant_face_flip",
+        }
+        if reasons and (
+            len(reasons) >= 2
+            or score >= 4.0
+            or any(reason in priority_reasons for reason in reasons)
+        ):
             for reason in reasons:
                 reason_counts[reason] += 1
             unusual_frames.append(
@@ -228,6 +349,11 @@ def _rank_unusual_frames(frames: list[Mapping[str, Any]]) -> tuple[list[dict[str
                     "erp_detection_coverage_pct_post": _round_pct(post_coverages[idx]),
                     "views_with_removed_pixels": int(round(views_removed[idx])),
                     "max_view_removed_pct": _round_pct(max_view_removed[idx]),
+                    "temporal_iou_prev_pct": (
+                        _round_pct(temporal_iou_prev[idx])
+                        if temporal_iou_prev[idx] is not None else None
+                    ),
+                    "tiny_component_count": int(round(tiny_component_counts[idx])),
                 }
             )
 
@@ -252,8 +378,17 @@ def build_mask_diagnostics_summary(frames: list[Mapping[str, Any]]) -> dict[str,
     views_with_removed_pixels: list[float] = []
     component_counts: list[float] = []
     secondary_component_share_pct: list[float] = []
+    tiny_component_counts: list[float] = []
+    tiny_component_share_pct: list[float] = []
     down_face_share_pct: list[float] = []
+    dominant_face_share_pct: list[float] = []
+    temporal_iou_prev_pct: list[float] = []
+    face_distribution_jump_pct: list[float] = []
+    coverage_delta_prev_pct: list[float] = []
+    views_delta_prev: list[float] = []
     max_removed_view_pct = 0.0
+    dominant_face_counts: Counter[str] = Counter()
+    dominant_face_change_frames = 0
 
     for frame in frames:
         pre_coverages.append(float(frame.get("erp_detection_coverage_pct_pre", 0.0)))
@@ -263,7 +398,30 @@ def build_mask_diagnostics_summary(frames: list[Mapping[str, Any]]) -> dict[str,
         secondary_component_share_pct.append(
             float(frame.get("secondary_component_share_pct", 0.0))
         )
+        tiny_component_counts.append(float(frame.get("tiny_component_count", 0.0)))
+        tiny_component_share_pct.append(float(frame.get("tiny_component_share_pct", 0.0)))
         down_face_share_pct.append(float(frame.get("down_face_share_pct", 0.0)))
+        dominant_face_share_pct.append(float(frame.get("dominant_face_share_pct", 0.0)))
+
+        if frame.get("temporal_iou_prev_pct") is not None:
+            temporal_iou_prev_pct.append(float(frame["temporal_iou_prev_pct"]))
+        if frame.get("face_distribution_jump_pct") is not None:
+            face_distribution_jump_pct.append(float(frame["face_distribution_jump_pct"]))
+        if frame.get("coverage_delta_prev_pct") is not None:
+            coverage_delta_prev_pct.append(float(frame["coverage_delta_prev_pct"]))
+        elif len(post_coverages) > 1:
+            coverage_delta_prev_pct.append(abs(post_coverages[-1] - post_coverages[-2]))
+        if frame.get("views_delta_prev") is not None:
+            views_delta_prev.append(float(frame["views_delta_prev"]))
+        elif len(views_with_removed_pixels) > 1:
+            views_delta_prev.append(
+                abs(views_with_removed_pixels[-1] - views_with_removed_pixels[-2])
+            )
+        if frame.get("dominant_face_changed"):
+            dominant_face_change_frames += 1
+        dominant_face_name = str(frame.get("dominant_face_name", "") or "")
+        if dominant_face_name:
+            dominant_face_counts[dominant_face_name] += 1
 
         for flag in frame.get("flags", []) or []:
             flag_counts[str(flag)] += 1
@@ -314,11 +472,47 @@ def build_mask_diagnostics_summary(frames: list[Mapping[str, Any]]) -> dict[str,
             _round_pct(max(secondary_component_share_pct))
             if secondary_component_share_pct else 0.0
         ),
+        "avg_tiny_component_count": _avg(tiny_component_counts),
+        "max_tiny_component_count": (
+            _round_pct(max(tiny_component_counts)) if tiny_component_counts else 0.0
+        ),
+        "avg_tiny_component_share_pct": _avg(tiny_component_share_pct),
+        "max_tiny_component_share_pct": (
+            _round_pct(max(tiny_component_share_pct))
+            if tiny_component_share_pct else 0.0
+        ),
         "avg_down_face_share_pct": _avg(down_face_share_pct),
         "max_down_face_share_pct": (
             _round_pct(max(down_face_share_pct))
             if down_face_share_pct else 0.0
         ),
+        "avg_dominant_face_share_pct": _avg(dominant_face_share_pct),
+        "max_dominant_face_share_pct": (
+            _round_pct(max(dominant_face_share_pct))
+            if dominant_face_share_pct else 0.0
+        ),
+        "avg_temporal_iou_prev_pct": _avg(temporal_iou_prev_pct),
+        "min_temporal_iou_prev_pct": (
+            _round_pct(min(temporal_iou_prev_pct))
+            if temporal_iou_prev_pct else 0.0
+        ),
+        "avg_face_distribution_jump_pct": _avg(face_distribution_jump_pct),
+        "max_face_distribution_jump_pct": (
+            _round_pct(max(face_distribution_jump_pct))
+            if face_distribution_jump_pct else 0.0
+        ),
+        "avg_coverage_delta_prev_pct": _avg(coverage_delta_prev_pct),
+        "max_coverage_delta_prev_pct": (
+            _round_pct(max(coverage_delta_prev_pct))
+            if coverage_delta_prev_pct else 0.0
+        ),
+        "avg_views_delta_prev": _avg(views_delta_prev),
+        "max_views_delta_prev": (
+            _round_pct(max(views_delta_prev))
+            if views_delta_prev else 0.0
+        ),
+        "dominant_face_change_frames": int(dominant_face_change_frames),
+        "dominant_face_counts": dict(sorted(dominant_face_counts.items())),
         "avg_face_detection_pct": {
             face_name: _avg(values)
             for face_name, values in sorted(face_values.items())
@@ -356,8 +550,9 @@ def get_mask_diagnostics_summary(doc: Mapping[str, Any] | None) -> dict[str, Any
     if not doc:
         return None
 
+    version = int(doc.get("version", 0) or 0)
     summary = doc.get("summary")
-    if isinstance(summary, Mapping):
+    if isinstance(summary, Mapping) and version >= 3:
         return dict(summary)
 
     frames = doc.get("frames")
@@ -454,11 +649,39 @@ def format_mask_diagnostics_overview(doc: Mapping[str, Any] | None) -> list[str]
             f"max {float(summary.get('max_secondary_component_share_pct', 0.0)):.1f}%"
         )
 
+    if float(summary.get("avg_tiny_component_count", 0.0)) > 0.0:
+        lines.append(
+            "Tiny blob noise: "
+            f"avg {float(summary['avg_tiny_component_count']):.1f} components, "
+            f"max {float(summary.get('max_tiny_component_count', 0.0)):.1f}, "
+            f"share avg {float(summary.get('avg_tiny_component_share_pct', 0.0)):.1f}%"
+        )
+
     if float(summary.get("avg_down_face_share_pct", 0.0)) > 0.0:
         lines.append(
             "Down-face share: "
             f"avg {float(summary['avg_down_face_share_pct']):.1f}%, "
             f"max {float(summary.get('max_down_face_share_pct', 0.0)):.1f}%"
+        )
+
+    if float(summary.get("avg_temporal_iou_prev_pct", 0.0)) > 0.0:
+        lines.append(
+            "Temporal continuity: "
+            f"avg IoU {float(summary['avg_temporal_iou_prev_pct']):.1f}%, "
+            f"min {float(summary.get('min_temporal_iou_prev_pct', 0.0)):.1f}%"
+        )
+
+    if (
+        float(summary.get("avg_coverage_delta_prev_pct", 0.0)) > 0.0
+        or float(summary.get("avg_face_distribution_jump_pct", 0.0)) > 0.0
+        or int(summary.get("dominant_face_change_frames", 0)) > 0
+    ):
+        lines.append(
+            "Temporal jumps: "
+            f"coverage avg {float(summary.get('avg_coverage_delta_prev_pct', 0.0)):.1f}%, "
+            f"views avg {float(summary.get('avg_views_delta_prev', 0.0)):.1f}, "
+            f"face-share avg {float(summary.get('avg_face_distribution_jump_pct', 0.0)):.1f}%, "
+            f"dominant-face flips {int(summary.get('dominant_face_change_frames', 0))}"
         )
 
     return lines
