@@ -146,7 +146,7 @@ class Plugin360Panel(lf.ui.Panel):
         )
         self._masking_method_idx: int = 1  # SAM 3 only in the UI
         self._masking_available: bool = self._setup_state.sam3_ready
-        self._enable_masking: bool = False
+        self._enable_masking: bool = self._setup_state.sam3_ready
         self._enable_diagnostics: bool = False
         self._mask_prompts_str: str = "person"
         self._hf_token_input: str = ""
@@ -157,8 +157,7 @@ class Plugin360Panel(lf.ui.Panel):
         self._sam3_check_button_text: str = "Check Setup"
         self._sam3_edit_token: bool = False
         self._sam3_notice_text: str = ""
-        self._sam3_install_in_progress: bool = False
-        self._sam3_install_progress_phase: float = 0.0
+        self._sam3_hf_help_key: str = ""
 
         # Reframe
         self._preset_idx: int = PRESET_NAMES.index(DEFAULT_PRESET)
@@ -236,36 +235,42 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind("hf_token_input", lambda: self._hf_token_input, self._set_hf_token_input)
         model.bind_func("hf_verify_text", lambda: self._hf_verify_text)
         model.bind_func("masking_available", lambda: self._masking_available)
-        model.bind_func("masking_backend_text", self._get_masking_backend_text)
         # SAM 3 conditional states
         model.bind_func("show_masking_sam3_setup", lambda: not self._setup_state.sam3_ready)
         model.bind_func("show_masking_sam3_ready", lambda: self._setup_state.sam3_ready)
-        model.bind_func("sam3_status_message", lambda: self._sam3_setup_report.message)
+        model.bind_func("sam3_intro_text", self._get_sam3_intro_text)
+        model.bind_func("show_sam3_support_text", self._show_sam3_support_text)
+        model.bind_func("sam3_support_text", self._get_sam3_support_text)
+        model.bind_func("sam3_status_message", self._get_sam3_status_message)
+        model.bind_func("show_sam3_status_message", self._show_sam3_status_message)
         model.bind_func("show_sam3_notice", lambda: bool(self._sam3_notice_text))
         model.bind_func("sam3_notice_text", lambda: self._sam3_notice_text)
-        model.bind_func("sam3_next_action_text", lambda: self._sam3_setup_report.next_action)
+        model.bind_func("sam3_hf_help_text", self._get_sam3_hf_help_text)
         model.bind_func("sam3_token_status_text", lambda: self._format_sam3_status(self._sam3_setup_report.token_status))
         model.bind_func("sam3_access_status_text", lambda: self._format_sam3_status(self._sam3_setup_report.access_status))
         model.bind_func("sam3_runtime_status_text", lambda: self._format_sam3_status(self._sam3_setup_report.runtime_status))
         model.bind_func("sam3_weights_status_text", self._get_sam3_weights_status_text)
         model.bind_func("show_sam3_cached_weights_note", self._show_sam3_cached_weights_note)
         model.bind_func("sam3_cached_weights_note_text", self._get_sam3_cached_weights_note_text)
-        model.bind_func("sam3_reassurance_text", self._get_sam3_reassurance_text)
         model.bind_func("sam3_check_button_text", lambda: self._sam3_check_button_text)
         model.bind_func("sam3_install_button_text", self._get_sam3_install_button_text)
         model.bind_func("sam3_install_disabled", self._get_sam3_install_disabled)
         model.bind_func("show_sam3_install_button", self._show_sam3_install_button)
-        model.bind_func("show_sam3_install_progress", self._show_sam3_install_progress)
-        model.bind_func("sam3_install_progress_value", lambda: f"{self._sam3_install_progress_phase:.4f}")
         model.bind_func("show_sam3_check_button", self._show_sam3_check_button)
+        model.bind_func("show_sam3_hf_heading", self._show_sam3_hf_heading)
+        model.bind_func("show_sam3_hf_inline_actions", self._show_sam3_hf_inline_actions)
         model.bind_func("show_sam3_external_actions", self._show_sam3_external_actions)
+        model.bind_func("show_sam3_signup_button", self._show_sam3_signup_button)
+        model.bind_func("show_sam3_request_access_button", self._show_sam3_request_access_button)
+        model.bind_func("show_sam3_tokens_button", self._show_sam3_tokens_button)
         model.bind_func("show_sam3_local_actions", self._show_sam3_local_actions)
         model.bind_func("show_sam3_saved_token_notice", self._show_sam3_saved_token_notice)
         model.bind_func("sam3_saved_token_text", self._get_sam3_saved_token_text)
-        model.bind_func("show_sam3_account_step", self._show_sam3_account_step)
-        model.bind_func("show_sam3_request_access_step", self._show_sam3_request_access_step)
         model.bind_func("show_sam3_token_editor", self._show_sam3_token_editor)
         model.bind_func("show_sam3_token_actions", self._show_sam3_token_actions)
+        model.bind_func("show_sam3_token_actions_row", self._show_sam3_token_actions_row)
+        model.bind_func("show_sam3_token_editor_message", self._show_sam3_token_editor_message)
+        model.bind_func("show_hf_verify_text", self._show_hf_verify_text)
         model.bind_func("sam3_change_token_button_text", self._get_sam3_change_token_button_text)
         model.bind_func("install_button_text", lambda: self._install_button_text)
         model.bind_func("install_busy", lambda: self._install_busy)
@@ -318,6 +323,8 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_event("check_sam3_setup", self._on_check_sam3_setup)
         model.bind_event("toggle_sam3_token_editor", self._on_toggle_sam3_token_editor)
         model.bind_event("forget_hf_token", self._on_forget_hf_token)
+        model.bind_event("set_sam3_hf_help", self._on_set_sam3_hf_help)
+        model.bind_event("clear_sam3_hf_help", self._on_clear_sam3_hf_help)
         model.bind_func("show_video_tracking_install",
                          lambda: False)
 
@@ -339,12 +346,6 @@ class Plugin360Panel(lf.ui.Panel):
 
         dirty = self._consume_pending_result()
         if self._scrub_fields.sync_all():
-            dirty = True
-
-        if self._sam3_install_in_progress:
-            self._sam3_install_progress_phase += 0.08
-            if self._sam3_install_progress_phase > 1.0:
-                self._sam3_install_progress_phase = 0.0
             dirty = True
 
         # Masking setup polling — disabled pending python3.dll fix
@@ -379,8 +380,7 @@ class Plugin360Panel(lf.ui.Panel):
             self._install_button_text,
             self._sam3_check_button_text,
             self._sam3_notice_text,
-            self._sam3_install_in_progress,
-            round(self._sam3_install_progress_phase, 3),
+            self._sam3_hf_help_key,
             (
                 self._sam3_setup_report.token_status,
                 self._sam3_setup_report.access_status,
@@ -441,16 +441,51 @@ class Plugin360Panel(lf.ui.Panel):
         }
         return labels.get(status, status.replace("_", " ").title())
 
-    def _get_sam3_reassurance_text(self) -> str:
-        return "The plugin still works without operator masking while SAM 3 setup is incomplete."
+    def _get_sam3_intro_text(self) -> str:
+        if self._sam3_setup_report.access_status == "granted" or self._setup_state.sam3_ready:
+            return "This plugin uses SAM 3 for masking."
+        return (
+            "This plugin uses SAM 3 for masking. SAM 3 is a gated model that requires "
+            "approval before downloading, and setup requires a user token. Hover over "
+            "the HuggingFace buttons for details."
+        )
+
+    def _get_sam3_support_text(self) -> str:
+        return "This plugin will function without masking enabled."
+
+    def _show_sam3_support_text(self) -> bool:
+        return not (
+            self._sam3_setup_report.access_status == "granted" or self._setup_state.sam3_ready
+        )
+
+    def _get_sam3_status_message(self) -> str:
+        if (
+            self._sam3_setup_report.overall_stage == "needs_token"
+            and self._sam3_setup_report.token_status == "missing"
+        ):
+            return ""
+        if (
+            self._sam3_setup_report.access_status == "granted"
+            and self._sam3_setup_report.overall_stage in {"ready_to_install", "needs_weights"}
+        ):
+            return "SAM 3 access is approved. Click 'Install SAM 3' to add the model."
+        return self._sam3_setup_report.message
+
+    def _get_sam3_hf_help_text(self) -> str:
+        help_text = {
+            "signup": "Make a new HuggingFace account.",
+            "request": "Apply for access to SAM 3. Approval can take 30 minutes to several hours.",
+            "tokens": (
+                "Create a new token, select Read for the Token Type, and name it whatever "
+                "you like. Input the token below and click Verify Access."
+            ),
+        }
+        if self._sam3_hf_help_key in help_text:
+            return help_text[self._sam3_hf_help_key]
+        return ""
 
     def _get_sam3_saved_token_text(self) -> str:
-        if self._sam3_setup_report.access_status == "granted":
-            return (
-                "Using a saved HuggingFace token from this machine. "
-                "Change or forget it below if you want to test first-run setup."
-            )
-        return "Using a saved HuggingFace token from this machine."
+        return "A HuggingFace token is stored locally on this machine."
 
     def _get_sam3_weights_status_text(self) -> str:
         if (
@@ -495,18 +530,41 @@ class Plugin360Panel(lf.ui.Panel):
             "error",
         }
 
-    def _show_sam3_install_progress(self) -> bool:
-        return self._sam3_install_in_progress
-
     def _show_sam3_check_button(self) -> bool:
         return (
-            self._setup_state.has_token
-            or self._sam3_setup_report.access_status in {"pending", "granted", "network_error"}
+            self._sam3_setup_report.token_status == "invalid"
+            or self._sam3_setup_report.access_status in {"pending", "network_error"}
             or self._sam3_setup_report.runtime_status in {"installed", "broken"}
         )
 
+    def _show_sam3_hf_heading(self) -> bool:
+        return self._show_sam3_external_actions() or self._show_sam3_token_actions()
+
+    def _show_sam3_hf_inline_actions(self) -> bool:
+        return self._show_sam3_token_actions() and not self._show_sam3_external_actions()
+
     def _show_sam3_external_actions(self) -> bool:
-        return True
+        return (
+            self._show_sam3_signup_button()
+            or self._show_sam3_request_access_button()
+            or self._show_sam3_tokens_button()
+        )
+
+    def _show_sam3_signup_button(self) -> bool:
+        return (
+            self._show_sam3_token_editor()
+            and not self._setup_state.has_token
+            and self._sam3_setup_report.access_status != "granted"
+        )
+
+    def _show_sam3_request_access_button(self) -> bool:
+        return (
+            self._show_sam3_token_editor()
+            and self._sam3_setup_report.access_status != "granted"
+        )
+
+    def _show_sam3_tokens_button(self) -> bool:
+        return self._show_sam3_token_editor()
 
     def _show_sam3_local_actions(self) -> bool:
         return (
@@ -517,13 +575,7 @@ class Plugin360Panel(lf.ui.Panel):
         )
 
     def _show_sam3_saved_token_notice(self) -> bool:
-        return self._setup_state.has_token and not self._sam3_edit_token
-
-    def _show_sam3_account_step(self) -> bool:
-        return not self._setup_state.has_token and self._show_sam3_token_editor()
-
-    def _show_sam3_request_access_step(self) -> bool:
-        return self._sam3_setup_report.access_status != "granted"
+        return False
 
     def _show_sam3_token_editor(self) -> bool:
         return (
@@ -532,8 +584,22 @@ class Plugin360Panel(lf.ui.Panel):
             or self._sam3_setup_report.token_status in {"missing", "invalid"}
         )
 
+    def _show_sam3_status_message(self) -> bool:
+        return bool(self._get_sam3_status_message())
+
     def _show_sam3_token_actions(self) -> bool:
         return self._setup_state.has_token or self._sam3_edit_token
+
+    def _show_sam3_token_actions_row(self) -> bool:
+        return self._show_sam3_token_actions() and not self._show_sam3_hf_inline_actions()
+
+    def _show_hf_verify_text(self) -> bool:
+        if not self._hf_verify_text:
+            return False
+        return self._hf_verify_text != "SAM 3 setup needs a HuggingFace token."
+
+    def _show_sam3_token_editor_message(self) -> bool:
+        return self._show_sam3_token_editor() and self._show_hf_verify_text()
 
     def _get_sam3_change_token_button_text(self) -> str:
         if self._sam3_edit_token:
@@ -978,9 +1044,6 @@ class Plugin360Panel(lf.ui.Panel):
             self._sam3_edit_token = False
         self._refresh_masking_availability(auto_enable=auto_enable)
 
-    def _get_masking_backend_text(self):
-        return "SAM 3 (large model)"
-
     def _set_hf_token_input(self, val):
         self._hf_token_input = str(val)
 
@@ -989,7 +1052,7 @@ class Plugin360Panel(lf.ui.Panel):
     def _on_open_hf_signup(self, handle, event, args):
         del handle, event, args
         import webbrowser
-        webbrowser.open("https://huggingface.co/")
+        webbrowser.open("https://huggingface.co/join")
 
     def _on_open_hf_model(self, handle, event, args):
         del handle, event, args
@@ -1000,6 +1063,23 @@ class Plugin360Panel(lf.ui.Panel):
         del handle, event, args
         import webbrowser
         webbrowser.open("https://huggingface.co/settings/tokens")
+
+    def _on_set_sam3_hf_help(self, handle, event, args):
+        del handle, event
+        key = str(args[0]) if args else ""
+        if key == self._sam3_hf_help_key:
+            return
+        self._sam3_hf_help_key = key
+        if self._handle:
+            self._handle.dirty_all()
+
+    def _on_clear_sam3_hf_help(self, handle, event, args):
+        del handle, event, args
+        if not self._sam3_hf_help_key:
+            return
+        self._sam3_hf_help_key = ""
+        if self._handle:
+            self._handle.dirty_all()
 
     def _on_verify_hf_token(self, handle, event, args):
         del handle, event, args
@@ -1167,8 +1247,6 @@ class Plugin360Panel(lf.ui.Panel):
             return
         self._sam3_notice_text = ""
         self._install_busy = True
-        self._sam3_install_in_progress = True
-        self._sam3_install_progress_phase = 0.08
         self._install_button_text = "Installing SAM 3..."
         if self._handle:
             self._handle.dirty_all()
@@ -1185,8 +1263,6 @@ class Plugin360Panel(lf.ui.Panel):
 
             ok = install_premium_tier(on_output=_progress)
             self._install_busy = False
-            self._sam3_install_in_progress = False
-            self._sam3_install_progress_phase = 0.0
             state = check_masking_setup()
             self._setup_state = state
             if ok:
