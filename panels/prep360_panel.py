@@ -230,7 +230,6 @@ class Plugin360Panel(lf.ui.Panel):
 
         # -- Masking --
         model.bind("enable_masking", lambda: self._enable_masking, self._set_enable_masking)
-        model.bind("enable_diagnostics", lambda: self._enable_diagnostics, self._set_enable_diagnostics)
         model.bind("mask_prompts_str", lambda: self._mask_prompts_str, self._set_mask_prompts)
         model.bind("hf_token_input", lambda: self._hf_token_input, self._set_hf_token_input)
         model.bind_func("hf_verify_text", lambda: self._hf_verify_text)
@@ -300,9 +299,6 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("processing_recent_text", self._get_processing_recent_text)
         model.bind_func("show_error", lambda: bool(self._error_message))
         model.bind_func("error_text", lambda: self._error_message)
-        model.bind_func("completion_summary_text", self._get_completion_summary_text)
-        model.bind_func("completion_report_text", self._get_completion_report_text)
-
         # -- Events --
         model.bind_event("select_video", self._on_select_video)
         model.bind_event("clear_video", self._on_clear_video)
@@ -659,12 +655,6 @@ class Plugin360Panel(lf.ui.Panel):
             "Higher limits preserve more correspondences but cost more time and memory."
         )
 
-    def _get_completion_summary_text(self) -> str:
-        return self._completion_summary or "No diagnostics yet."
-
-    def _get_completion_report_text(self) -> str:
-        return self._completion_report or "Run Process Only or Process & Import to capture timing and registration diagnostics."
-
     def _get_processing_recent_text(self) -> str:
         """Return a compact recent-activity view for the live processing card."""
         lines = [
@@ -1008,9 +998,6 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _set_enable_masking(self, val):
         self._enable_masking = bool(val) and self._masking_available
-
-    def _set_enable_diagnostics(self, val):
-        self._enable_diagnostics = bool(val)
 
     def _set_mask_prompts(self, val):
         self._mask_prompts_str = str(val)
