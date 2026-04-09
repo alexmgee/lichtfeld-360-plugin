@@ -29,6 +29,15 @@ body {
     z-index: 0;
 }
 
+.masking-status-row {
+    margin: 0dp;
+}
+
+.masking-status-row .prop-label,
+.masking-status-row .status-text {
+    line-height: 14dp;
+}
+
 .setting-row--dropdown {
     z-index: 10;
 }
@@ -96,6 +105,66 @@ body {
 .inline-input-row input {
     flex: 1;
     min-width: 0;
+}
+
+.im-tooltip {
+    display: none;
+    position: absolute;
+    z-index: 100;
+    background-color: rgba(30, 30, 46, 240);
+    border-width: 1dp;
+    border-color: rgba(88, 91, 112, 128);
+    border-radius: 3dp;
+    padding: 4dp 8dp;
+    font-size: 11dp;
+    max-width: 300dp;
+    pointer-events: none;
+}
+
+.im-tooltip.visible {
+    display: block;
+}
+
+.hf-heading-row {
+    margin-top: 12dp;
+    align-items: flex-start;
+}
+
+.hf-panel-row {
+    align-items: flex-start;
+    margin-top: 10dp;
+}
+
+.hf-panel {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 14dp;
+    width: 100%;
+}
+
+.hf-button-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8dp;
+    min-width: 154dp;
+}
+
+.hf-button-stack button {
+    flex: 0 0 auto;
+}
+
+.hf-help-shell {
+    flex: 1;
+    min-width: 0;
+    min-height: 72dp;
+    padding-top: 2dp;
+}
+
+.hf-help-text {
+    display: block;
+    white-space: normal;
 }
 
 .btn--compact {

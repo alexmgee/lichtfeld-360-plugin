@@ -96,43 +96,40 @@
       </div>
     </div>
 
-    <!-- ── Section 2: Operator Masking ──────────────────────── -->
+    <!-- ── Section 2: Masking ───────────────────────────────── -->
     <div class="section-header text-accent" id="hdr-masking" data-event-click="toggle_section('masking')">
       <span class="section-arrow text-accent is-expanded" id="arrow-masking">&#x25B6;</span>
-      <span class="text-accent">Operator Masking</span>
+      <span class="text-accent">Masking</span>
     </div>
     <div class="section-content" id="sec-masking">
-      <div class="setting-row">
-        <span class="status-text status-muted">SAM 3 uses cubemap faces internally, then writes masks for the selected output preset.</span>
+      <div class="setting-row" data-if="show_masking_sam3_setup">
+        <span class="status-text status-muted">{{sam3_intro_text}}</span>
+      </div>
+      <div class="setting-row" data-if="show_sam3_support_text">
+        <span class="status-text status-muted">{{sam3_support_text}}</span>
       </div>
 
       <!-- SAM 3 path — setup needed -->
       <div data-if="show_masking_sam3_setup">
-        <div class="setting-row">
+        <div class="setting-row" data-if="show_sam3_status_message">
           <span class="status-text status-muted">{{sam3_status_message}}</span>
         </div>
         <div class="setting-row" data-if="show_sam3_notice">
           <span class="status-text status-muted">{{sam3_notice_text}}</span>
         </div>
-        <div class="setting-row">
-          <span class="status-text status-muted">{{sam3_next_action_text}}</span>
-        </div>
-        <div class="setting-row">
-          <span class="status-text status-muted">{{sam3_reassurance_text}}</span>
-        </div>
-        <div class="setting-row">
+        <div class="setting-row masking-status-row">
           <span class="prop-label">Token</span>
           <span class="status-text status-muted">{{sam3_token_status_text}}</span>
         </div>
-        <div class="setting-row">
+        <div class="setting-row masking-status-row">
           <span class="prop-label">Access</span>
           <span class="status-text status-muted">{{sam3_access_status_text}}</span>
         </div>
-        <div class="setting-row">
+        <div class="setting-row masking-status-row">
           <span class="prop-label">Runtime</span>
           <span class="status-text status-muted">{{sam3_runtime_status_text}}</span>
         </div>
-        <div class="setting-row">
+        <div class="setting-row masking-status-row">
           <span class="prop-label">Weights</span>
           <span class="status-text status-muted">{{sam3_weights_status_text}}</span>
         </div>
@@ -142,50 +139,84 @@
         <div class="setting-row" data-if="show_sam3_saved_token_notice">
           <span class="status-text status-muted">{{sam3_saved_token_text}}</span>
         </div>
-        <div class="setting-row" data-if="show_sam3_external_actions">
+        <div class="setting-row hf-heading-row" data-if="show_sam3_hf_heading">
           <span class="prop-label">HuggingFace</span>
-        </div>
-        <div class="setting-row" data-if="show_sam3_account_step">
-          <button class="btn btn--secondary btn--compact" data-event-click="open_hf_signup">1. Open HuggingFace</button>
-        </div>
-        <div class="setting-row" data-if="show_sam3_request_access_step">
-          <button class="btn btn--secondary btn--compact" data-event-click="open_hf_model">2. Request SAM 3 Access</button>
-        </div>
-        <div class="setting-row" data-if="show_sam3_token_editor">
-          <span class="prop-label">3. Token</span>
-          <div class="inline-input-row">
-            <input type="text" data-value="hf_token_input" />
-            <button class="btn btn-primary btn--compact" data-event-click="verify_hf_token" data-attr-disabled="install_busy">Verify Access</button>
+          <div class="hf-panel" data-if="show_sam3_external_actions">
+            <div class="hf-button-stack">
+              <button
+                class="btn btn--secondary btn--compact"
+                data-if="show_sam3_signup_button"
+                data-event-click="open_hf_signup"
+                data-event-mouseenter="set_sam3_hf_help('signup')"
+                data-event-mouseover="set_sam3_hf_help('signup')"
+                data-event-mouseleave="clear_sam3_hf_help"
+                data-event-mouseout="clear_sam3_hf_help"
+                data-event-focus="set_sam3_hf_help('signup')"
+                data-event-blur="clear_sam3_hf_help"
+              >Sign Up</button>
+              <button
+                class="btn btn--secondary btn--compact"
+                data-if="show_sam3_request_access_button"
+                data-event-click="open_hf_model"
+                data-event-mouseenter="set_sam3_hf_help('request')"
+                data-event-mouseover="set_sam3_hf_help('request')"
+                data-event-mouseleave="clear_sam3_hf_help"
+                data-event-mouseout="clear_sam3_hf_help"
+                data-event-focus="set_sam3_hf_help('request')"
+                data-event-blur="clear_sam3_hf_help"
+              >Request SAM 3 Access</button>
+              <button
+                class="btn btn--secondary btn--compact"
+                data-if="show_sam3_tokens_button"
+                data-event-click="open_hf_tokens"
+                data-event-mouseenter="set_sam3_hf_help('tokens')"
+                data-event-mouseover="set_sam3_hf_help('tokens')"
+                data-event-mouseleave="clear_sam3_hf_help"
+                data-event-mouseout="clear_sam3_hf_help"
+                data-event-focus="set_sam3_hf_help('tokens')"
+                data-event-blur="clear_sam3_hf_help"
+              >User Tokens Page</button>
+            </div>
+            <div class="hf-help-shell">
+              <span class="status-text status-muted hf-help-text">{{sam3_hf_help_text}}</span>
+            </div>
+          </div>
+          <div class="inline-input-row hf-inline-actions" data-if="show_sam3_hf_inline_actions">
+            <button class="btn btn--secondary btn--compact" data-event-click="toggle_sam3_token_editor" data-attr-disabled="install_busy">{{sam3_change_token_button_text}}</button>
+            <button class="btn btn--secondary btn--compact" data-event-click="forget_hf_token" data-attr-disabled="install_busy">Forget Saved Token</button>
           </div>
         </div>
-        <div class="setting-row">
-          <button class="btn btn--secondary btn--compact" data-event-click="open_hf_tokens">Open HuggingFace Tokens Page</button>
-        </div>
-        <div class="setting-row" data-if="show_sam3_local_actions">
-          <span class="prop-label">In Plugin</span>
-        </div>
-        <div class="setting-row" data-if="show_sam3_token_actions">
-          <button class="btn btn--secondary btn--compact" data-event-click="toggle_sam3_token_editor" data-attr-disabled="install_busy">{{sam3_change_token_button_text}}</button>
-          <button class="btn btn--secondary btn--compact" data-event-click="forget_hf_token" data-attr-disabled="install_busy">Forget Saved Token</button>
-        </div>
         <div class="setting-row" data-if="show_sam3_token_editor">
+          <span class="prop-label">Token</span>
+          <div class="inline-input-row">
+            <input type="text" data-value="hf_token_input" />
+            <button class="btn btn--primary btn--compact" data-event-click="verify_hf_token" data-attr-disabled="install_busy">Verify Access</button>
+          </div>
+        </div>
+        <div class="setting-row" data-if="show_sam3_token_actions_row">
+          <span class="prop-label"></span>
+          <div class="inline-input-row">
+            <button class="btn btn--secondary btn--compact" data-event-click="toggle_sam3_token_editor" data-attr-disabled="install_busy">{{sam3_change_token_button_text}}</button>
+            <button class="btn btn--secondary btn--compact" data-event-click="forget_hf_token" data-attr-disabled="install_busy">Forget Saved Token</button>
+          </div>
+        </div>
+        <div class="setting-row" data-if="show_sam3_token_editor_message">
           <span class="status-text status-muted">{{hf_verify_text}}</span>
         </div>
         <div class="setting-row" data-if="show_sam3_check_button">
+          <span class="prop-label"></span>
           <button class="btn btn--secondary btn--compact" data-event-click="check_sam3_setup" data-attr-disabled="install_busy">{{sam3_check_button_text}}</button>
         </div>
         <div class="setting-row" data-if="show_sam3_install_button">
-          <button class="btn btn-primary" data-event-click="install_premium_tier" data-attr-disabled="sam3_install_disabled">{{sam3_install_button_text}}</button>
-        </div>
-        <div class="progress-row" data-if="show_sam3_install_progress">
-          <progress max="1" data-attr-value="sam3_install_progress_value"></progress>
+          <span class="prop-label"></span>
+          <button class="btn btn--primary" data-event-click="install_premium_tier" data-attr-disabled="sam3_install_disabled">{{sam3_install_button_text}}</button>
         </div>
       </div>
 
       <!-- SAM 3 path — ready -->
       <div data-if="show_masking_sam3_ready">
         <div class="setting-row">
-          <span class="status-text status-muted">SAM 3 is ready for operator masking.</span>
+          <span class="status-text status-muted">SAM 3 is ready for masking.</span>
         </div>
         <div class="setting-row">
           <span class="prop-label">Enable</span>
@@ -194,10 +225,6 @@
         <div class="setting-row">
           <span class="prop-label">Diagnostics</span>
           <input type="checkbox" data-checked="enable_diagnostics" />
-        </div>
-        <div class="setting-row">
-          <span class="prop-label">Backend</span>
-          <span class="status-text status-muted">{{masking_backend_text}}</span>
         </div>
         <div class="setting-row">
           <span class="prop-label">Prompts</span>
@@ -298,6 +325,6 @@
     </div>
 
   </div>
-
+  <div id="im-tooltip" class="im-tooltip"></div>
 </body>
 </rml>
