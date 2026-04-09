@@ -217,28 +217,6 @@ body {
     font-size: 12dp;
 }
 
-.completion-block {
-    display: flex;
-    flex-direction: column;
-    gap: 4dp;
-    margin: 6dp 0dp 8dp 0dp;
-    padding: 8dp;
-    border-radius: 6dp;
-    background: rgba(255, 255, 255, 0.04);
-}
-
-.completion-report {
-    display: block;
-    padding: 6dp 8dp;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    font-family: Inter;
-    font-size: 11dp;
-    line-height: 15dp;
-    background: rgba(255, 255, 255, 0.03);
-    border-radius: 4dp;
-}
-
 .processing-report {
     margin: 0dp;
     max-height: 96dp;

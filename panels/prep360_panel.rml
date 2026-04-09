@@ -223,10 +223,6 @@
           <input type="checkbox" data-checked="enable_masking" />
         </div>
         <div class="setting-row">
-          <span class="prop-label">Diagnostics</span>
-          <input type="checkbox" data-checked="enable_diagnostics" />
-        </div>
-        <div class="setting-row">
           <span class="prop-label">Prompts</span>
           <input type="text" data-value="mask_prompts_str" />
         </div>
@@ -312,16 +308,10 @@
       </div>
     </div>
 
-    <!-- ── Process actions and diagnostics ─────────────────── -->
+    <!-- ── Process actions ─────────────────────────────────── -->
     <div class="process-section">
       <button class="btn btn--success btn--full" data-event-click="run_pipeline">Process &amp; Import</button>
       <button class="btn btn--secondary btn--full" data-event-click="run_pipeline_only">Process Only</button>
-
-      <div class="completion-block">
-        <span class="status-text text-accent">Run Diagnostics</span>
-        <span class="status-text status-muted">{{completion_summary_text}}</span>
-        <div class="completion-report">{{completion_report_text}}</div>
-      </div>
     </div>
 
   </div>
