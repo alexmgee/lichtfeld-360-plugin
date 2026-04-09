@@ -17,15 +17,5 @@ CLAUDE.md
 dev/
 dev/bp_harness_output/
 docs/*
-!docs/specs/
-docs/specs/*
-!docs/specs/2026-04-08-masking-setup-ux-proposal.md
-!docs/specs/2026-04-08-masking-setup-ux-implementation-plan.md
-tests/*
-!tests/conftest.py
-!tests/test_backends.py
-!tests/test_sam3_compat.py
-!tests/test_setup_checks.py
-!tests/test_pipeline.py
-!tests/test_sam3_masker.py
-!tests/test_mask_diagnostics.py
+tests/
+DIAGNOSTICS.md
