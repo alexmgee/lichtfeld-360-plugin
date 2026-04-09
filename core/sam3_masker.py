@@ -258,6 +258,8 @@ class Sam3CubemapMasker:
         diagnostics["face_detection_pct"] = face_coverage_pct
         diagnostics["erp_detection_coverage_pct_pre"] = coverage_pre
         diagnostics["erp_detection_coverage_pct_post"] = coverage_post
+        diagnostics.update(self._component_metrics(erp_detection))
+        diagnostics["down_face_share_pct"] = self._down_face_share_pct(face_coverage_pct)
 
         return erp_keep_mask, diagnostics
 
@@ -321,6 +323,43 @@ class Sam3CubemapMasker:
         return round(float(active / mask.size * 100.0), 3)
 
     @staticmethod
+    def _component_metrics(mask: np.ndarray) -> dict[str, float]:
+        """Describe connected-component structure of the ERP detection mask."""
+        binary = (mask > 0).astype(np.uint8)
+        active = int(np.count_nonzero(binary))
+        if active == 0:
+            return {
+                "component_count": 0,
+                "largest_component_share_pct": 0.0,
+                "secondary_component_share_pct": 0.0,
+            }
+
+        labels, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        component_sizes = sorted(
+            (
+                int(stats[idx, cv2.CC_STAT_AREA])
+                for idx in range(1, labels)
+            ),
+            reverse=True,
+        )
+        largest = component_sizes[0] if component_sizes else 0
+        secondary = sum(component_sizes[1:]) if len(component_sizes) > 1 else 0
+        return {
+            "component_count": int(len(component_sizes)),
+            "largest_component_share_pct": round(float(largest / active * 100.0), 3),
+            "secondary_component_share_pct": round(float(secondary / active * 100.0), 3),
+        }
+
+    @staticmethod
+    def _down_face_share_pct(face_detection_pct: dict[str, float]) -> float:
+        """Percent of total face detections that landed on the cubemap down face."""
+        total = sum(float(value) for value in face_detection_pct.values())
+        if total <= 0.0:
+            return 0.0
+        down = float(face_detection_pct.get("down", 0.0))
+        return round(float(down / total * 100.0), 3)
+
+    @staticmethod
     def _build_frame_flags(frame_diag: dict[str, Any]) -> list[str]:
         """Flag suspicious or notable frame outcomes for quick triage."""
         flags: list[str] = []
@@ -341,7 +380,7 @@ class Sam3CubemapMasker:
     ) -> None:
         """Write a JSON diagnostics summary for SAM 3 cubemap masking."""
         doc = {
-            "version": 1,
+            "version": 2,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "mode": "sam3_cubemap",
             "backend": result.backend_name,
@@ -377,7 +416,7 @@ class Sam3CubemapMasker:
     ) -> bool:
         """Best-effort fallback so diagnostics failures stay visible on disk."""
         fallback_doc = {
-            "version": 1,
+            "version": 2,
             "mode": "sam3_cubemap",
             "backend": result.backend_name,
             "total_frames": int(result.total_frames),
