@@ -53,7 +53,7 @@ class PipelineConfig:
 
     # Extraction
     interval: float = 2.0
-    extraction_sharpness: str = "best"     # none, basic, best
+    extraction_sharpness: str = "best"     # none, basic, better, best
     blur_metric: str = "tenengrad"         # tenengrad, laplacian
     scene_threshold: float = 0.3
     blur_scale_width: int = 640

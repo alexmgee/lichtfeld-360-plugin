@@ -8,7 +8,7 @@ Process 360° video into COLMAP-aligned datasets ready for Gaussian Splatting, d
 
 Takes a 360° equirectangular video and produces a complete COLMAP dataset:
 
-1. **Extract** frames from your video — three sharpness modes from instant fixed-interval extraction to full-frame scoring
+1. **Extract** frames from your video — four sharpness modes from instant fixed-interval extraction to full-frame scoring
 2. **Mask** the camera operator automatically — equirectangular and pinhole masks using SAM 3 when masking setup and is enabled
 3. **Reframe** each equirectangular frame into pinhole perspective views — presets from 12 to 24 camera outputs including cubemap
 4. **Align** all views using COLMAP — sequential or exhaustive matching with rig-aware constraints
@@ -85,15 +85,16 @@ All built-in presets use 90° pinhole views. The preset controls the final outpu
 
 ## Extraction Sharpness
 
-Sharpness controls how much work the plugin does before selecting the frame to keep from each interval. The current plugin exposes three modes: `None`, `Basic`, and `Best`.
+Sharpness controls how much work the plugin does before selecting the frame to keep from each interval. The current plugin exposes four modes: `None`, `Basic`, `Better`, and `Best`.
 
 | Sharpness | Analysis Method | Extraction Result |
 |-----------|-----------------|-------------------|
 | None | No sharpness analysis | Saves one frame at each extraction interval |
 | Basic | Tests about 10 candidate frames per interval using OpenCV blur scoring | Saves the strongest candidate from each interval |
-| Best | Scores every frame in the video using OpenCV blur scoring | Saves the strongest frame choice it can find |
+| Better | Scores every frame using lighter analysis settings | Keeps full-frame scoring while reducing extraction time |
+| Best | Scores every frame using the most thorough analysis settings | Saves the strongest frame choice it can find |
 
-`Best` is the default and gives the strongest frame selection, but takes the most time.  
+`Basic` is the fastest analyzed mode. `Better` keeps full-frame scoring while lowering the analysis cost. `Best` is the default and gives the strongest frame selection, but takes the most time.  
 The blur metric can be switched between **Tenengrad** and **Laplacian**:
 
 - **Tenengrad** measures Sobel gradient energy. It generally favors strong edges and is the default, more noise-robust choice.

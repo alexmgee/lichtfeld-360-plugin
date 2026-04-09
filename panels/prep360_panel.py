@@ -36,13 +36,23 @@ from ..core.presets import DEFAULT_PRESET, VIEW_PRESETS
 
 logger = logging.getLogger(__name__)
 
+_PANEL_SPACE_MAIN = getattr(
+    lf.ui.PanelSpace,
+    "MAIN_PANEL_TAB",
+    getattr(lf.ui.PanelSpace, "FLOATING", None),
+)
+_PANEL_HEIGHT_CONTENT = getattr(
+    lf.ui.PanelHeightMode,
+    "CONTENT",
+    getattr(lf.ui.PanelHeightMode, "FILL", None),
+)
+
 # ---------------------------------------------------------------------------
 # Preset ordering — indices match the <select> in the RML
 # ---------------------------------------------------------------------------
 
 PRESET_NAMES = [
     "cubemap",
-    "default",
     "low",
     "medium",
     "high",
@@ -51,9 +61,8 @@ PRESET_NAMES = [
 
 PRESET_LABELS = [
     "Cubemap (6 views)",
-    "Default (16 views)",
-    "Low (10 views)",
-    "Medium (14 views)",
+    "Low (12 views)",
+    "Medium (16 views)",
     "High (20 views)",
     "Ultra (24 views)",
 ]
@@ -79,10 +88,12 @@ SCRUB_FIELD_SPECS = {
 # Extraction sharpness tiers
 # - None: no analysis, fixed-interval extraction
 # - Basic: ~10 candidates per interval, OpenCV scoring
-# - Best: score every frame with OpenCV
+# - Better: score every frame with lighter analysis settings
+# - Best: score every frame with the most thorough analysis
 EXTRACT_SHARPNESS_PRESETS = [
     {"label": "None",  "scale_width": 0,   "scene_threshold": 0.0},
     {"label": "Basic", "scale_width": 640, "scene_threshold": 0.3},
+    {"label": "Better", "scale_width": 512, "scene_threshold": 0.3},
     {"label": "Best",  "scale_width": 640, "scene_threshold": 0.3},
 ]
 
@@ -95,9 +106,8 @@ BLUR_METRICS = [
 # Human-readable coverage descriptions per preset
 COVERAGE_DESCRIPTIONS = {
     "cubemap": "4 horizon, 1 top, 1 bottom",
-    "default": "8+8 two-ring layout at ±35°, no poles",
-    "low": "10 Fibonacci-spiral views, poles to poles",
-    "medium": "14 Fibonacci-spiral views, poles to poles",
+    "low": "12 Fibonacci-spiral views, poles to poles",
+    "medium": "8+8 two-ring layout at ±35°, no poles",
     "high": "20 Fibonacci-spiral views, poles to poles",
     "ultra": "24 Fibonacci-spiral views, poles to poles",
 }
@@ -112,10 +122,10 @@ SECTIONS = ["extraction", "masking", "reframe", "quality"]
 class Plugin360Panel(lf.ui.Panel):
     id = "plugin360.main"
     label = "360 Plugin"
-    space = lf.ui.PanelSpace.MAIN_PANEL_TAB
+    space = _PANEL_SPACE_MAIN
     order = 10100
     template = str(Path(__file__).resolve().with_name("prep360_panel.rml"))
-    height_mode = lf.ui.PanelHeightMode.CONTENT
+    height_mode = _PANEL_HEIGHT_CONTENT
     update_interval_ms = 100
 
     def __init__(self):
@@ -136,7 +146,7 @@ class Plugin360Panel(lf.ui.Panel):
 
         # Extraction
         self._extract_fps: float = 1.0
-        self._extract_sharpness_idx: int = 2  # default: Best
+        self._extract_sharpness_idx: int = 3  # default: Best
         self._blur_metric_idx: int = 0        # default: Tenengrad
 
         # Masking
@@ -416,8 +426,8 @@ class Plugin360Panel(lf.ui.Panel):
     # ── Computed text helpers ─────────────────────────────────
 
     def _get_current_view_config(self):
-        name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "default"
-        return VIEW_PRESETS.get(name, VIEW_PRESETS["default"])
+        name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "medium"
+        return VIEW_PRESETS.get(name, VIEW_PRESETS["medium"])
 
     @staticmethod
     def _format_sam3_status(status: str) -> str:
@@ -614,7 +624,7 @@ class Plugin360Panel(lf.ui.Panel):
         return f"Estimated frames   ~{base}"
 
     def _get_coverage_text(self) -> str:
-        name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "default"
+        name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "medium"
         return COVERAGE_DESCRIPTIONS.get(name, "")
 
     def _get_total_output_text(self) -> str:
@@ -1474,13 +1484,13 @@ class Plugin360Panel(lf.ui.Panel):
             return
 
         self._error_message = ""
-        preset_name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "default"
+        preset_name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "medium"
         colmap_matcher = COLMAP_MATCHERS[self._colmap_matcher_idx] if 0 <= self._colmap_matcher_idx < len(COLMAP_MATCHERS) else "sequential"
         match_budget_tier = MATCH_BUDGET_TIERS[self._match_budget_idx] if 0 <= self._match_budget_idx < len(MATCH_BUDGET_TIERS) else "custom"
 
         prompts = [p.strip() for p in self._mask_prompts_str.split(",") if p.strip()]
         sharpness_preset = EXTRACT_SHARPNESS_PRESETS[self._extract_sharpness_idx]
-        sharpness_modes = ["none", "basic", "best"]
+        sharpness_modes = ["none", "basic", "better", "best"]
         blur_metric = BLUR_METRICS[self._blur_metric_idx]["value"]
 
         # The UI now exposes only the SAM 3 masking path.
