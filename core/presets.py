@@ -200,7 +200,25 @@ VIEW_PRESETS: dict[str, ViewConfig] = {
         include_zenith=False,
         include_nadir=False,
     ),
-    "default": ViewConfig(
+    "low": ViewConfig(
+        views=[
+            FreeView("00_00", yaw=0.0, pitch=90.0, fov=90),
+            FreeView("00_01", yaw=137.51, pitch=54.9, fov=90),
+            FreeView("00_02", yaw=-84.98, pitch=39.52, fov=90),
+            FreeView("00_03", yaw=52.52, pitch=27.04, fov=90),
+            FreeView("00_04", yaw=-169.97, pitch=15.83, fov=90),
+            FreeView("00_05", yaw=-32.46, pitch=5.22, fov=90),
+            FreeView("00_06", yaw=105.05, pitch=-5.22, fov=90),
+            FreeView("00_07", yaw=-117.45, pitch=-15.83, fov=90),
+            FreeView("00_08", yaw=20.06, pitch=-27.04, fov=90),
+            FreeView("00_09", yaw=157.57, pitch=-39.52, fov=90),
+            FreeView("00_10", yaw=-64.92, pitch=-54.9, fov=90),
+            FreeView("00_11", yaw=0.0, pitch=-90.0, fov=90),
+        ],
+        include_zenith=False,
+        include_nadir=False,
+    ),
+    "medium": ViewConfig(
         views=[
             FreeView("00_00", yaw=0.0, pitch=-35.0, fov=90),
             FreeView("00_01", yaw=45.0, pitch=-35.0, fov=90),
@@ -218,42 +236,6 @@ VIEW_PRESETS: dict[str, ViewConfig] = {
             FreeView("01_05", yaw=-112.5, pitch=35.0, fov=90),
             FreeView("01_06", yaw=-67.5, pitch=35.0, fov=90),
             FreeView("01_07", yaw=-22.5, pitch=35.0, fov=90),
-        ],
-        include_zenith=False,
-        include_nadir=False,
-    ),
-    "low": ViewConfig(
-        views=[
-            FreeView("00_00", yaw=0.0, pitch=90.0, fov=90),
-            FreeView("00_01", yaw=137.51, pitch=51.06, fov=90),
-            FreeView("00_02", yaw=-84.98, pitch=33.75, fov=90),
-            FreeView("00_03", yaw=52.52, pitch=19.47, fov=90),
-            FreeView("00_04", yaw=-169.97, pitch=6.38, fov=90),
-            FreeView("00_05", yaw=-32.46, pitch=-6.38, fov=90),
-            FreeView("00_06", yaw=105.05, pitch=-19.47, fov=90),
-            FreeView("00_07", yaw=-117.45, pitch=-33.75, fov=90),
-            FreeView("00_08", yaw=20.06, pitch=-51.06, fov=90),
-            FreeView("00_09", yaw=180.0, pitch=-90.0, fov=90),
-        ],
-        include_zenith=False,
-        include_nadir=False,
-    ),
-    "medium": ViewConfig(
-        views=[
-            FreeView("00_00", yaw=0.0, pitch=90.0, fov=90),
-            FreeView("00_01", yaw=137.51, pitch=57.8, fov=90),
-            FreeView("00_02", yaw=-84.98, pitch=43.81, fov=90),
-            FreeView("00_03", yaw=52.52, pitch=32.58, fov=90),
-            FreeView("00_04", yaw=-169.97, pitch=22.62, fov=90),
-            FreeView("00_05", yaw=-32.46, pitch=13.34, fov=90),
-            FreeView("00_06", yaw=105.05, pitch=4.41, fov=90),
-            FreeView("00_07", yaw=-117.45, pitch=-4.41, fov=90),
-            FreeView("00_08", yaw=20.06, pitch=-13.34, fov=90),
-            FreeView("00_09", yaw=157.57, pitch=-22.62, fov=90),
-            FreeView("00_10", yaw=-64.92, pitch=-32.58, fov=90),
-            FreeView("00_11", yaw=72.59, pitch=-43.81, fov=90),
-            FreeView("00_12", yaw=-149.91, pitch=-57.8, fov=90),
-            FreeView("00_13", yaw=0.0, pitch=-90.0, fov=90),
         ],
         include_zenith=False,
         include_nadir=False,
@@ -317,4 +299,4 @@ VIEW_PRESETS: dict[str, ViewConfig] = {
 }
 
 # Default preset
-DEFAULT_PRESET = "default"
+DEFAULT_PRESET = "medium"

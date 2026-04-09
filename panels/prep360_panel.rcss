@@ -220,6 +220,9 @@ body {
 .processing-report {
     margin: 0dp;
     max-height: 96dp;
+    white-space: pre-line;
+    overflow-y: auto;
+    line-height: 14dp;
 }
 
 /* ── Text input (for mask prompts) ──────────────────────── */

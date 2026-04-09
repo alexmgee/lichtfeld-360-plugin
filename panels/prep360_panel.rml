@@ -84,7 +84,8 @@
         <select data-value="extract_sharpness_idx">
           <option value="0">None</option>
           <option value="1">Basic</option>
-          <option value="2">Best</option>
+          <option value="2">Better</option>
+          <option value="3">Best</option>
         </select>
       </div>
       <div class="setting-row setting-row--dropdown">
@@ -239,11 +240,10 @@
         <span class="prop-label">Preset</span>
         <select data-value="preset_idx">
           <option value="0">Cubemap (6 views)</option>
-          <option value="1" selected>Default (16 views)</option>
-          <option value="2">Low (10 views)</option>
-          <option value="3">Medium (14 views)</option>
-          <option value="4">High (20 views)</option>
-          <option value="5">Ultra (24 views)</option>
+          <option value="1">Low (12 views)</option>
+          <option value="2" selected>Medium (16 views)</option>
+          <option value="3">High (20 views)</option>
+          <option value="4">Ultra (24 views)</option>
         </select>
       </div>
       <div class="setting-row">

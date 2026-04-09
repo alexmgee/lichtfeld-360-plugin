@@ -16,15 +16,32 @@ from typing import Any, Dict, Optional
 # ---------------------------------------------------------------------------
 # ffmpeg / ffprobe binary discovery
 # ---------------------------------------------------------------------------
-try:
-    from static_ffmpeg import run as _sfr
+_FFMPEG: str | None = None
+_FFPROBE: str | None = None
 
-    _FFMPEG, _FFPROBE = _sfr.get_or_fetch_platform_executables_else_raise()
-except ImportError:
-    import shutil
 
-    _FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
-    _FFPROBE = shutil.which("ffprobe") or "ffprobe"
+def _resolve_ffmpeg_binaries() -> tuple[str, str]:
+    """Resolve FFmpeg/ffprobe lazily.
+
+    Import-time discovery can block plugin loading if static-ffmpeg decides it
+    needs to fetch binaries. Delay that work until video analysis is actually
+    requested.
+    """
+    global _FFMPEG, _FFPROBE
+    if _FFMPEG and _FFPROBE:
+        return _FFMPEG, _FFPROBE
+
+    try:
+        from static_ffmpeg import run as _sfr
+
+        _FFMPEG, _FFPROBE = _sfr.get_or_fetch_platform_executables_else_raise()
+    except ImportError:
+        import shutil
+
+        _FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
+        _FFPROBE = shutil.which("ffprobe") or "ffprobe"
+
+    return _FFMPEG, _FFPROBE
 
 # Hide the console window that subprocess.Popen creates on Windows.
 _SUBPROCESS_FLAGS: Dict[str, Any] = (
@@ -149,7 +166,8 @@ class VideoAnalyzer:
     """Analyze video files for 360-degree processing."""
 
     def __init__(self, ffprobe_path: Optional[str] = None):
-        self.ffprobe_path: str = ffprobe_path or _FFPROBE
+        _, resolved_ffprobe = _resolve_ffmpeg_binaries()
+        self.ffprobe_path: str = ffprobe_path or resolved_ffprobe
 
     # ------------------------------------------------------------------
     # Public API

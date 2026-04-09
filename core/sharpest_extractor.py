@@ -12,7 +12,7 @@ populates ``lavfi.scene_score``.  When a score exceeds
 ``scene_threshold``, the interval chunk is split so both sides of the
 transition get a representative sharp frame.
 
-Algorithm (Basic/Best modes):
+Algorithm (Basic/Better/Best modes):
   1. FFmpeg scene detection pass -> per-frame scene scores
   2. OpenCV scoring pass -> per-frame sharpness scores
   3. Divide frames into interval chunks; split at scene boundaries
@@ -33,15 +33,32 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 # ffmpeg / ffprobe binary discovery
 # ---------------------------------------------------------------------------
-try:
-    from static_ffmpeg import run as _sfr
+_FFMPEG: str | None = None
+_FFPROBE: str | None = None
 
-    _FFMPEG, _FFPROBE = _sfr.get_or_fetch_platform_executables_else_raise()
-except ImportError:
-    import shutil
 
-    _FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
-    _FFPROBE = shutil.which("ffprobe") or "ffprobe"
+def _resolve_ffmpeg_binaries() -> tuple[str, str]:
+    """Resolve FFmpeg/ffprobe lazily.
+
+    Import-time discovery can block plugin loading if static-ffmpeg decides it
+    needs to fetch binaries. Delay that work until extraction is actually
+    requested.
+    """
+    global _FFMPEG, _FFPROBE
+    if _FFMPEG and _FFPROBE:
+        return _FFMPEG, _FFPROBE
+
+    try:
+        from static_ffmpeg import run as _sfr
+
+        _FFMPEG, _FFPROBE = _sfr.get_or_fetch_platform_executables_else_raise()
+    except ImportError:
+        import shutil
+
+        _FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
+        _FFPROBE = shutil.which("ffprobe") or "ffprobe"
+
+    return _FFMPEG, _FFPROBE
 
 # Hide the console window that subprocess.Popen creates on Windows.
 _SUBPROCESS_FLAGS: Dict[str, Any] = (
@@ -49,6 +66,7 @@ _SUBPROCESS_FLAGS: Dict[str, Any] = (
 )
 
 MANIFEST_FILENAME = "extraction_manifest.json"
+BETTER_SCENE_ANALYSIS_FPS_CAP = 12.0
 
 
 # -- scene score merging ----------------------------------------------------
@@ -106,12 +124,13 @@ class SharpestConfig:
     """Configuration for sharpest-frame extraction.
 
     Extraction sharpness levels (``extraction_sharpness``):
-      - ``"none"``:  extract at fixed intervals, no analysis
-      - ``"basic"``: ~10 candidates per interval, OpenCV scoring
-      - ``"best"``:  score every frame in the video
+      - ``"none"``:   extract at fixed intervals, no analysis
+      - ``"basic"``:  ~10 candidates per interval, OpenCV scoring
+      - ``"better"``: score every frame with lighter analysis settings
+      - ``"best"``:   score every frame in the video with the most thorough analysis
     """
     interval: float = 2.0            # seconds between selections
-    extraction_sharpness: str = "best"  # none, basic, best
+    extraction_sharpness: str = "best"  # none, basic, better, best
     blur_metric: str = "tenengrad"   # tenengrad, laplacian
     scene_threshold: float = 0.3     # scene-change score to split chunks
     scale_width: int = 640           # resolution for blur analysis
@@ -142,8 +161,9 @@ class SharpestExtractor:
         ffmpeg_path: Optional[str] = None,
         ffprobe_path: Optional[str] = None,
     ):
-        self.ffmpeg_path = ffmpeg_path or _FFMPEG
-        self.ffprobe_path = ffprobe_path or _FFPROBE
+        resolved_ffmpeg, resolved_ffprobe = _resolve_ffmpeg_binaries()
+        self.ffmpeg_path = ffmpeg_path or resolved_ffmpeg
+        self.ffprobe_path = ffprobe_path or resolved_ffprobe
 
     # -- public API ---------------------------------------------------------
 
@@ -191,7 +211,7 @@ class SharpestExtractor:
                 prefix_source=prefix_source,
             )
 
-        # Basic / Best: two-pass pipeline (scene detect + OpenCV scoring)
+        # Basic / Better / Best: two-pass pipeline (scene detect + OpenCV scoring)
         return self._extract_scored(
             str(video), str(out), config,
             progress_callback=progress_callback,
@@ -276,12 +296,11 @@ class SharpestExtractor:
         finally:
             cap.release()
 
-    # -- scored extraction (Basic / Best) -----------------------------------
+    # -- scored extraction (Basic / Better / Best) --------------------------
 
     def _score_frame(self, frame: "np.ndarray", config: SharpestConfig) -> float:
         """Score a BGR frame for sharpness using the configured metric."""
         import cv2
-        import numpy as np
 
         h, w = frame.shape[:2]
         if config.scale_width > 0 and w > config.scale_width:
@@ -409,13 +428,21 @@ class SharpestExtractor:
             return SharpestResult(success=False, error="Could not determine video FPS")
         duration_sec = self._probe_duration(video_path)
 
-        is_best = config.extraction_sharpness == "best"
+        mode = config.extraction_sharpness
+        is_fullframe = mode in {"better", "best"}
 
-        # Analysis FPS: Basic samples ~5fps, Best uses native
-        if is_best:
+        # Analysis FPS for scoring:
+        # - basic: sampled candidates only
+        # - better/best: score every frame sequentially
+        if is_fullframe:
             analysis_fps = native_fps
+            if mode == "better":
+                scene_analysis_fps = min(BETTER_SCENE_ANALYSIS_FPS_CAP, native_fps)
+            else:
+                scene_analysis_fps = native_fps
         else:
             analysis_fps = min(5.0 / max(config.interval, 0.1), native_fps)
+            scene_analysis_fps = analysis_fps
 
         chunk_size = max(1, round(analysis_fps * config.interval))
 
@@ -427,7 +454,7 @@ class SharpestExtractor:
                                                   dir=output_dir))
             ok, err = self._run_scene_detect(
                 video_path, metadata_path, config,
-                analysis_fps=analysis_fps if not is_best else None,
+                analysis_fps=scene_analysis_fps,
                 progress_callback=lambda c, t, m: _progress(
                     int(c * 40 / max(t, 1)), 100, m),
                 duration_sec=duration_sec,
@@ -459,7 +486,7 @@ class SharpestExtractor:
             duration = total_frames / fps if fps > 0 else 0
             end = config.end_sec or duration
 
-            if is_best:
+            if is_fullframe:
                 scored_frames = self._score_all_frames(
                     cap, config, start, end,
                     progress_callback=lambda c, t, m: _progress(
@@ -487,7 +514,7 @@ class SharpestExtractor:
 
         # analysis_fps is always a valid float here
         scored_with_scenes = _merge_scene_scores(
-            scored_frames, scene_data, analysis_fps, start)
+            scored_frames, scene_data, scene_analysis_fps, start)
 
         winner_timestamps = self._parse_best_frames(
             scored_with_scenes, chunk_size, config.scene_threshold)
@@ -625,7 +652,7 @@ class SharpestExtractor:
 
         Args:
             analysis_fps: If set, subsample with fps filter before analysis.
-                Pass None for Best mode (native fps, no fps filter).
+                Better caps this aggressively for speed; Best can run at native FPS.
         """
         filters = []
         if analysis_fps is not None:
@@ -803,17 +830,17 @@ class SharpestExtractor:
     def _score_tenengrad(gray: "np.ndarray") -> float:
         """Sobel gradient energy — higher = sharper. Noise-robust via implicit Gaussian."""
         import cv2
-        import numpy as np
-        sx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        return float(np.mean(sx**2 + sy**2))
+        sx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        sy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        energy = sx * sx + sy * sy
+        return float(cv2.mean(energy)[0])
 
     @staticmethod
     def _score_laplacian(gray: "np.ndarray") -> float:
         """Laplacian variance — higher = sharper. Gaussian pre-blur for noise reduction."""
         import cv2
         blurred = cv2.GaussianBlur(gray, (0, 0), 0.7)
-        return float(cv2.Laplacian(blurred, cv2.CV_64F).var())
+        return float(cv2.Laplacian(blurred, cv2.CV_32F).var())
 
     def _extract_frames(
         self,
