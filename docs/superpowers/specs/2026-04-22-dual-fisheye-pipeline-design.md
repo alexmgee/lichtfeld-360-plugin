@@ -29,9 +29,11 @@ These were resolved during brainstorming:
 |                        | Pinhole output              | Spherical/Fisheye output       |
 |------------------------|-----------------------------|--------------------------------|
 | **ERP input**          | Existing path (working)     | ERP scaffold (incomplete)      |
-| **Dual fisheye input** | Fisheye -> COLMAP -> pinhole | Fisheye -> COLMAP -> fisheye poses |
+| **Dual fisheye input** | Not designed yet (see sect. 9) | Fisheye -> COLMAP -> fisheye poses |
 
-The ERP scaffold cell is a separate effort (Phase 1 in IMPLEMENTATION.md) and is not part of this spec.
+The ERP scaffold cell is a separate effort (Phase 1 in IMPLEMENTATION.md). The dual fisheye -> pinhole cell requires a separate design pass for the post-COLMAP reframing step. Neither is part of this spec.
+
+**This spec implements only the dual fisheye -> spherical/fisheye output path.** The dual fisheye -> pinhole path is deferred.
 
 ## 4. Architecture
 
@@ -43,7 +45,7 @@ A `detect_input_type()` function determines the input type from the source file:
 - `.insv` -> `"dual_fisheye"` (file pair: `*_00_*.insv` + `*_01_*.insv`, already separate streams)
 - `.mp4` / `.mov` / other single-stream video -> `"erp"`
 
-This lives in `pipeline.py` or a small utility module.
+This lives in `pipeline.py` as a module-level function.
 
 ### 4.2 PipelineConfig Changes
 
@@ -59,7 +61,13 @@ fisheye_calibration_path: Optional[str] = None  # Override calibration JSON
 fisheye_circle_margin: float = 0.05  # Circle mask margin (5% default)
 ```
 
-The existing `output_mode` field (`"pinhole"` / `"erp"`) is reused. For dual fisheye with spherical output, `output_mode` is `"erp"` (meaning "native camera model, not pinhole crops"). The naming could be improved later but the semantics are: pinhole = COLMAP outputs pinhole cameras, erp = output uses the source camera model.
+The existing `output_mode` field is extended: `"pinhole"` / `"erp"` / `"fisheye"`. For dual fisheye with spherical output, `output_mode` is `"fisheye"`. This avoids overloading `"erp"` with two meanings.
+
+The branching in `_run_stages` uses `(input_type, output_mode)` together:
+- `("erp", "pinhole")` — existing ERP pinhole path
+- `("erp", "erp")` — ERP scaffold path (incomplete, not this spec)
+- `("dual_fisheye", "fisheye")` — this spec's primary path
+- `("dual_fisheye", "pinhole")` — deferred, not this spec
 
 ### 4.3 Extraction Stage
 
@@ -97,6 +105,8 @@ For dual fisheye, the masker also generates a **fisheye circle mask** — a bina
 
 The circle mask margin is exposed as `fisheye_circle_margin` on `PipelineConfig` for tuning.
 
+The fisheye masking step must return a `MaskResult` compatible with the existing `PipelineResult` assembly (which reads `backend_name`, `video_backend_name`, `used_fallback_video_backend`, `video_backend_error`). For dual fisheye, the video backend fields are empty strings / `False` since SAM3 image API is used without video tracking.
+
 ### 4.5 Rig Config
 
 The existing `rig_config.py` generates rig JSON for ERP pinhole views (many virtual cameras, shared optical center, zero translation). For dual fisheye, it generates a simpler rig with two physical sensors and a real translational offset.
@@ -128,34 +138,40 @@ The existing `rig_config.py` generates rig JSON for ERP pinhole views (many virt
 
 The rotation `[0, 0, 1, 0]` is the quaternion (qw=0, qx=0, qy=1, qz=0) for 180 deg around Y. The translation `[0, 0, 0.025]` is 25mm along +Z in the front camera's frame.
 
-The `write_rig_config` function gains an alternate code path: when called with a dual-fisheye config (not a `ViewConfig`), it writes the two-sensor rig directly. This could be a second function (`write_dual_fisheye_rig_config`) or a branch within the existing function.
+A new function `write_dual_fisheye_rig_config(output_path, baseline_m, rotation_quat)` writes the two-sensor rig config. The existing `write_rig_config(view_config, output_path)` is unchanged. The pipeline calls the appropriate function based on `input_type`.
+
+**cam_from_rig_translation derivation:** `cam_from_rig` transforms rig coordinates into camera coordinates. The rig origin is defined at the front sensor (ref sensor = identity). In the back camera's coordinate frame, the rig origin (front sensor) is located 25mm in front of it. With COLMAP's convention (Z forward), the rig origin is at `[0, 0, +0.025]` in the back camera's frame. This translation value must be verified against COLMAP's rig documentation during implementation — the sign depends on whether `cam_from_rig_translation` means "rig origin in camera frame" or "camera origin in rig frame."
 
 ### 4.6 COLMAP Stage
 
 `ColmapConfig` changes:
 
 - `camera_model` is already a configurable field (currently defaults to `"PINHOLE"`). For dual fisheye, set to `"OPENCV_FISHEYE"`.
-- `camera_params` receives the per-camera-family intrinsic priors as a formatted string (e.g., `"1046,1046,1920,1920,0,0,0,0"` for OPENCV_FISHEYE's 8 params: fx, fy, cx, cy, k1, k2, k3, k4).
+- `camera_params` receives the per-camera-family intrinsic priors as a formatted string (e.g., `"1046,1046,1915,1919,0,0,0,0"` for OPENCV_FISHEYE's 8 params: fx, fy, cx, cy, k1, k2, k3, k4). The exact parameter order and count must be verified against the installed pycolmap version's camera model definitions during implementation.
+- New fields added to `ColmapConfig`:
+  - `refine_principal_point: bool = False` — set `True` for fisheye
+  - `refine_extra_params: bool = False` — set `True` for fisheye (distortion coefficients)
+
+These new fields are passed through to `IncrementalPipelineOptions` in `_run_pipeline`, replacing the current hardcoded `False` values at lines 708-709.
 
 COLMAP's `CameraMode.PER_FOLDER` assigns one camera (sensor) per subfolder. With `images/front/` and `images/back/`, this naturally gives two independent sensors that COLMAP calibrates separately during BA.
 
-Rig BA settings (already present in `colmap_runner.py`):
-- `ba_refine_sensor_from_rig=False` — rig geometry is locked
-- `constant_rigs=True` — rig does not change during reconstruction
-- `ba_refine_focal_length=True` — each sensor's intrinsics refined independently
-- `ba_refine_principal_point` and `ba_refine_extra_params` — may need to be `True` for fisheye (currently `False` for pinhole). The fisheye model benefits from refining distortion coefficients during BA.
-
-The pipeline sets these differently for dual fisheye vs ERP:
+Rig BA settings:
+- `ba_refine_sensor_from_rig=False` — rig geometry is locked (already present)
+- `constant_rigs=True` — rig does not change during reconstruction (already present)
+- `ba_refine_focal_length=True` — each sensor's intrinsics refined independently (already present)
+- `ba_refine_principal_point` — `False` for pinhole (existing default), `True` for fisheye (new)
+- `ba_refine_extra_params` — `False` for pinhole (existing default), `True` for fisheye (new, refines k1-k4)
 
 | Setting                      | ERP (pinhole)  | Dual fisheye        |
 |------------------------------|----------------|---------------------|
 | `camera_model`               | `"PINHOLE"`    | `"OPENCV_FISHEYE"`  |
-| `ba_refine_principal_point`  | `False`        | `True`              |
-| `ba_refine_extra_params`     | `False`        | `True`              |
+| `refine_principal_point`     | `False`        | `True`              |
+| `refine_extra_params`        | `False`        | `True`              |
 
 ### 4.7 Transforms Output
 
-**Dual fisheye -> Pinhole output:** After COLMAP aligns fisheye images and reconstructs the scene, pinhole crops are extracted from the fisheye frames using the recovered poses. The existing `transforms_writer.py` handles pinhole output as-is. (This path requires an additional reframing step after COLMAP — extracting pinhole views from the fisheye images using the now-known poses and calibrations.)
+**Dual fisheye -> Pinhole output:** Deferred. See section 9.
 
 **Dual fisheye -> Spherical/Fisheye output:** The transforms writer produces per-frame entries with fisheye-native intrinsics. Each frame entry carries its own camera parameters because front and back lenses have different calibrations:
 
@@ -203,7 +219,13 @@ The coordinate conversion (COLMAP OpenCV -> LFS OpenGL + Y pre-comp) uses the sa
 
 **New file or extension:** A `write_fisheye_transforms` function, either in `transforms_writer.py` or in a new `fisheye_transforms.py`. It reads the COLMAP reconstruction, extracts per-image poses and per-sensor intrinsics, converts coordinates, and writes the JSON.
 
-### 4.8 Output Directory Layout
+Note: The existing `write_transforms_json` in `transforms_writer.py` does not support `applied_transform` or per-frame intrinsics. The fisheye path needs a new function that writes the full JSON structure directly (similar to how `scaffold.py` writes its own `transforms_data` dict at line 310), not an extension of the existing `write_transforms_json`.
+
+### 4.8 Overlap Masks
+
+The existing Voronoi overlap mask stage (pipeline.py stage 3.5) is **skipped** for the dual fisheye path. It partitions the image space between virtual cameras to prevent duplicate features — this only applies to the ERP pinhole path where multiple overlapping views are extracted from one panorama. With two physical fisheye sensors, COLMAP's `skip_image_pairs_in_same_frame` (already set in `colmap_runner.py`) handles the equivalent concern by preventing matching between front/back images of the same frame.
+
+### 4.9 Output Directory Layout
 
 **Dual fisheye -> Spherical output:**
 ```
@@ -218,19 +240,6 @@ output_dir/
   rig_config.json
   transforms.json   # fisheye-native with per-frame intrinsics
   pointcloud.ply
-```
-
-**Dual fisheye -> Pinhole output:**
-```
-output_dir/
-  images/           # pinhole crops extracted from fisheye after COLMAP
-    00_00/
-    00_01/
-    ...
-  masks/            # (if masking enabled)
-  sparse/0/         # COLMAP reconstruction
-  rig_config.json
-  transforms.json   # pinhole intrinsics
 ```
 
 ## 5. Per-Camera-Family Calibration Defaults
@@ -299,11 +308,8 @@ COLMAP (OPENCV_FISHEYE, PER_FOLDER, rig constraint):
   4. Incremental mapping (locked rig, refine intrinsics + distortion)
   |
   v
-Output:
-  if output_mode == "pinhole":
-    Extract pinhole crops from fisheye using recovered poses
-    Write pinhole transforms.json
-  else:  # spherical/fisheye
+Output (fisheye mode only in this spec):
+    Move fisheye frames from extracted/ to images/
     Write fisheye transforms.json with per-frame intrinsics
     Export sparse point cloud
 ```
@@ -320,7 +326,7 @@ Output:
 | File | Changes |
 |------|---------|
 | `core/pipeline.py` | `PipelineConfig` new fields, `_run_stages` branching on `input_type` |
-| `core/colmap_runner.py` | `ColmapConfig` fisheye-aware BA settings (refine principal point + extra params) |
+| `core/colmap_runner.py` | `ColmapConfig` new fields (`refine_principal_point`, `refine_extra_params`), `_run_pipeline` reads them instead of hardcoded `False` |
 | `core/rig_config.py` | Dual fisheye rig config generation (two sensors, 25mm baseline, 180 deg Y) |
 | `core/transforms_writer.py` | Fisheye transforms output with per-frame intrinsics and k1-k4 |
 | `panels/prep360_panel.py` | UI: "Keep demuxed streams" checkbox, fisheye circle margin slider |
