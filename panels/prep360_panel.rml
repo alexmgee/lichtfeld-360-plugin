@@ -56,6 +56,17 @@
           <button class="btn btn--secondary btn--compact" data-event-click="browse_output">Choose</button>
         </div>
       </div>
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
+        <span class="prop-label">Output Mode</span>
+        <select data-value="output_mode_idx">
+          <option value="0" selected>Pinhole</option>
+          <option value="1">ERP</option>
+        </select>
+      </div>
+      <div class="setting-row" data-if="show_output_mode_note">
+        <span class="prop-label"></span>
+        <span class="status-text status-muted">{{output_mode_note}}</span>
+      </div>
       <div class="setting-row">
         <span class="prop-label">Summary</span>
         <span class="status-text status-muted">{{dataset_summary_text}}</span>
@@ -236,7 +247,7 @@
       <span class="text-accent">Reframe &amp; Alignment</span>
     </div>
     <div class="section-content" id="sec-reframe">
-      <div class="setting-row setting-row--dropdown setting-row--dropdown-high">
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-high" data-if="show_preset_select">
         <span class="prop-label">Preset</span>
         <select data-value="preset_idx">
           <option value="0">Cubemap (6 views)</option>
@@ -245,6 +256,10 @@
           <option value="3">High (20 views)</option>
           <option value="4">Ultra (24 views)</option>
         </select>
+      </div>
+      <div class="setting-row" data-if="show_erp_scaffold_preset">
+        <span class="prop-label">Preset</span>
+        <span class="status-text status-muted">{{erp_scaffold_preset_text}}</span>
       </div>
       <div class="setting-row">
         <span class="prop-label">Coverage</span>

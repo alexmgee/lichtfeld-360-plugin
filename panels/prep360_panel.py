@@ -10,7 +10,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import lichtfeld as lf
 
@@ -31,8 +31,10 @@ from ..core.setup_checks import (
     forget_hf_token, install_default_tier, install_premium_tier, install_video_tracking,
     make_sam3_install_failure_report, verify_hf_token_detailed,
 )
-from ..core.pipeline import PipelineConfig, PipelineJob, PipelineResult
-from ..core.presets import DEFAULT_PRESET, VIEW_PRESETS
+from ..core.presets import DEFAULT_PRESET, VIEW_PRESETS, resolve_view_preset_name
+
+if TYPE_CHECKING:
+    from ..core.pipeline import PipelineConfig, PipelineJob, PipelineResult
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,9 @@ MATCH_BUDGET_TIERS = ["fast", "balanced", "default", "high", "custom"]
 
 OUTPUT_SIZES = [960, 1280, 1536, 1920]
 
+OUTPUT_MODES = ["pinhole", "erp"]
+OUTPUT_MODE_LABELS = ["Pinhole", "ERP"]
+
 # Scrub field specifications — keys MUST match the data-value attribute in the RML
 SCRUB_FIELD_SPECS = {
     "extract_fps_str": ScrubFieldSpec(
@@ -105,6 +110,7 @@ BLUR_METRICS = [
 
 # Human-readable coverage descriptions per preset
 COVERAGE_DESCRIPTIONS = {
+    "erp_scaffold_8": "8-view staggered two-ring layout at +/-35 degrees with a 45-degree yaw offset",
     "cubemap": "4 horizon, 1 top, 1 bottom",
     "low": "12 Fibonacci-spiral views, poles to poles",
     "medium": "8+8 two-ring layout at ±35°, no poles",
@@ -146,17 +152,23 @@ class Plugin360Panel(lf.ui.Panel):
 
         # Extraction
         self._extract_fps: float = 1.0
-        self._extract_sharpness_idx: int = 3  # default: Best
+        self._extract_sharpness_idx: int = 1  # default: Basic
         self._blur_metric_idx: int = 0        # default: Tenengrad
 
         # Masking
-        self._setup_state: MaskingSetupState = check_masking_setup()
-        self._sam3_setup_report: Sam3SetupReport = check_sam3_setup(
-            setup_state=self._setup_state
+        self._setup_state: MaskingSetupState = MaskingSetupState()
+        self._sam3_setup_report: Sam3SetupReport = Sam3SetupReport(
+            token_status="unknown",
+            access_status="unknown",
+            runtime_status="unknown",
+            weights_status="unknown",
+            overall_stage="needs_access",
+            message="Checking local SAM 3 setup...",
+            next_action="",
         )
         self._masking_method_idx: int = 1  # SAM 3 only in the UI
-        self._masking_available: bool = self._setup_state.sam3_ready
-        self._enable_masking: bool = self._setup_state.sam3_ready
+        self._masking_available: bool = False
+        self._enable_masking: bool = False
         self._enable_diagnostics: bool = False
         self._mask_prompts_str: str = "person"
         self._hf_token_input: str = ""
@@ -179,6 +191,7 @@ class Plugin360Panel(lf.ui.Panel):
         self._colmap_max_num_matches: int = MATCH_BUDGETS["default"]
 
         # Output
+        self._output_mode_idx: int = 0  # default: Pinhole
         self._output_path: str = ""
 
         # Processing state
@@ -203,6 +216,11 @@ class Plugin360Panel(lf.ui.Panel):
         self._job: Optional[PipelineJob] = None
         self._pending_result: Optional[PipelineResult] = None
         self._pending_lock = threading.Lock()
+        self._setup_probe_started: bool = False
+        self._setup_probe_pending: Optional[
+            tuple[MaskingSetupState, Sam3SetupReport, bool]
+        ] = None
+        self._setup_probe_lock = threading.Lock()
 
         # Scrub field controller
         self._scrub_fields = ScrubFieldController(
@@ -286,6 +304,9 @@ class Plugin360Panel(lf.ui.Panel):
 
         # -- Reframe --
         model.bind("preset_idx", lambda: str(self._preset_idx), self._set_preset)
+        model.bind_func("show_preset_select", lambda: self._output_mode_idx != 1)
+        model.bind_func("show_erp_scaffold_preset", lambda: self._output_mode_idx == 1)
+        model.bind_func("erp_scaffold_preset_text", self._get_erp_scaffold_preset_text)
         model.bind_func("coverage_text", self._get_coverage_text)
         model.bind_func("total_output_text", self._get_total_output_text)
         model.bind("output_size_idx", lambda: str(self._output_size_idx), self._set_output_size_idx)
@@ -296,6 +317,9 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("match_budget_text", self._get_match_budget_text)
 
         # -- Output --
+        model.bind("output_mode_idx", lambda: str(self._output_mode_idx), self._set_output_mode)
+        model.bind_func("show_output_mode_note", lambda: self._output_mode_idx == 1)
+        model.bind_func("output_mode_note", self._get_output_mode_note)
         model.bind_func("output_path_display", lambda: self._output_path or "(not set)")
         model.bind_func("dataset_summary_text", self._get_dataset_summary)
 
@@ -341,6 +365,7 @@ class Plugin360Panel(lf.ui.Panel):
     def on_mount(self, doc):
         self._doc = doc
         self._scrub_fields.mount(doc)
+        self._start_setup_probe(auto_enable=True)
 
     def on_unmount(self, doc):
         self._scrub_fields.unmount()
@@ -351,6 +376,8 @@ class Plugin360Panel(lf.ui.Panel):
             return False
 
         dirty = self._consume_pending_result()
+        if self._consume_pending_setup_probe():
+            dirty = True
         if self._scrub_fields.sync_all():
             dirty = True
 
@@ -398,6 +425,7 @@ class Plugin360Panel(lf.ui.Panel):
                 self._sam3_setup_report.detail,
             ),
             self._preset_idx,
+            self._output_mode_idx,
             self._output_size_idx,
             self._jpeg_quality,
             self._colmap_matcher_idx,
@@ -425,9 +453,29 @@ class Plugin360Panel(lf.ui.Panel):
 
     # ── Computed text helpers ─────────────────────────────────
 
+    def _get_selected_preset_name(self) -> str:
+        if 0 <= self._preset_idx < len(PRESET_NAMES):
+            return PRESET_NAMES[self._preset_idx]
+        return DEFAULT_PRESET
+
+    def _get_output_mode(self) -> str:
+        if 0 <= self._output_mode_idx < len(OUTPUT_MODES):
+            return OUTPUT_MODES[self._output_mode_idx]
+        return "pinhole"
+
     def _get_current_view_config(self):
-        name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "medium"
-        return VIEW_PRESETS.get(name, VIEW_PRESETS["medium"])
+        preset_name = resolve_view_preset_name(
+            self._get_selected_preset_name(),
+            self._get_output_mode(),
+        )
+        return VIEW_PRESETS.get(preset_name, VIEW_PRESETS[DEFAULT_PRESET])
+
+    def _get_erp_scaffold_preset_text(self) -> str:
+        vc = self._get_current_view_config()
+        return (
+            f"ERP 8-view staggered ({vc.total_views()} views, "
+            "two rings at +/-35 degrees with the upper ring offset 45 degrees)"
+        )
 
     @staticmethod
     def _format_sam3_status(status: str) -> str:
@@ -624,17 +672,25 @@ class Plugin360Panel(lf.ui.Panel):
         return f"Estimated frames   ~{base}"
 
     def _get_coverage_text(self) -> str:
-        name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "medium"
+        name = resolve_view_preset_name(
+            self._get_selected_preset_name(),
+            self._get_output_mode(),
+        )
         return COVERAGE_DESCRIPTIONS.get(name, "")
 
     def _get_total_output_text(self) -> str:
         vc = self._get_current_view_config()
         views = vc.total_views()
+        output_mode = self._get_output_mode()
         if not self._video_info:
+            if output_mode == "erp":
+                return f"{views} scaffold views per frame"
             return f"{views} views per frame"
         interval = 1.0 / max(0.1, self._extract_fps)
         frames = VideoAnalyzer.estimate_frame_count(self._video_info, interval)
         total = views * frames
+        if output_mode == "erp":
+            return f"{views} scaffold views × {frames} frames = {total:,} pinhole images"
         return f"{views} views \u00d7 {frames} frames = {total:,} images"
 
     def _get_dataset_summary(self) -> str:
@@ -645,6 +701,11 @@ class Plugin360Panel(lf.ui.Panel):
         interval = 1.0 / max(0.1, self._extract_fps)
         frames = VideoAnalyzer.estimate_frame_count(self._video_info, interval) if self._video_info else 0
         total = views * frames
+        if self._get_output_mode() == "erp":
+            return (
+                f"ERP | {frames:,} ERP frames | "
+                f"{views}-view COLMAP scaffold | {self._output_size}px crops"
+            )
         return f"Pinhole (COLMAP) | {total:,} images | {self._output_size}px"
 
     def _get_match_budget_text(self) -> str:
@@ -716,6 +777,23 @@ class Plugin360Panel(lf.ui.Panel):
 
         output_path = str(Path(base_path) / "output")
         return base_path, output_path
+
+    def _resolve_erp_import_target(self, transforms_path: str) -> tuple[str, str]:
+        """Resolve an ERP scaffold import target without COLMAP auto-detection.
+
+        LichtFeld expects the dataset *directory* (containing transforms.json),
+        not the transforms.json file itself.  Passing the file directly causes
+        LFS to use the filename as the scene name and to mis-resolve relative
+        mask paths.
+        """
+        transforms_file = Path(transforms_path)
+        if transforms_file.suffix.lower() != ".json":
+            raise RuntimeError(f"ERP dataset path must be a transforms.json file: {transforms_path}")
+        if not transforms_file.is_file():
+            raise RuntimeError(f"ERP transforms.json not found: {transforms_path}")
+        dataset_dir = transforms_file.parent
+        output_path = str(dataset_dir / "output")
+        return str(dataset_dir), output_path
 
     def _build_stage_timing_lines(
         self,
@@ -1022,6 +1100,41 @@ class Plugin360Panel(lf.ui.Panel):
             self._enable_masking = ready
         else:
             self._enable_masking = self._enable_masking and ready
+
+    def _start_setup_probe(self, *, auto_enable: bool = False) -> None:
+        if self._setup_probe_started:
+            return
+        self._setup_probe_started = True
+
+        def _probe():
+            try:
+                state = check_masking_setup()
+                report = check_sam3_setup(setup_state=state)
+                with self._setup_probe_lock:
+                    self._setup_probe_pending = (state, report, auto_enable)
+            except Exception:
+                logger.exception("Initial SAM 3 setup probe failed")
+            finally:
+                if self._handle:
+                    self._handle.dirty_all()
+
+        threading.Thread(target=_probe, daemon=True).start()
+
+    def _consume_pending_setup_probe(self) -> bool:
+        with self._setup_probe_lock:
+            pending = self._setup_probe_pending
+            self._setup_probe_pending = None
+
+        if pending is None:
+            return False
+
+        state, report, auto_enable = pending
+        self._setup_state = state
+        self._sam3_setup_report = report
+        self._hf_verify_text = report.message
+        self._hf_verify_ok = report.access_status == "granted"
+        self._refresh_masking_availability(auto_enable=auto_enable)
+        return True
 
     def _sync_setup_state(
         self,
@@ -1341,6 +1454,23 @@ class Plugin360Panel(lf.ui.Panel):
         except (ValueError, TypeError):
             pass
 
+    def _set_output_mode(self, val):
+        try:
+            idx = int(val)
+            if 0 <= idx < len(OUTPUT_MODES):
+                self._output_mode_idx = idx
+        except (ValueError, TypeError):
+            pass
+
+    def _get_output_mode_note(self) -> str:
+        if self._output_mode_idx == 1:
+            return (
+                "Outputs original equirectangular frames with COLMAP-derived poses "
+                "for 3DGUT training. This mode forces the dedicated 8-view "
+                "staggered scaffold preset."
+            )
+        return ""
+
     def _set_output_path(self, val):
         self._output_path = str(val)
 
@@ -1484,7 +1614,8 @@ class Plugin360Panel(lf.ui.Panel):
             return
 
         self._error_message = ""
-        preset_name = PRESET_NAMES[self._preset_idx] if 0 <= self._preset_idx < len(PRESET_NAMES) else "medium"
+        preset_name = self._get_selected_preset_name()
+        output_mode = self._get_output_mode()
         colmap_matcher = COLMAP_MATCHERS[self._colmap_matcher_idx] if 0 <= self._colmap_matcher_idx < len(COLMAP_MATCHERS) else "sequential"
         match_budget_tier = MATCH_BUDGET_TIERS[self._match_budget_idx] if 0 <= self._match_budget_idx < len(MATCH_BUDGET_TIERS) else "custom"
 
@@ -1496,6 +1627,8 @@ class Plugin360Panel(lf.ui.Panel):
         # The UI now exposes only the SAM 3 masking path.
         masking_method = "sam3_cubemap"
         mask_backend = "sam3"
+
+        from ..core.pipeline import PipelineConfig, PipelineJob
 
         config = PipelineConfig(
             video_path=self._video_path,
@@ -1517,7 +1650,7 @@ class Plugin360Panel(lf.ui.Panel):
             colmap_matcher=colmap_matcher,
             colmap_match_budget_tier=match_budget_tier,
             colmap_max_num_matches=self._colmap_max_num_matches,
-            output_mode="pinhole",
+            output_mode=output_mode,
         )
 
         self._is_processing = True
@@ -1527,7 +1660,13 @@ class Plugin360Panel(lf.ui.Panel):
         self._processing_log_lines = []
         self._completion_summary = ""
         self._completion_report = ""
-        self._append_processing_log(f"Preset: {PRESET_LABELS[self._preset_idx]}")
+        if output_mode == "erp":
+            self._append_processing_log("Preset: ERP 8-view staggered (forced)")
+        else:
+            self._append_processing_log(f"Preset: {PRESET_LABELS[self._preset_idx]}")
+        self._append_processing_log(
+            f"Output mode: {OUTPUT_MODE_LABELS[self._output_mode_idx]}"
+        )
         self._append_processing_log(f"Output: {self._output_path}")
         self._append_processing_log("Pipeline queued.")
 
@@ -1800,9 +1939,14 @@ class Plugin360Panel(lf.ui.Panel):
 
             if self._import_after and result.dataset_path:
                 try:
-                    dataset_base_path, import_output_path = self._resolve_import_target(
-                        result.dataset_path
-                    )
+                    if result.output_mode == "erp":
+                        dataset_base_path, import_output_path = self._resolve_erp_import_target(
+                            result.dataset_path
+                        )
+                    else:
+                        dataset_base_path, import_output_path = self._resolve_import_target(
+                            result.dataset_path
+                        )
                     lf.load_file(
                         dataset_base_path,
                         is_dataset=True,

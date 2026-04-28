@@ -10,7 +10,7 @@ Takes a 360° equirectangular video and produces a complete COLMAP dataset:
 
 1. **Extract** frames from your video — four sharpness modes from instant fixed-interval extraction to full-frame scoring
 2. **Mask** the camera operator automatically — equirectangular and pinhole masks using SAM 3 when masking setup and is enabled
-3. **Reframe** each equirectangular frame into pinhole perspective views — presets from 12 to 24 camera outputs including cubemap
+3. **Reframe** each equirectangular frame into pinhole perspective views — pinhole presets from 6 to 24 views, plus a dedicated 8-view ERP scaffold layout
 4. **Align** all views using COLMAP — sequential or exhaustive matching with rig-aware constraints
 5. **Import** the result directly back into LichtFeld Studio for training
 
@@ -46,7 +46,7 @@ Then restart LichtFeld Studio.
    If SAM 3 is installed, masking can be enabled and targeted with comma-separated prompt keywords such as `person`.
 
    **Reframe & Alignment**  
-   `Preset` controls the final output camera rig. `Matcher` controls how COLMAP searches for image pairs across the sequence.
+   `Preset` controls the final pinhole output camera rig. In `ERP` mode the plugin switches to a dedicated 8-view staggered scaffold preset. `Matcher` controls how COLMAP searches for image pairs across the sequence.
 
    **Output Quality**  
    `Crop Size` sets the resolution of each pinhole view. `Match Limit` chooses a built-in COLMAP matching tier, and `Max. Matches` sets the per-pair correspondence cap.
@@ -79,9 +79,15 @@ All built-in presets use 90° pinhole views. The preset controls the final outpu
 |--------|------:|-------------|
 | Cubemap | 6 | 4 horizon faces plus top and bottom |
 | Low | 12 | Fibonacci-spiral freeview layout from zenith to nadir |
-| Medium | 16 | Fibonacci-spiral freeview layout from zenith to nadir |
+| Medium | 16 | 8+8 two-ring layout at ±35° with a staggered upper ring |
 | High | 20 | Fibonacci-spiral freeview layout from zenith to nadir |
 | Ultra | 24 | Fibonacci-spiral freeview layout from zenith to nadir |
+
+`ERP` mode uses a separate internal preset instead of the selected pinhole rig:
+
+| Mode | Views | Description |
+|------|------:|-------------|
+| ERP | 8 | COLMAP-style staggered two-ring layout: 4 views at -35°, 4 views at +35°, upper ring offset by 45° |
 
 ## Extraction Sharpness
 

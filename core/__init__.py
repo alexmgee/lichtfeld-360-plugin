@@ -1,73 +1,71 @@
 # SPDX-FileCopyrightText: 2026 Alex Gee
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""360 Plugin core processing modules."""
+"""360 Plugin core processing modules.
 
-from .analyzer import VideoAnalyzer, VideoInfo
-from .backends import (
-    MaskingBackend, YoloSamBackend, Sam3Backend,
-    VideoTrackingBackend, FallbackVideoBackend, Sam2VideoBackend,
-    get_backend, get_backend_name, get_video_backend,
-)
-from .colmap_runner import ColmapConfig, ColmapResult, ColmapRunner
-from .cubemap_projection import CubemapProjection
-from .masker import Masker, MaskConfig, MaskResult, is_masking_available
-from .overlap_mask import compute_overlap_masks
-from .pipeline import PipelineConfig, PipelineJob, PipelineResult
-from .presets import FreeView, Ring, ViewConfig, VIEW_PRESETS
-from .reframer import Reframer, ReframeResult, reframe_view, compute_pinhole_intrinsics
-from .rig_config import generate_rig_config, write_rig_config
-from .sharpest_extractor import SharpestConfig, SharpestExtractor, SharpestResult
-from .transforms_writer import colmap_pose_to_c2w_opengl, write_transforms_json
+This package keeps its public re-exports lazy so the plugin UI can load
+without importing the full masking and COLMAP stack up front.
+"""
 
-__all__ = [
-    # analyzer
-    "VideoAnalyzer",
-    "VideoInfo",
-    # backends
-    "MaskingBackend",
-    "YoloSamBackend",
-    "Sam3Backend",
-    "VideoTrackingBackend",
-    "FallbackVideoBackend",
-    "Sam2VideoBackend",
-    "get_backend",
-    "get_backend_name",
-    "get_video_backend",
-    # colmap_runner
-    "ColmapConfig",
-    "ColmapResult",
-    "ColmapRunner",
-    # cubemap_projection
-    "CubemapProjection",
-    # masker
-    "Masker",
-    "MaskConfig",
-    "MaskResult",
-    "is_masking_available",
-    # overlap_mask
-    "compute_overlap_masks",
-    # pipeline
-    "PipelineConfig",
-    "PipelineJob",
-    "PipelineResult",
-    # presets
-    "FreeView",
-    "Ring",
-    "ViewConfig",
-    "VIEW_PRESETS",
-    # reframer
-    "Reframer",
-    "ReframeResult",
-    "reframe_view",
-    "compute_pinhole_intrinsics",
-    # rig_config
-    "generate_rig_config",
-    "write_rig_config",
-    # sharpest_extractor
-    "SharpestConfig",
-    "SharpestExtractor",
-    "SharpestResult",
-    # transforms_writer
-    "colmap_pose_to_c2w_opengl",
-    "write_transforms_json",
-]
+from importlib import import_module
+
+_EXPORTS = {
+    "VideoAnalyzer": (".analyzer", "VideoAnalyzer"),
+    "VideoInfo": (".analyzer", "VideoInfo"),
+    "MaskingBackend": (".backends", "MaskingBackend"),
+    "YoloSamBackend": (".backends", "YoloSamBackend"),
+    "Sam3Backend": (".backends", "Sam3Backend"),
+    "VideoTrackingBackend": (".backends", "VideoTrackingBackend"),
+    "FallbackVideoBackend": (".backends", "FallbackVideoBackend"),
+    "Sam2VideoBackend": (".backends", "Sam2VideoBackend"),
+    "get_backend": (".backends", "get_backend"),
+    "get_backend_name": (".backends", "get_backend_name"),
+    "get_video_backend": (".backends", "get_video_backend"),
+    "ColmapConfig": (".colmap_runner", "ColmapConfig"),
+    "ColmapResult": (".colmap_runner", "ColmapResult"),
+    "ColmapRunner": (".colmap_runner", "ColmapRunner"),
+    "CubemapProjection": (".cubemap_projection", "CubemapProjection"),
+    "Masker": (".masker", "Masker"),
+    "MaskConfig": (".masker", "MaskConfig"),
+    "MaskResult": (".masker", "MaskResult"),
+    "is_masking_available": (".masker", "is_masking_available"),
+    "compute_overlap_masks": (".overlap_mask", "compute_overlap_masks"),
+    "PipelineConfig": (".pipeline", "PipelineConfig"),
+    "PipelineJob": (".pipeline", "PipelineJob"),
+    "PipelineResult": (".pipeline", "PipelineResult"),
+    "FreeView": (".presets", "FreeView"),
+    "Ring": (".presets", "Ring"),
+    "ViewConfig": (".presets", "ViewConfig"),
+    "VIEW_PRESETS": (".presets", "VIEW_PRESETS"),
+    "Reframer": (".reframer", "Reframer"),
+    "ReframeResult": (".reframer", "ReframeResult"),
+    "reframe_view": (".reframer", "reframe_view"),
+    "compute_pinhole_intrinsics": (".reframer", "compute_pinhole_intrinsics"),
+    "generate_rig_config": (".rig_config", "generate_rig_config"),
+    "write_rig_config": (".rig_config", "write_rig_config"),
+    "SharpestConfig": (".sharpest_extractor", "SharpestConfig"),
+    "SharpestExtractor": (".sharpest_extractor", "SharpestExtractor"),
+    "SharpestResult": (".sharpest_extractor", "SharpestResult"),
+    "colmap_pose_to_c2w_opengl": (".transforms_writer", "colmap_pose_to_c2w_opengl"),
+    "write_transforms_json": (".transforms_writer", "write_transforms_json"),
+    "export_erp_scaffold": (".scaffold", "export_erp_scaffold"),
+    "cleanup_pinhole_crops": (".scaffold", "cleanup_pinhole_crops"),
+    "cleanup_colmap_artifacts": (".scaffold", "cleanup_colmap_artifacts"),
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str):
+    try:
+        module_name, attr_name = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+
+    module = import_module(module_name, __name__)
+    value = getattr(module, attr_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(__all__))

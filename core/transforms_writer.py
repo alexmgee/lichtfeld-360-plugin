@@ -65,6 +65,8 @@ def write_transforms_json(
     fl_x: float,
     fl_y: float,
     frames: list[dict],
+    cx: float | None = None,
+    cy: float | None = None,
     ply_file_path: str | None = None,
 ) -> None:
     """Write a transforms.json file in LichtFeld Studio format.
@@ -74,9 +76,11 @@ def write_transforms_json(
         camera_model: Camera model string (e.g. "EQUIRECTANGULAR", "PINHOLE").
         w: Image width in pixels.
         h: Image height in pixels.
-        fl_x: Focal length X. For ERP: w / 2.0.
-        fl_y: Focal length Y. For ERP: h (full height).
+        fl_x: Focal length X. For ERP: w / 2.
+        fl_y: Focal length Y. For ERP: w / 2 (= h for 2:1 aspect).
         frames: List of frame dicts, each with "file_path" and "transform_matrix".
+        cx: Principal point X. For ERP: w / 2.
+        cy: Principal point Y. For ERP: h / 2.
         ply_file_path: Optional relative path to a point cloud PLY file.
     """
     data = {
@@ -87,6 +91,10 @@ def write_transforms_json(
         "fl_y": fl_y,
         "frames": frames,
     }
+    if cx is not None:
+        data["cx"] = cx
+    if cy is not None:
+        data["cy"] = cy
     if ply_file_path is not None:
         data["ply_file_path"] = ply_file_path
 

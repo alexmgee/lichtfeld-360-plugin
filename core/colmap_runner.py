@@ -134,6 +134,7 @@ class ColmapConfig:
     match_budget_tier: str = "default"
     max_num_matches_override: Optional[int] = None
     refine_focal_length: bool = True
+    vocab_tree_path: Optional[str] = None  # Required when matcher == "vocab_tree"
 
     @property
     def sift_max_image_size(self) -> int:
@@ -642,18 +643,26 @@ class ColmapRunner:
         }
 
         if matcher_name == "sequential":
-            if hasattr(pycolmap, "SequentialMatchingOptions"):
+            if hasattr(pycolmap, "SequentialPairingOptions"):
                 pairing_opts = pycolmap.SequentialPairingOptions()
                 _try_set_attr(pairing_opts, "loop_detection", True)
                 match_kwargs["pairing_options"] = pairing_opts
             fn_name = "match_sequential"
         elif matcher_name == "vocab_tree":
+            tree_path = self._config.vocab_tree_path
+            if not tree_path or not os.path.exists(tree_path):
+                raise RuntimeError(
+                    "Vocab tree matching requires ColmapConfig.vocab_tree_path "
+                    "to point at an existing vocabulary tree file. "
+                    f"Got: {tree_path!r}"
+                )
             if hasattr(pycolmap, "VocabTreePairingOptions"):
                 vocab_opts = pycolmap.VocabTreePairingOptions()
+                _try_set_attr(vocab_opts, "vocab_tree_path", tree_path)
                 _try_set_attr(vocab_opts, "num_images", 100)
                 _try_set_attr(vocab_opts, "num_nearest_neighbors", 5)
                 match_kwargs["pairing_options"] = vocab_opts
-            fn_name = "match_vocab_tree"
+            fn_name = "match_vocabtree"
         else:  # exhaustive
             if hasattr(pycolmap, "ExhaustivePairingOptions"):
                 exhaustive_opts = pycolmap.ExhaustivePairingOptions()
@@ -700,18 +709,19 @@ class ColmapRunner:
         if hasattr(pipeline_opts, "max_num_models"):
             _try_set_attr(pipeline_opts, "max_num_models", 1)
         # Virtual cameras reframed from one panorama share an exact optical
-        # center. Once the preset geometry is correct, letting COLMAP refine
-        # full sensor_from_rig poses can invent large per-sensor translations
-        # and visibly tear the rig apart.
+        # center. Letting COLMAP refine sensor_from_rig poses can invent
+        # large per-sensor translations and tear the rig apart, so we lock
+        # rig geometry globally with ba_refine_sensor_from_rig=False.
+        # (constant_rigs is Set[int] of rig IDs in pycolmap 4.0; setting it
+        # to True is a silent no-op via _try_set_attr — ba_refine_sensor_from_rig
+        # alone does the work.)
         _try_set_attr(pipeline_opts, "ba_refine_sensor_from_rig", False)
         _try_set_attr(pipeline_opts, "ba_refine_focal_length", self._config.refine_focal_length)
         _try_set_attr(pipeline_opts, "ba_refine_principal_point", False)
         _try_set_attr(pipeline_opts, "ba_refine_extra_params", False)
-        _try_set_attr(pipeline_opts, "constant_rigs", True)
         _log(
             "Step 4: Rig BA — refine_sensor_from_rig=False, "
-            f"refine_focal_length={self._config.refine_focal_length}, "
-            "constant_rigs=True"
+            f"refine_focal_length={self._config.refine_focal_length}"
         )
 
         _log("Step 4: Calling pycolmap.incremental_mapping()")

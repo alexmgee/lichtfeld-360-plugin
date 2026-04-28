@@ -31,7 +31,12 @@ from .colmap_runner import infer_shared_pinhole_camera_params
 from .masker import Masker, MaskConfig, MaskResult, is_masking_available
 from .setup_checks import is_sam3_masking_ready
 from .overlap_mask import compute_overlap_masks
-from .presets import VIEW_PRESETS, ViewConfig
+from .presets import (
+    DEFAULT_PRESET,
+    VIEW_PRESETS,
+    ViewConfig,
+    resolve_view_preset_name,
+)
 from .reframer import Reframer
 from .rig_config import write_rig_config
 from .sharpest_extractor import SharpestConfig, SharpestExtractor
@@ -114,9 +119,8 @@ class PipelineResult:
 
 def _build_runtime_view_config(cfg: PipelineConfig) -> ViewConfig:
     """Resolve the active preset and apply runtime output overrides."""
-    from .presets import DEFAULT_PRESET
-
-    base = VIEW_PRESETS.get(cfg.preset_name, VIEW_PRESETS[DEFAULT_PRESET])
+    effective_preset = resolve_view_preset_name(cfg.preset_name, cfg.output_mode)
+    base = VIEW_PRESETS.get(effective_preset, VIEW_PRESETS[DEFAULT_PRESET])
     return ViewConfig(
         rings=base.rings,
         views=base.views,
@@ -136,11 +140,14 @@ def _format_preset_signature(preset_name: str, view_config: ViewConfig) -> str:
             f"{ring_idx:02d}:{ring.count}x@{ring.pitch:g}"
             f"/f{ring.fov:g}/start{ring.start_yaw:g}"
         )
+    if view_config.views:
+        fovs = sorted({f"{view.fov:g}" for view in view_config.views})
+        parts.append(f"{len(view_config.views)} freeviews/f{','.join(fovs)}")
     if view_config.include_zenith:
         parts.append(f"ZN@90/f{view_config.zenith_fov:g}")
     if view_config.include_nadir:
         parts.append(f"ND@-90/f{view_config.zenith_fov:g}")
-    return f"{preset_name} | " + "; ".join(parts)
+    return f"{preset_name} | " + "; ".join(parts) if parts else preset_name
 
 
 # ---------------------------------------------------------------------------
@@ -242,8 +249,9 @@ class PipelineJob:
             result = self._run_stages(cfg, t0)
         except Exception as exc:
             logger.exception("Pipeline failed")
+            effective_preset = resolve_view_preset_name(cfg.preset_name, cfg.output_mode)
             preset_signature = _format_preset_signature(
-                cfg.preset_name,
+                effective_preset,
                 _build_runtime_view_config(cfg),
             )
             result = PipelineResult(
@@ -308,6 +316,17 @@ class PipelineJob:
 
         num_source_frames = extract_result.frames_extracted
 
+        # Read ERP frame dimensions from the first extracted frame.
+        # Needed by ERP scaffold export for equirectangular intrinsics.
+        erp_width = 0
+        erp_height = 0
+        if extract_result.frame_paths:
+            import cv2
+            _first = cv2.imread(extract_result.frame_paths[0])
+            if _first is not None:
+                erp_height, erp_width = _first.shape[:2]
+                del _first
+
         if self._check_cancel():
             raise RuntimeError("Cancelled")
 
@@ -318,10 +337,11 @@ class PipelineJob:
         #   Default:  Mask (ERP) → Reframe (images + masks)
         #   Cubemap:  Reframe (images only) → Mask (direct on all faces)
         # ===================================================================
+        effective_preset = resolve_view_preset_name(cfg.preset_name, cfg.output_mode)
         view_config = _build_runtime_view_config(cfg)
-        preset_signature = _format_preset_signature(cfg.preset_name, view_config)
+        preset_signature = _format_preset_signature(effective_preset, view_config)
         mask_result: Optional[MaskResult] = None
-        is_cubemap = cfg.preset_name == "cubemap"
+        is_cubemap = effective_preset == "cubemap"
 
         # ── Method-specific masking availability gate ──────────────
         if cfg.enable_masking:
@@ -644,24 +664,49 @@ class PipelineJob:
         # Stage 6: Write Output (85-95%)
         # ===================================================================
         if cfg.output_mode == "erp":
-            # ERP mode: write transforms.json with original ERP images
-            # and camera-to-world poses derived from the COLMAP reconstruction.
-            #
-            # This requires:
-            #   1. Reading the COLMAP sparse reconstruction
-            #   2. Identifying reference sensor images (first view per station)
-            #   3. Extracting their poses as the station pose
-            #   4. Writing transforms.json with EQUIRECTANGULAR camera model
-            #      pointing to the original ERP frames
-            #
-            # TODO: Implement ERP output mode.  For now, the COLMAP dataset
-            #       (pinhole mode) is always available as a fallback.
-            self._update("output", 85.0, "ERP output mode not yet implemented — using COLMAP dataset")
-            logger.warning(
-                "ERP output mode is not yet implemented. "
-                "Falling back to COLMAP dataset (pinhole mode)."
+            from .scaffold import (
+                export_erp_scaffold, cleanup_pinhole_crops, cleanup_colmap_artifacts,
             )
-            dataset_path = colmap_result.reconstruction_path
+
+            self._update("output", 85.0, "Cleaning up pinhole scaffold...")
+
+            if erp_width == 0 or erp_height == 0:
+                raise RuntimeError(
+                    "ERP frame dimensions could not be determined — "
+                    "cannot export ERP scaffold"
+                )
+
+            # 1. Delete pinhole images/ and masks/ so the ERP export
+            #    can rename extracted/frames/ → images/.
+            cleanup_pinhole_crops(out, log_fn=logger.info)
+
+            self._update("output", 88.0, "Extracting rig poses...")
+
+            # 2. Read COLMAP reconstruction, move ERP frames into
+            #    images/, write transforms.json and pointcloud.ply.
+            erp_masks = (extracted_dir / "masks") if cfg.enable_masking else None
+
+            # The reference sensor's pitch determines the rig orientation
+            # offset from the ERP image center.
+            ref_pitch = view_config.rings[0].pitch if view_config.rings else 0.0
+
+            transforms_path = export_erp_scaffold(
+                colmap_sparse_dir=out / "sparse",
+                erp_frames_dir=frames_dir,
+                erp_masks_dir=erp_masks,
+                output_dir=out,
+                erp_width=erp_width,
+                erp_height=erp_height,
+                ref_pitch_deg=ref_pitch,
+                log_fn=logger.info,
+            )
+
+            # 3. Delete sparse/, database.db, etc. — keeping them
+            #    triggers LFS pinhole auto-detection.
+            cleanup_colmap_artifacts(out, log_fn=logger.info)
+
+            self._update("output", 95.0, "ERP scaffold export complete")
+            dataset_path = str(transforms_path)
 
         else:
             # Pinhole mode: COLMAP dataset already written by ColmapRunner
@@ -677,7 +722,7 @@ class PipelineJob:
         return PipelineResult(
             success=True,
             dataset_path=dataset_path,
-            output_mode=cfg.output_mode if cfg.output_mode != "erp" else "pinhole",
+            output_mode=cfg.output_mode,
             num_source_frames=num_source_frames,
             num_output_images=num_output_images,
             num_aligned_cameras=colmap_result.num_registered_images,

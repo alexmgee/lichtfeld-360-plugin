@@ -36,17 +36,6 @@ def _unregister_class(cls):
 def on_load():
     for cls in _CLASSES:
         _register_class(cls)
-    set_panel_space = getattr(lf.ui, "set_panel_space", None)
-    set_panel_order = getattr(lf.ui, "set_panel_order", None)
-    panel_space = getattr(
-        lf.ui.PanelSpace,
-        "MAIN_PANEL_TAB",
-        getattr(lf.ui.PanelSpace, "FLOATING", None),
-    )
-    if callable(set_panel_space) and panel_space is not None:
-        set_panel_space(Plugin360Panel.id, panel_space)
-    if callable(set_panel_order):
-        set_panel_order(Plugin360Panel.id, Plugin360Panel.order)
     lf.log.info("360 Plugin loaded")
 
 
