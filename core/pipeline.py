@@ -957,17 +957,38 @@ class PipelineJob:
             raise RuntimeError(f"COLMAP failed: {colmap_result.error}")
 
         # ===================================================================
-        # Stage 6 (transforms output): SKIPPED in phase 1
+        # Stage 6: Write fisheye-native transforms.json + pointcloud.ply (95-100%)
         # ===================================================================
-        # Phase 2 will add write_fisheye_transforms in transforms_writer.py.
-        # For now the dataset_path is the COLMAP reconstruction directory.
+        self._update("output", 95.0, "Writing fisheye transforms.json...")
+        from .transforms_writer import write_fisheye_transforms
 
-        self._update("complete", 100.0, "Phase 1 complete: COLMAP reconstruction ready")
+        sparse_dir = out / "sparse" / "0"
+        if not sparse_dir.is_dir():
+            # Older COLMAP layouts sometimes write directly to sparse/.
+            sparse_dir = out / "sparse"
+
+        try:
+            transforms_path = write_fisheye_transforms(
+                colmap_sparse_dir=sparse_dir,
+                images_root=images_dir,
+                output_dir=out,
+                log_fn=logger.info,
+            )
+            dataset_path = str(transforms_path)
+        except Exception as exc:
+            # If transforms output fails, surface the error but keep the
+            # COLMAP reconstruction available so the user can debug.
+            logger.exception("Fisheye transforms output failed")
+            raise RuntimeError(
+                f"COLMAP succeeded but transforms.json export failed: {exc}"
+            ) from exc
+
+        self._update("complete", 100.0, "Fisheye reconstruction + transforms.json ready")
 
         elapsed = time.time() - t0
         return PipelineResult(
             success=True,
-            dataset_path=colmap_result.reconstruction_path,
+            dataset_path=dataset_path,
             output_mode="fisheye",
             num_source_frames=num_pairs,
             num_output_images=2 * num_pairs,  # one per lens per pair

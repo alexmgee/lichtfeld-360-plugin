@@ -888,18 +888,22 @@ class Plugin360Panel(lf.ui.Panel):
         return base_path, output_path
 
     def _resolve_erp_import_target(self, transforms_path: str) -> tuple[str, str]:
-        """Resolve an ERP scaffold import target without COLMAP auto-detection.
+        """Resolve a transforms.json-based dataset import target.
+
+        Used for both ERP scaffold (camera_model=EQUIRECTANGULAR) and
+        Fisheye native (camera_model=OPENCV_FISHEYE) outputs — both produce
+        transforms.json at the dataset root.
 
         LichtFeld expects the dataset *directory* (containing transforms.json),
         not the transforms.json file itself.  Passing the file directly causes
         LFS to use the filename as the scene name and to mis-resolve relative
-        mask paths.
+        mask / pointcloud paths.
         """
         transforms_file = Path(transforms_path)
         if transforms_file.suffix.lower() != ".json":
-            raise RuntimeError(f"ERP dataset path must be a transforms.json file: {transforms_path}")
+            raise RuntimeError(f"Dataset path must be a transforms.json file: {transforms_path}")
         if not transforms_file.is_file():
-            raise RuntimeError(f"ERP transforms.json not found: {transforms_path}")
+            raise RuntimeError(f"transforms.json not found: {transforms_path}")
         dataset_dir = transforms_file.parent
         output_path = str(dataset_dir / "output")
         return str(dataset_dir), output_path
@@ -2240,7 +2244,11 @@ class Plugin360Panel(lf.ui.Panel):
 
             if self._import_after and result.dataset_path:
                 try:
-                    if result.output_mode == "erp":
+                    # Both ERP and Fisheye output transforms.json; the resolver
+                    # returns the parent directory (LFS expects the dataset
+                    # directory, not the file). Pinhole output points at the
+                    # COLMAP reconstruction directory directly.
+                    if result.output_mode in ("erp", "fisheye"):
                         dataset_base_path, import_output_path = self._resolve_erp_import_target(
                             result.dataset_path
                         )
