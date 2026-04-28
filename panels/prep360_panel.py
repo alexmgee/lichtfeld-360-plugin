@@ -4,11 +4,14 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
+import os
 import re
 import threading
 import time
+from ctypes import wintypes
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -37,6 +40,114 @@ if TYPE_CHECKING:
     from ..core.pipeline import PipelineConfig, PipelineJob, PipelineResult
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Win32 native file dialog (Windows only)
+# ---------------------------------------------------------------------------
+# LichtFeld's lf.ui.open_video_file_dialog() takes no parameters, so its
+# accepted extensions are baked in (no .osv / .insv). Tkinter is not
+# available in the LFS-bundled Python (vcpkg build doesn't include
+# _tkinter). Solution: drive comdlg32.GetOpenFileNameW directly via ctypes.
+# ctypes is part of stdlib core and always available.
+#
+# We use c_void_p for the filter and file buffers so embedded NULs (which
+# the Win32 filter format requires between label/pattern pairs and at the
+# end) survive the boundary — c_wchar_p / LPWSTR truncate at the first NUL.
+
+if os.name == "nt":
+    class _OPENFILENAMEW(ctypes.Structure):
+        _fields_ = [
+            ("lStructSize", wintypes.DWORD),
+            ("hwndOwner", wintypes.HWND),
+            ("hInstance", wintypes.HINSTANCE),
+            ("lpstrFilter", ctypes.c_void_p),
+            ("lpstrCustomFilter", ctypes.c_void_p),
+            ("nMaxCustFilter", wintypes.DWORD),
+            ("nFilterIndex", wintypes.DWORD),
+            ("lpstrFile", ctypes.c_void_p),
+            ("nMaxFile", wintypes.DWORD),
+            ("lpstrFileTitle", ctypes.c_void_p),
+            ("nMaxFileTitle", wintypes.DWORD),
+            ("lpstrInitialDir", wintypes.LPCWSTR),
+            ("lpstrTitle", wintypes.LPCWSTR),
+            ("Flags", wintypes.DWORD),
+            ("nFileOffset", wintypes.WORD),
+            ("nFileExtension", wintypes.WORD),
+            ("lpstrDefExt", wintypes.LPCWSTR),
+            ("lCustData", wintypes.LPARAM),
+            ("lpfnHook", ctypes.c_void_p),
+            ("lpTemplateName", wintypes.LPCWSTR),
+            ("pvReserved", ctypes.c_void_p),
+            ("dwReserved", wintypes.DWORD),
+            ("FlagsEx", wintypes.DWORD),
+        ]
+
+    _OFN_FILEMUSTEXIST = 0x00001000
+    _OFN_PATHMUSTEXIST = 0x00000800
+    _OFN_HIDEREADONLY = 0x00000004
+    _OFN_EXPLORER     = 0x00080000
+    _OFN_NOCHANGEDIR  = 0x00000008  # don't change CWD on selection
+
+
+def _open_file_via_win32(title: str, filters: list[tuple[str, str]]) -> str:
+    """Open a Windows native Open-File dialog with arbitrary extension filters.
+
+    `filters` is a list of (display_label, semicolon_pattern) tuples in the
+    order they should appear, e.g.
+        [("Video files", "*.mp4;*.osv;*.insv"), ("All files", "*.*")]
+
+    Returns the selected absolute path, or "" if the user cancelled.
+
+    Raises:
+        OSError if not on Windows (caller should handle / fall back).
+        ctypes errors if comdlg32 isn't loadable.
+    """
+    if os.name != "nt":
+        raise OSError("Win32 file dialog requires Windows")
+
+    # Win32 filter format: pairs of NUL-terminated strings, ending in
+    # an extra NUL: "Display1\0pattern1\0Display2\0pattern2\0\0"
+    filter_text = ""
+    for label, pattern in filters:
+        filter_text += f"{label}\x00{pattern}\x00"
+    filter_text += "\x00"  # final terminator (create_unicode_buffer adds one more)
+
+    filter_buf = ctypes.create_unicode_buffer(filter_text, len(filter_text) + 1)
+    file_buf = ctypes.create_unicode_buffer(32768)
+
+    ofn = _OPENFILENAMEW()
+    ofn.lStructSize = ctypes.sizeof(ofn)
+    ofn.hwndOwner = None
+    ofn.lpstrFilter = ctypes.addressof(filter_buf)
+    ofn.nFilterIndex = 1
+    ofn.lpstrFile = ctypes.addressof(file_buf)
+    ofn.nMaxFile = 32768
+    ofn.lpstrTitle = title
+    ofn.Flags = (
+        _OFN_FILEMUSTEXIST
+        | _OFN_PATHMUSTEXIST
+        | _OFN_HIDEREADONLY
+        | _OFN_EXPLORER
+        | _OFN_NOCHANGEDIR
+    )
+
+    comdlg32 = ctypes.windll.comdlg32
+    comdlg32.GetOpenFileNameW.argtypes = [ctypes.POINTER(_OPENFILENAMEW)]
+    comdlg32.GetOpenFileNameW.restype = wintypes.BOOL
+
+    if not comdlg32.GetOpenFileNameW(ctypes.byref(ofn)):
+        # User cancelled, OR an error occurred. Use CommDlgExtendedError to
+        # distinguish — code 0 means cancelled, anything else is an error.
+        comdlg32.CommDlgExtendedError.argtypes = []
+        comdlg32.CommDlgExtendedError.restype = wintypes.DWORD
+        err_code = comdlg32.CommDlgExtendedError()
+        if err_code != 0:
+            raise OSError(f"GetOpenFileNameW failed with code 0x{err_code:04X}")
+        return ""
+
+    return file_buf.value
+
 
 _PANEL_SPACE_MAIN = getattr(
     lf.ui.PanelSpace,
@@ -1681,40 +1792,33 @@ class Plugin360Panel(lf.ui.Panel):
 
         LichtFeld's built-in `lf.ui.open_video_file_dialog()` doesn't accept
         an extension filter — `.osv` and `.insv` aren't in its allowed list,
-        so dual-fisheye captures can't be selected through it. This helper
-        falls back to tkinter (stdlib) for a native Windows dialog with the
-        right filters. If tkinter fails to load for any reason, we degrade
-        to the LichtFeld dialog.
-        """
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
+        so dual-fisheye captures can't be selected through it.
 
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
+        Tkinter isn't available in LichtFeld's embedded Python (vcpkg build
+        doesn't include `_tkinter`), so we go straight to the Win32 common
+        dialog via comdlg32.GetOpenFileNameW (ctypes). On non-Windows or if
+        that fails for any reason, we degrade to LichtFeld's dialog.
+        """
+        if os.name == "nt":
             try:
-                path = filedialog.askopenfilename(
+                return _open_file_via_win32(
                     title=title,
-                    filetypes=[
+                    filters=[
                         ("All supported video",
-                         "*.mp4 *.mov *.osv *.insv *.avi *.mkv *.360"),
-                        ("Equirectangular video", "*.mp4 *.mov *.avi *.mkv"),
+                         "*.mp4;*.mov;*.osv;*.insv;*.avi;*.mkv;*.360"),
+                        ("Equirectangular video", "*.mp4;*.mov;*.avi;*.mkv"),
                         ("DJI Osmo 360 (.osv)", "*.osv"),
                         ("Insta360 (.insv)", "*.insv"),
                         ("DJI 360 series (.360)", "*.360"),
                         ("All files", "*.*"),
                     ],
                 )
-            finally:
-                root.destroy()
-            return path or ""
-        except Exception as exc:
-            logger.warning(
-                "tkinter file dialog failed (%s); falling back to "
-                "LichtFeld dialog (no .osv/.insv support)", exc,
-            )
-            return lf.ui.open_video_file_dialog()
+            except Exception as exc:
+                logger.warning(
+                    "Win32 GetOpenFileNameW failed (%s); falling back to "
+                    "LichtFeld dialog (no .osv/.insv support).", exc,
+                )
+        return lf.ui.open_video_file_dialog()
 
     def _on_select_video(self, handle, event, args):
         del handle, event, args
