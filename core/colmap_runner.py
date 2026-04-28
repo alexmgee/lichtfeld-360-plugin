@@ -134,6 +134,8 @@ class ColmapConfig:
     match_budget_tier: str = "default"
     max_num_matches_override: Optional[int] = None
     refine_focal_length: bool = True
+    refine_principal_point: bool = False  # set True for OPENCV_FISHEYE
+    refine_extra_params: bool = False     # set True for OPENCV_FISHEYE (refines k1-k4)
     vocab_tree_path: Optional[str] = None  # Required when matcher == "vocab_tree"
 
     @property
@@ -717,11 +719,13 @@ class ColmapRunner:
         # alone does the work.)
         _try_set_attr(pipeline_opts, "ba_refine_sensor_from_rig", False)
         _try_set_attr(pipeline_opts, "ba_refine_focal_length", self._config.refine_focal_length)
-        _try_set_attr(pipeline_opts, "ba_refine_principal_point", False)
-        _try_set_attr(pipeline_opts, "ba_refine_extra_params", False)
+        _try_set_attr(pipeline_opts, "ba_refine_principal_point", self._config.refine_principal_point)
+        _try_set_attr(pipeline_opts, "ba_refine_extra_params", self._config.refine_extra_params)
         _log(
             "Step 4: Rig BA — refine_sensor_from_rig=False, "
-            f"refine_focal_length={self._config.refine_focal_length}"
+            f"refine_focal_length={self._config.refine_focal_length}, "
+            f"refine_principal_point={self._config.refine_principal_point}, "
+            f"refine_extra_params={self._config.refine_extra_params}"
         )
 
         _log("Step 4: Calling pycolmap.incremental_mapping()")

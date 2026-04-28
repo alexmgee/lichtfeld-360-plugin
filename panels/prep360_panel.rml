@@ -41,14 +41,62 @@
 
     <!-- ── Always-visible input/output setup ───────────────── -->
     <div class="section-content">
-      <div data-if="show_no_video">
-        <button class="btn btn--primary btn--full" data-event-click="select_video">Select 360&#xb0; Video</button>
+      <!-- Source toggle (fisheye-only): single container vs pre-split files -->
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium" data-if="show_source_toggle">
+        <span class="prop-label">Source</span>
+        <select data-value="source_mode_idx">
+          <option value="0">Single file</option>
+          <option value="1">Two files (split)</option>
+        </select>
       </div>
-      <div data-if="show_video_loaded">
-        <div class="path-box">{{video_path_text}}</div>
-        <span class="status-text status-muted">{{video_info_text}}</span>
-        <button class="btn btn--secondary btn--full" data-event-click="clear_video">Clear</button>
+
+      <!-- Single-file picker (default for ERP/Pinhole; container for Fisheye) -->
+      <div data-if="show_single_picker">
+        <div data-if="show_no_video">
+          <button class="btn btn--primary btn--full" data-event-click="select_video">Select 360&#xb0; Video</button>
+        </div>
+        <div data-if="show_video_loaded">
+          <div class="path-box">{{video_path_text}}</div>
+          <span class="status-text status-muted">{{video_info_text}}</span>
+          <button class="btn btn--secondary btn--full" data-event-click="clear_video">Clear</button>
+        </div>
       </div>
+
+      <!-- Split-mode pickers (fisheye + source_mode=split) -->
+      <div data-if="show_split_pickers">
+        <div class="setting-row">
+          <span class="prop-label">Front lens</span>
+          <div class="path-browse-row">
+            <div class="path-box path-box--small">{{front_video_path_text}}</div>
+            <button class="btn btn--secondary btn--compact" data-event-click="select_front_video">Choose</button>
+            <button class="btn btn--secondary btn--compact" data-event-click="clear_front_video">Clear</button>
+          </div>
+        </div>
+        <div class="setting-row">
+          <span class="prop-label">Back lens</span>
+          <div class="path-browse-row">
+            <div class="path-box path-box--small">{{back_video_path_text}}</div>
+            <button class="btn btn--secondary btn--compact" data-event-click="select_back_video">Choose</button>
+            <button class="btn btn--secondary btn--compact" data-event-click="clear_back_video">Clear</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Camera family dropdown (split mode only — auto-detected in container mode) -->
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium" data-if="show_camera_family_select">
+        <span class="prop-label">Camera family</span>
+        <select data-value="camera_family_idx">
+          <option value="0">DJI Osmo 360</option>
+          <option value="1">Insta360</option>
+        </select>
+      </div>
+
+      <!-- Camera family detected status (container mode only) -->
+      <div class="setting-row" data-if="show_camera_family_detected">
+        <span class="prop-label"></span>
+        <span class="status-text status-muted">{{camera_family_detected_text}}</span>
+      </div>
+
       <div class="setting-row">
         <span class="prop-label">Output Path</span>
         <div class="path-browse-row">
@@ -61,6 +109,7 @@
         <select data-value="output_mode_idx">
           <option value="0" selected>Pinhole</option>
           <option value="1">ERP</option>
+          <option value="2">Fisheye</option>
         </select>
       </div>
       <div class="setting-row" data-if="show_output_mode_note">
@@ -105,6 +154,11 @@
           <option value="0">Tenengrad</option>
           <option value="1">Laplacian</option>
         </select>
+      </div>
+      <!-- Keep demuxed streams (fisheye + container only) -->
+      <div class="setting-row" data-if="show_keep_streams">
+        <span class="prop-label">Keep streams</span>
+        <input type="checkbox" data-checked="keep_streams" />
       </div>
     </div>
 
@@ -260,6 +314,10 @@
       <div class="setting-row" data-if="show_erp_scaffold_preset">
         <span class="prop-label">Preset</span>
         <span class="status-text status-muted">{{erp_scaffold_preset_text}}</span>
+      </div>
+      <div class="setting-row" data-if="show_fisheye_preset">
+        <span class="prop-label">Preset</span>
+        <span class="status-text status-muted">{{fisheye_preset_text}}</span>
       </div>
       <div class="setting-row">
         <span class="prop-label">Coverage</span>

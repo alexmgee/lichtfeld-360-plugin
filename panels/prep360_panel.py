@@ -74,8 +74,17 @@ MATCH_BUDGET_TIERS = ["fast", "balanced", "default", "high", "custom"]
 
 OUTPUT_SIZES = [960, 1280, 1536, 1920]
 
-OUTPUT_MODES = ["pinhole", "erp"]
-OUTPUT_MODE_LABELS = ["Pinhole", "ERP"]
+OUTPUT_MODES = ["pinhole", "erp", "fisheye"]
+OUTPUT_MODE_LABELS = ["Pinhole", "ERP", "Fisheye"]
+FISHEYE_OUTPUT_MODE_IDX = 2  # index of "fisheye" in OUTPUT_MODES — used by visibility checks
+
+# Source modes for dual fisheye input (fisheye output mode only)
+SOURCE_MODES = ["container", "split"]
+SOURCE_MODE_LABELS = ["Single file", "Two files (split)"]
+
+# Camera families for split mode (auto-detected for container; manual for split)
+CAMERA_FAMILIES = ["dji_osmo360", "insta360"]
+CAMERA_FAMILY_LABELS = ["DJI Osmo 360", "Insta360"]
 
 # Scrub field specifications — keys MUST match the data-value attribute in the RML
 SCRUB_FIELD_SPECS = {
@@ -194,6 +203,16 @@ class Plugin360Panel(lf.ui.Panel):
         self._output_mode_idx: int = 0  # default: Pinhole
         self._output_path: str = ""
 
+        # Dual fisheye state (only relevant when output_mode == "fisheye")
+        # Auto-detected camera family from .osv/.insv extension when in container
+        # mode; user-selected via dropdown in split mode.
+        self._source_mode_idx: int = 0  # 0=container, 1=split
+        self._camera_family_idx: int = 0  # 0=dji_osmo360, 1=insta360
+        self._camera_family_detected: Optional[str] = None  # set by detect_input_type()
+        self._front_video_path: str = ""
+        self._back_video_path: str = ""
+        self._keep_streams: bool = False
+
         # Processing state
         self._is_processing: bool = False
         self._processing_stage: str = ""
@@ -304,9 +323,14 @@ class Plugin360Panel(lf.ui.Panel):
 
         # -- Reframe --
         model.bind("preset_idx", lambda: str(self._preset_idx), self._set_preset)
-        model.bind_func("show_preset_select", lambda: self._output_mode_idx != 1)
+        # User-selectable preset dropdown only applies to Pinhole mode.
+        # ERP mode forces the 8-view scaffold preset; Fisheye mode forces
+        # OPENCV_FISHEYE PER_FOLDER (no view rig).
+        model.bind_func("show_preset_select", lambda: self._output_mode_idx == 0)
         model.bind_func("show_erp_scaffold_preset", lambda: self._output_mode_idx == 1)
         model.bind_func("erp_scaffold_preset_text", self._get_erp_scaffold_preset_text)
+        model.bind_func("show_fisheye_preset", lambda: self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX)
+        model.bind_func("fisheye_preset_text", self._get_fisheye_preset_text)
         model.bind_func("coverage_text", self._get_coverage_text)
         model.bind_func("total_output_text", self._get_total_output_text)
         model.bind("output_size_idx", lambda: str(self._output_size_idx), self._set_output_size_idx)
@@ -318,7 +342,31 @@ class Plugin360Panel(lf.ui.Panel):
 
         # -- Output --
         model.bind("output_mode_idx", lambda: str(self._output_mode_idx), self._set_output_mode)
-        model.bind_func("show_output_mode_note", lambda: self._output_mode_idx == 1)
+        model.bind_func("show_output_mode_note", lambda: self._output_mode_idx in (1, FISHEYE_OUTPUT_MODE_IDX))
+
+        # ── Fisheye-specific bindings ──
+        is_fisheye = lambda: self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX
+        is_split = lambda: is_fisheye() and self._source_mode_idx == 1
+        is_container = lambda: is_fisheye() and self._source_mode_idx == 0
+
+        model.bind_func("show_source_toggle", is_fisheye)
+        model.bind_func("show_split_pickers", is_split)
+        model.bind_func("show_single_picker", lambda: not is_split())
+        model.bind_func("show_camera_family_select", is_split)
+        model.bind_func("show_camera_family_detected", lambda: is_container() and self._camera_family_detected is not None)
+        model.bind_func("show_keep_streams", is_container)
+        model.bind("source_mode_idx", lambda: str(self._source_mode_idx), self._set_source_mode)
+        model.bind("camera_family_idx", lambda: str(self._camera_family_idx), self._set_camera_family)
+        model.bind("front_video_path", lambda: self._front_video_path or "(not set)", self._set_front_video_path_noop)
+        model.bind("back_video_path", lambda: self._back_video_path or "(not set)", self._set_back_video_path_noop)
+        model.bind_func("front_video_path_text", lambda: self._front_video_path or "(not set)")
+        model.bind_func("back_video_path_text", lambda: self._back_video_path or "(not set)")
+        model.bind_func("camera_family_detected_text", self._get_camera_family_detected_text)
+        model.bind("keep_streams", lambda: "true" if self._keep_streams else "false", self._set_keep_streams)
+        model.bind_event("select_front_video", self._on_select_front_video)
+        model.bind_event("select_back_video", self._on_select_back_video)
+        model.bind_event("clear_front_video", self._on_clear_front_video)
+        model.bind_event("clear_back_video", self._on_clear_back_video)
         model.bind_func("output_mode_note", self._get_output_mode_note)
         model.bind_func("output_path_display", lambda: self._output_path or "(not set)")
         model.bind_func("dataset_summary_text", self._get_dataset_summary)
@@ -399,6 +447,12 @@ class Plugin360Panel(lf.ui.Panel):
         return (
             self._video_loaded,
             self._video_path,
+            self._source_mode_idx,
+            self._camera_family_idx,
+            self._camera_family_detected,
+            self._front_video_path,
+            self._back_video_path,
+            self._keep_streams,
             self._extract_fps,
             self._extract_sharpness_idx,
             self._blur_metric_idx,
@@ -476,6 +530,16 @@ class Plugin360Panel(lf.ui.Panel):
             f"ERP 8-view staggered ({vc.total_views()} views, "
             "two rings at +/-35 degrees with the upper ring offset 45 degrees)"
         )
+
+    def _get_fisheye_preset_text(self) -> str:
+        return "OPENCV_FISHEYE × PER_FOLDER, no rig (forced)"
+
+    def _get_camera_family_detected_text(self) -> str:
+        if self._camera_family_detected is None:
+            return ""
+        family_to_label = dict(zip(CAMERA_FAMILIES, CAMERA_FAMILY_LABELS))
+        label = family_to_label.get(self._camera_family_detected, self._camera_family_detected)
+        return f"Camera family detected: {label}"
 
     @staticmethod
     def _format_sam3_status(status: str) -> str:
@@ -679,9 +743,15 @@ class Plugin360Panel(lf.ui.Panel):
         return COVERAGE_DESCRIPTIONS.get(name, "")
 
     def _get_total_output_text(self) -> str:
+        output_mode = self._get_output_mode()
+        if output_mode == "fisheye":
+            if not self._video_info:
+                return "2 fisheye images per pair (front + back)"
+            _interval_fish = 1.0 / max(0.1, self._extract_fps)
+            _pairs_fish = VideoAnalyzer.estimate_frame_count(self._video_info, _interval_fish)
+            return f"~{_pairs_fish} pairs x 2 = {2 * _pairs_fish:,} fisheye images"
         vc = self._get_current_view_config()
         views = vc.total_views()
-        output_mode = self._get_output_mode()
         if not self._video_info:
             if output_mode == "erp":
                 return f"{views} scaffold views per frame"
@@ -694,6 +764,34 @@ class Plugin360Panel(lf.ui.Panel):
         return f"{views} views \u00d7 {frames} frames = {total:,} images"
 
     def _get_dataset_summary(self) -> str:
+        output_mode = self._get_output_mode()
+        if output_mode == "fisheye":
+            family = self._camera_family_detected
+            if family is None and 0 <= self._camera_family_idx < len(CAMERA_FAMILIES):
+                family = CAMERA_FAMILIES[self._camera_family_idx]
+            family_label = (
+                CAMERA_FAMILY_LABELS[CAMERA_FAMILIES.index(family)]
+                if family in CAMERA_FAMILIES else (family or "unknown")
+            )
+            if self._source_mode_idx == 1:
+                if self._front_video_path and self._back_video_path:
+                    return (
+                        f"Fisheye (split) | {family_label} | "
+                        "OPENCV_FISHEYE \u00d7 2 cameras"
+                    )
+                return "Fisheye (split) \u2014 front + back not yet selected"
+            if not self._video_loaded:
+                return "No video loaded"
+            interval = 1.0 / max(0.1, self._extract_fps)
+            pairs = (
+                VideoAnalyzer.estimate_frame_count(self._video_info, interval)
+                if self._video_info else 0
+            )
+            return (
+                f"Fisheye | {family_label} | OPENCV_FISHEYE \u00d7 2 cameras | "
+                f"~{pairs:,} pairs"
+            )
+
         if not self._video_loaded:
             return "No video loaded"
         vc = self._get_current_view_config()
@@ -701,7 +799,7 @@ class Plugin360Panel(lf.ui.Panel):
         interval = 1.0 / max(0.1, self._extract_fps)
         frames = VideoAnalyzer.estimate_frame_count(self._video_info, interval) if self._video_info else 0
         total = views * frames
-        if self._get_output_mode() == "erp":
+        if output_mode == "erp":
             return (
                 f"ERP | {frames:,} ERP frames | "
                 f"{views}-view COLMAP scaffold | {self._output_size}px crops"
@@ -1469,10 +1567,48 @@ class Plugin360Panel(lf.ui.Panel):
                 "for 3DGUT training. This mode forces the dedicated 8-view "
                 "staggered scaffold preset."
             )
+        if self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX:
+            return (
+                "Outputs raw fisheye frames aligned via COLMAP's OPENCV_FISHEYE "
+                "camera model with PER_FOLDER mode. Each lens (front/back) is "
+                "calibrated independently by bundle adjustment."
+            )
         return ""
 
     def _set_output_path(self, val):
         self._output_path = str(val)
+
+    # ── Dual fisheye state setters ────────────────────────────
+
+    def _set_source_mode(self, val):
+        try:
+            idx = int(val)
+            if 0 <= idx < len(SOURCE_MODES):
+                self._source_mode_idx = idx
+        except (ValueError, TypeError):
+            pass
+
+    def _set_camera_family(self, val):
+        try:
+            idx = int(val)
+            if 0 <= idx < len(CAMERA_FAMILIES):
+                self._camera_family_idx = idx
+        except (ValueError, TypeError):
+            pass
+
+    def _set_keep_streams(self, val):
+        if isinstance(val, bool):
+            self._keep_streams = val
+        else:
+            self._keep_streams = str(val).lower() in ("true", "1", "yes", "on")
+
+    def _set_front_video_path_noop(self, val):
+        # Path is set by _on_select_front_video, not by user typing.
+        # This setter exists so model.bind() has a setter callback.
+        del val
+
+    def _set_back_video_path_noop(self, val):
+        del val
 
     # ── Section toggle ────────────────────────────────────────
 
@@ -1533,6 +1669,21 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _load_video(self, path: str):
         self._error_message = ""
+        # Auto-detect dual fisheye input from extension and flip Output Mode
+        # to Fisheye proactively so the right UI appears before VideoAnalyzer
+        # finishes (VideoAnalyzer also handles .osv/.insv via ffprobe).
+        from ..core.pipeline import detect_input_type
+
+        input_type, family = detect_input_type(path)
+        if input_type == "dual_fisheye":
+            self._output_mode_idx = FISHEYE_OUTPUT_MODE_IDX
+            self._source_mode_idx = 0  # container mode by default
+            self._camera_family_detected = family
+            if family in CAMERA_FAMILIES:
+                self._camera_family_idx = CAMERA_FAMILIES.index(family)
+        else:
+            self._camera_family_detected = None
+
         try:
             analyzer = VideoAnalyzer()
             info = analyzer.analyze(path)
@@ -1571,6 +1722,43 @@ class Plugin360Panel(lf.ui.Panel):
         self._video_info = None
         self._video_info_text = ""
         self._error_message = ""
+        # Also clear fisheye-specific detection state
+        self._camera_family_detected = None
+        if self._handle:
+            self._handle.dirty_all()
+
+    # ── Split-mode video selection (fisheye + source_mode=split) ──
+
+    def _on_select_front_video(self, handle, event, args):
+        del handle, event, args
+        path = lf.ui.open_video_file_dialog()
+        if not path:
+            return
+        self._front_video_path = path
+        # Auto-set output path next to front video if not already set
+        if not self._output_path:
+            self._output_path = str(Path(path).parent / f"{Path(path).stem}_LFS360")
+        if self._handle:
+            self._handle.dirty_all()
+
+    def _on_select_back_video(self, handle, event, args):
+        del handle, event, args
+        path = lf.ui.open_video_file_dialog()
+        if not path:
+            return
+        self._back_video_path = path
+        if self._handle:
+            self._handle.dirty_all()
+
+    def _on_clear_front_video(self, handle, event, args):
+        del handle, event, args
+        self._front_video_path = ""
+        if self._handle:
+            self._handle.dirty_all()
+
+    def _on_clear_back_video(self, handle, event, args):
+        del handle, event, args
+        self._back_video_path = ""
         if self._handle:
             self._handle.dirty_all()
 
@@ -1602,7 +1790,21 @@ class Plugin360Panel(lf.ui.Panel):
     def _start_pipeline(self):
         if self._is_processing:
             return
-        if not self._video_loaded or not self._video_path:
+        # In Fisheye + split mode the user provides front + back files instead of
+        # one container; the standard "video loaded" check doesn't apply.
+        is_fisheye_split = (
+            self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX
+            and self._source_mode_idx == 1
+        )
+        if is_fisheye_split:
+            if not self._front_video_path or not self._back_video_path:
+                self._error_message = (
+                    "Split mode requires both front and back video files"
+                )
+                if self._handle:
+                    self._handle.dirty_all()
+                return
+        elif not self._video_loaded or not self._video_path:
             self._error_message = "No video loaded"
             if self._handle:
                 self._handle.dirty_all()
@@ -1651,6 +1853,27 @@ class Plugin360Panel(lf.ui.Panel):
             colmap_match_budget_tier=match_budget_tier,
             colmap_max_num_matches=self._colmap_max_num_matches,
             output_mode=output_mode,
+            # Dual fisheye fields (only meaningful when output_mode == "fisheye")
+            input_type=("dual_fisheye" if output_mode == "fisheye" else "erp"),
+            camera_family=(
+                self._camera_family_detected
+                if (output_mode == "fisheye" and self._source_mode_idx == 0)
+                else (
+                    CAMERA_FAMILIES[self._camera_family_idx]
+                    if (output_mode == "fisheye"
+                        and 0 <= self._camera_family_idx < len(CAMERA_FAMILIES))
+                    else None
+                )
+            ),
+            source_mode=(
+                SOURCE_MODES[self._source_mode_idx]
+                if (output_mode == "fisheye"
+                    and 0 <= self._source_mode_idx < len(SOURCE_MODES))
+                else "container"
+            ),
+            front_video_path=self._front_video_path,
+            back_video_path=self._back_video_path,
+            keep_streams=self._keep_streams,
         )
 
         self._is_processing = True

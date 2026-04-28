@@ -85,8 +85,24 @@ class PipelineConfig:
     colmap_match_budget_tier: str = "default"
     colmap_max_num_matches: Optional[int] = None
 
-    # Output mode: "pinhole" = COLMAP dataset, "erp" = transforms.json
+    # Output mode: "pinhole" = COLMAP dataset, "erp" = transforms.json,
+    #              "fisheye" = OPENCV_FISHEYE COLMAP dataset (phase 1) /
+    #              fisheye-native transforms.json (phase 2+)
     output_mode: str = "pinhole"
+
+    # Dual fisheye input (phase 1)
+    # input_type: "erp" (default) or "dual_fisheye"
+    # camera_family: "dji_osmo360" | "insta360" | None
+    # source_mode: "container" (single .osv/.insv) or "split" (two pre-split videos)
+    # When source_mode == "split", front_video_path / back_video_path are used and
+    # the top-level video_path is ignored. Auto-set by detect_input_type() when
+    # video_path is loaded via the panel; can be overridden by the user.
+    input_type: str = "erp"
+    camera_family: Optional[str] = None
+    source_mode: str = "container"
+    front_video_path: str = ""
+    back_video_path: str = ""
+    keep_streams: bool = False  # retain demuxed front.mp4/back.mp4 alongside output
 
 
 @dataclass
@@ -115,6 +131,22 @@ class PipelineResult:
     mask_diagnostics_path: str = ""
     elapsed_sec: float = 0.0
     error: str = ""
+
+
+def detect_input_type(video_path: str) -> tuple[str, Optional[str]]:
+    """Auto-detect (input_type, camera_family) from file extension.
+
+    Returns:
+        ("dual_fisheye", "dji_osmo360") for .osv (DJI Osmo 360)
+        ("dual_fisheye", "insta360") for .insv (file pair OR X4/X5 single-file)
+        ("erp", None) for .mp4 / .mov / other single-stream video
+    """
+    suffix = Path(video_path).suffix.lower()
+    if suffix == ".osv":
+        return "dual_fisheye", "dji_osmo360"
+    if suffix == ".insv":
+        return "dual_fisheye", "insta360"
+    return "erp", None
 
 
 def _build_runtime_view_config(cfg: PipelineConfig) -> ViewConfig:
@@ -268,6 +300,12 @@ class PipelineJob:
                 logger.exception("on_complete callback raised")
 
     def _run_stages(self, cfg: PipelineConfig, t0: float) -> PipelineResult:
+        # Phase 1 dispatch shim — dual fisheye path is a separate leaf method
+        # (Style 2 leaf-functions refactor for the ERP paths is deferred to
+        # a follow-up; see spec §4.2.)
+        if cfg.input_type == "dual_fisheye":
+            return self._run_fisheye_native(cfg, t0)
+
         out = Path(cfg.output_dir)
         out.mkdir(parents=True, exist_ok=True)
 
@@ -742,5 +780,206 @@ class PipelineJob:
             ),
             video_backend_error=mask_result.video_backend_error if mask_result else "",
             mask_diagnostics_path=mask_result.diagnostics_path if mask_result else "",
+            elapsed_sec=elapsed,
+        )
+
+    # ------------------------------------------------------------------
+    # Dual fisheye native path (phase 1: extract → COLMAP only)
+    # ------------------------------------------------------------------
+
+    def _run_fisheye_native(self, cfg: PipelineConfig, t0: float) -> PipelineResult:
+        """Phase 1 dual fisheye pipeline: paired extraction → COLMAP.
+
+        Skips masking, rig config (use_rig=False default), and the fisheye
+        transforms.json output writer. Those land in subsequent phases.
+        Goal: prove the OPENCV_FISHEYE + PER_FOLDER + no-rig path produces
+        a valid reconstruction on real .osv / .insv data.
+        """
+        import shutil
+
+        from .paired_extractor import PairedExtractorConfig, extract_dual_fisheye
+        from .fisheye_priors import infer_fisheye_camera_params
+
+        out = Path(cfg.output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        extracted_dir = out / "extracted"
+        images_dir = out / "images"
+
+        # ===================================================================
+        # Stage 1: Paired sharpest-frame extraction (0-50%)
+        # ===================================================================
+        self._update("extraction", 0.0, "Extracting paired fisheye frames...")
+
+        # Map plugin's extraction_sharpness → paired extractor mode/scene flags.
+        # "none"  → fixed interval, no scoring
+        # "basic" → sharpest, no scene detection
+        # "better"/"best" → sharpest + scene detection
+        if cfg.extraction_sharpness == "none":
+            extract_mode = "fixed"
+            scene_detection = False
+        else:
+            extract_mode = "sharpest"
+            scene_detection = cfg.extraction_sharpness in ("better", "best")
+
+        extract_config = PairedExtractorConfig(
+            mode=extract_mode,
+            scoring_method=cfg.blur_metric,  # "tenengrad" or "laplacian"
+            scene_detection=scene_detection,
+            interval_sec=cfg.interval,
+            quality=cfg.quality,
+            scale_width=cfg.blur_scale_width,
+            scene_threshold=cfg.scene_threshold,
+            start_sec=cfg.start_sec,
+            end_sec=cfg.end_sec,
+        )
+
+        def _extract_progress(cur: int, total: int, msg: str) -> None:
+            pct = (cur / max(total, 1)) * 50
+            self._update("extraction", pct, msg)
+
+        if cfg.source_mode == "split":
+            # User-provided pre-split front + back files (e.g. graded .mp4s
+            # from Resolve). No demux step; PairedExtractor handles it
+            # directly. keep_streams is ignored (no demux to keep).
+            from .paired_extractor import PairedExtractor
+
+            if not cfg.front_video_path or not cfg.back_video_path:
+                raise RuntimeError(
+                    "source_mode='split' requires both front_video_path "
+                    "and back_video_path to be set"
+                )
+            extract_result = PairedExtractor().extract(
+                front_video=cfg.front_video_path,
+                back_video=cfg.back_video_path,
+                output_dir=str(extracted_dir),
+                config=extract_config,
+                progress_callback=_extract_progress,
+                cancel_check=self._check_cancel,
+                log=lambda m: logger.info("[paired_extract] %s", m),
+            )
+        else:
+            # Container mode: single .osv / .insv input. extract_dual_fisheye
+            # dispatches on container shape (DJI .osv, Insta360 X4/X5
+            # single-file, or older Insta360 _00_/_10_ pair).
+            extract_result = extract_dual_fisheye(
+                cfg.video_path,
+                str(extracted_dir),
+                config=extract_config,
+                keep_streams=cfg.keep_streams,
+                progress_callback=_extract_progress,
+                cancel_check=self._check_cancel,
+                log=lambda m: logger.info("[paired_extract] %s", m),
+            )
+
+        if not extract_result.success:
+            raise RuntimeError(
+                f"Paired fisheye extraction failed: {extract_result.error}"
+            )
+
+        num_pairs = extract_result.pair_count
+        logger.info("Phase 1: extracted %d frame pairs", num_pairs)
+
+        if self._check_cancel():
+            raise RuntimeError("Cancelled")
+
+        # ===================================================================
+        # Stage 2 (masking): SKIPPED in phase 1
+        # ===================================================================
+
+        # ===================================================================
+        # Stage 3: Move frames extracted/{front,back}/ → images/{front,back}/
+        # ===================================================================
+        # Per spec §4.10: final layout has images/front/ and images/back/.
+        # Per spec §6: "Copy frames to images/front/, images/back/" — we move
+        # (rename) since extracted/ doesn't need to persist in phase 1.
+        self._update("staging", 50.0, "Staging images for COLMAP...")
+        images_dir.mkdir(parents=True, exist_ok=True)
+        for lens in ("front", "back"):
+            src = extracted_dir / lens
+            dst = images_dir / lens
+            if not src.is_dir():
+                raise RuntimeError(
+                    f"Extraction did not produce {lens}/ subdirectory at {src}"
+                )
+            if dst.exists():
+                shutil.rmtree(dst, ignore_errors=True)
+            src.rename(dst)
+
+        # ===================================================================
+        # Stage 4 (rig config): SKIPPED in phase 1 (use_rig=False per spec)
+        # ===================================================================
+        # ColmapRunner detects the missing rig_config.json and gracefully
+        # skips the rig-application step (colmap_runner.py:602-619).
+
+        # ===================================================================
+        # Stage 5: COLMAP — OPENCV_FISHEYE, PER_FOLDER, no rig (50-95%)
+        # ===================================================================
+        self._update("colmap", 55.0, "Running COLMAP (OPENCV_FISHEYE, PER_FOLDER)...")
+
+        camera_params = infer_fisheye_camera_params(cfg.camera_family)
+        if camera_params is None:
+            logger.info(
+                "No calibrated prior for camera_family=%r — falling back to "
+                "COLMAP's default_focal_length_factor", cfg.camera_family,
+            )
+
+        colmap_config = ColmapConfig(
+            preset=cfg.colmap_preset,
+            camera_model="OPENCV_FISHEYE",
+            camera_params=camera_params,
+            default_focal_length_factor=None if camera_params else 0.5,
+            matcher=cfg.colmap_matcher,
+            match_budget_tier=cfg.colmap_match_budget_tier,
+            max_num_matches_override=cfg.colmap_max_num_matches,
+            refine_focal_length=True,
+            refine_principal_point=True,   # fisheye refines pp during BA
+            refine_extra_params=True,      # fisheye refines k1-k4 during BA
+        )
+
+        def _colmap_progress(stage: str, pct: float, msg: str) -> None:
+            self._update("colmap", 55 + pct * 40, msg)
+
+        # Pass a non-existent rig path; ColmapRunner skips rig step gracefully.
+        rig_config_path = str(out / "rig_config.json")  # intentionally absent
+
+        runner = ColmapRunner(
+            images_dir=str(images_dir),
+            output_dir=str(out),
+            rig_config_path=rig_config_path,
+            mask_path=None,  # phase 1 skips masking
+            config=colmap_config,
+            on_progress=_colmap_progress,
+            cancel_check=self._check_cancel,
+        )
+
+        colmap_result = runner.run()
+        if not colmap_result.success:
+            raise RuntimeError(f"COLMAP failed: {colmap_result.error}")
+
+        # ===================================================================
+        # Stage 6 (transforms output): SKIPPED in phase 1
+        # ===================================================================
+        # Phase 2 will add write_fisheye_transforms in transforms_writer.py.
+        # For now the dataset_path is the COLMAP reconstruction directory.
+
+        self._update("complete", 100.0, "Phase 1 complete: COLMAP reconstruction ready")
+
+        elapsed = time.time() - t0
+        return PipelineResult(
+            success=True,
+            dataset_path=colmap_result.reconstruction_path,
+            output_mode="fisheye",
+            num_source_frames=num_pairs,
+            num_output_images=2 * num_pairs,  # one per lens per pair
+            num_aligned_cameras=colmap_result.num_registered_images,
+            num_registered_frames=colmap_result.num_registered_frames,
+            num_complete_frames=colmap_result.num_complete_frames,
+            num_partial_frames=colmap_result.num_partial_frames,
+            views_per_frame=colmap_result.views_per_frame,
+            expected_images_by_view=colmap_result.expected_images_by_view,
+            registered_images_by_view=colmap_result.registered_images_by_view,
+            partial_frame_examples=colmap_result.partial_frame_examples,
+            dropped_frame_examples=colmap_result.dropped_frame_examples,
+            preset_signature=f"dual_fisheye | family={cfg.camera_family or 'unknown'}",
             elapsed_sec=elapsed,
         )
