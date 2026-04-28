@@ -41,25 +41,19 @@
 
     <!-- ── Always-visible input/output setup ───────────────── -->
     <div class="section-content">
-      <!-- Source toggle (fisheye-only): single container vs pre-split files -->
-      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium" data-if="show_source_toggle">
-        <span class="prop-label">Source</span>
-        <select data-value="source_mode_idx">
-          <option value="0">Single file</option>
-          <option value="1">Two files (split)</option>
-        </select>
+
+      <!-- Empty state: two entry buttons (single 360 video, or pre-split front+back) -->
+      <div data-if="show_split_entry">
+        <button class="btn btn--primary btn--full" data-event-click="select_video">Select 360&#xb0; Video</button>
+        <button class="btn btn--secondary btn--full" data-event-click="enter_split_mode">Select Front + Back Lens Videos</button>
+        <span class="status-text status-muted">Single file: ERP video, .osv (DJI), or .insv (Insta360). Two-file mode: pre-split fisheye lens pair (e.g. graded .mp4s).</span>
       </div>
 
-      <!-- Single-file picker (default for ERP/Pinhole; container for Fisheye) -->
-      <div data-if="show_single_picker">
-        <div data-if="show_no_video">
-          <button class="btn btn--primary btn--full" data-event-click="select_video">Select 360&#xb0; Video</button>
-        </div>
-        <div data-if="show_video_loaded">
-          <div class="path-box">{{video_path_text}}</div>
-          <span class="status-text status-muted">{{video_info_text}}</span>
-          <button class="btn btn--secondary btn--full" data-event-click="clear_video">Clear</button>
-        </div>
+      <!-- Single-file picker, shown after a 360 video is loaded -->
+      <div data-if="show_video_loaded">
+        <div class="path-box">{{video_path_text}}</div>
+        <span class="status-text status-muted">{{video_info_text}}</span>
+        <button class="btn btn--secondary btn--full" data-event-click="clear_video">Clear</button>
       </div>
 
       <!-- Split-mode pickers (fisheye + source_mode=split) -->
@@ -80,6 +74,7 @@
             <button class="btn btn--secondary btn--compact" data-event-click="clear_back_video">Clear</button>
           </div>
         </div>
+        <button class="btn btn--secondary btn--full btn--compact" data-event-click="exit_split_mode">&#x2190; Use single 360&#xb0; video instead</button>
       </div>
 
       <!-- Camera family dropdown (split mode only — auto-detected in container mode) -->

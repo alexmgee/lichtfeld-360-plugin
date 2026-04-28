@@ -345,17 +345,26 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("show_output_mode_note", lambda: self._output_mode_idx in (1, FISHEYE_OUTPUT_MODE_IDX))
 
         # ── Fisheye-specific bindings ──
+        # Split mode is determined by direct user choice (the "Front + Back"
+        # button on the empty state) rather than nested under Output Mode.
+        # output_mode_idx still flips to Fisheye automatically when split is
+        # active or when the user loads a .osv/.insv container.
         is_fisheye = lambda: self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX
-        is_split = lambda: is_fisheye() and self._source_mode_idx == 1
-        is_container = lambda: is_fisheye() and self._source_mode_idx == 0
+        is_split = lambda: self._source_mode_idx == 1
+        is_fisheye_container = lambda: is_fisheye() and not is_split()
 
-        model.bind_func("show_source_toggle", is_fisheye)
+        # Empty-state visibility: show two entry buttons when nothing loaded
+        # (no single video AND not in split mode).
+        empty_state = lambda: not self._video_loaded and not is_split()
+        model.bind_func("show_split_entry", empty_state)
+        # Single-file picker visible when video loaded (regular flow) or
+        # when nothing loaded and not in split mode (so the "Select 360°
+        # Video" half of the empty state still works).
         model.bind_func("show_split_pickers", is_split)
         model.bind_func("show_single_picker", lambda: not is_split())
         model.bind_func("show_camera_family_select", is_split)
-        model.bind_func("show_camera_family_detected", lambda: is_container() and self._camera_family_detected is not None)
-        model.bind_func("show_keep_streams", is_container)
-        model.bind("source_mode_idx", lambda: str(self._source_mode_idx), self._set_source_mode)
+        model.bind_func("show_camera_family_detected", lambda: is_fisheye_container() and self._camera_family_detected is not None)
+        model.bind_func("show_keep_streams", is_fisheye_container)
         model.bind("camera_family_idx", lambda: str(self._camera_family_idx), self._set_camera_family)
         model.bind("front_video_path", lambda: self._front_video_path or "(not set)", self._set_front_video_path_noop)
         model.bind("back_video_path", lambda: self._back_video_path or "(not set)", self._set_back_video_path_noop)
@@ -367,6 +376,8 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_event("select_back_video", self._on_select_back_video)
         model.bind_event("clear_front_video", self._on_clear_front_video)
         model.bind_event("clear_back_video", self._on_clear_back_video)
+        model.bind_event("enter_split_mode", self._on_enter_split_mode)
+        model.bind_event("exit_split_mode", self._on_exit_split_mode)
         model.bind_func("output_mode_note", self._get_output_mode_note)
         model.bind_func("output_path_display", lambda: self._output_path or "(not set)")
         model.bind_func("dataset_summary_text", self._get_dataset_summary)
@@ -1660,12 +1671,79 @@ class Plugin360Panel(lf.ui.Panel):
 
     # ── Video selection ───────────────────────────────────────
 
+    @staticmethod
+    def _open_video_file_dialog_ext(title: str = "Select Video") -> str:
+        """File dialog accepting .mp4 / .mov / .osv / .insv / .360.
+
+        LichtFeld's built-in `lf.ui.open_video_file_dialog()` doesn't accept
+        an extension filter — `.osv` and `.insv` aren't in its allowed list,
+        so dual-fisheye captures can't be selected through it. This helper
+        falls back to tkinter (stdlib) for a native Windows dialog with the
+        right filters. If tkinter fails to load for any reason, we degrade
+        to the LichtFeld dialog.
+        """
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            try:
+                path = filedialog.askopenfilename(
+                    title=title,
+                    filetypes=[
+                        ("All supported video",
+                         "*.mp4 *.mov *.osv *.insv *.avi *.mkv *.360"),
+                        ("Equirectangular video", "*.mp4 *.mov *.avi *.mkv"),
+                        ("DJI Osmo 360 (.osv)", "*.osv"),
+                        ("Insta360 (.insv)", "*.insv"),
+                        ("DJI 360 series (.360)", "*.360"),
+                        ("All files", "*.*"),
+                    ],
+                )
+            finally:
+                root.destroy()
+            return path or ""
+        except Exception as exc:
+            logger.warning(
+                "tkinter file dialog failed (%s); falling back to "
+                "LichtFeld dialog (no .osv/.insv support)", exc,
+            )
+            return lf.ui.open_video_file_dialog()
+
     def _on_select_video(self, handle, event, args):
         del handle, event, args
-        path = lf.ui.open_video_file_dialog()
+        path = self._open_video_file_dialog_ext("Select 360° Video")
         if not path:
             return
         self._load_video(path)
+
+    def _on_enter_split_mode(self, handle, event, args):
+        """Switch to fisheye + split-files input mode without opening any
+        dialog. The user clicks Choose on each picker separately afterward.
+        """
+        del handle, event, args
+        self._output_mode_idx = FISHEYE_OUTPUT_MODE_IDX
+        self._source_mode_idx = 1  # "split"
+        # Reset any prior single-file state so the UI doesn't show stale info.
+        self._video_loaded = False
+        self._video_path = ""
+        self._video_info = None
+        self._video_info_text = ""
+        self._camera_family_detected = None
+        self._error_message = ""
+        if self._handle:
+            self._handle.dirty_all()
+
+    def _on_exit_split_mode(self, handle, event, args):
+        """Leave split mode and return to single-file empty state."""
+        del handle, event, args
+        self._source_mode_idx = 0  # "container"
+        self._front_video_path = ""
+        self._back_video_path = ""
+        if self._handle:
+            self._handle.dirty_all()
 
     def _load_video(self, path: str):
         self._error_message = ""
@@ -1731,7 +1809,7 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _on_select_front_video(self, handle, event, args):
         del handle, event, args
-        path = lf.ui.open_video_file_dialog()
+        path = self._open_video_file_dialog_ext("Select Front Lens Video")
         if not path:
             return
         self._front_video_path = path
@@ -1743,7 +1821,7 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _on_select_back_video(self, handle, event, args):
         del handle, event, args
-        path = lf.ui.open_video_file_dialog()
+        path = self._open_video_file_dialog_ext("Select Back Lens Video")
         if not path:
             return
         self._back_video_path = path
