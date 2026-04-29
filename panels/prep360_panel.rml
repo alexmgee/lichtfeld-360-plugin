@@ -39,6 +39,19 @@
   <!-- ══════════════════════════════════════════════════════════ -->
   <div data-if="show_idle">
 
+    <!-- ── Last-run summary (visible after success or failure) ── -->
+    <div data-if="show_completion">
+      <div class="processing-block">
+        <div class="processing-header">
+          <span class="status-text status-muted">Last Run</span>
+          <button class="btn btn--secondary btn--compact" data-event-click="clear_completion_report">Dismiss</button>
+        </div>
+        <span class="status-text">{{completion_summary_text}}</span>
+        <div class="completion-report processing-report">{{completion_report_text}}</div>
+      </div>
+    </div>
+
+
     <!-- ── Always-visible input/output setup ───────────────── -->
     <div class="section-content">
 

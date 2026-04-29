@@ -917,23 +917,45 @@ class PipelineJob:
         self._update("colmap", 55.0, "Running COLMAP (OPENCV_FISHEYE, PER_FOLDER)...")
 
         camera_params = infer_fisheye_camera_params(cfg.camera_family)
-        if camera_params is None:
+        has_prior = camera_params is not None
+        if not has_prior:
             logger.info(
-                "No calibrated prior for camera_family=%r — falling back to "
-                "COLMAP's default_focal_length_factor", cfg.camera_family,
+                "No calibrated prior for camera_family=%r — using fisheye-"
+                "appropriate default_focal_length_factor=0.30 and locking "
+                "refine_principal_point + refine_extra_params to prevent BA "
+                "runaway from a bad starting point",
+                cfg.camera_family,
             )
+
+        # Default focal-length factor:
+        # - Pinhole heuristic is 0.5 * image_width (roughly 90° FOV).
+        # - For an equidistant ~190° fisheye: f = (image_width/2) / radians(95°)
+        #   ≈ 0.30 * image_width. Using 0.5 starts BA at a focal length 65%
+        #   too high, which on a few-image starter set leads to runaway
+        #   intrinsics during refinement.
+        FISHEYE_DEFAULT_FOCAL_FACTOR = 0.30
 
         colmap_config = ColmapConfig(
             preset=cfg.colmap_preset,
             camera_model="OPENCV_FISHEYE",
             camera_params=camera_params,
-            default_focal_length_factor=None if camera_params else 0.5,
+            default_focal_length_factor=None if has_prior else FISHEYE_DEFAULT_FOCAL_FACTOR,
             matcher=cfg.colmap_matcher,
             match_budget_tier=cfg.colmap_match_budget_tier,
             max_num_matches_override=cfg.colmap_max_num_matches,
             refine_focal_length=True,
-            refine_principal_point=True,   # fisheye refines pp during BA
-            refine_extra_params=True,      # fisheye refines k1-k4 during BA
+            # Only refine principal point + distortion when we start from a
+            # known-good prior. With no prior, BA can refine garbage values
+            # if the initial image set registers sparsely.
+            refine_principal_point=has_prior,
+            refine_extra_params=has_prior,
+            # Bump SIFT density for fisheye. Default 2048 features at 1600px
+            # is too sparse for 3000-3840px wide raw fisheye where many
+            # keypoints land in heavily-distorted edge regions and can't
+            # match across views. 8192 at full image size matches the
+            # integration report's recommendation for fisheye SfM.
+            sift_max_num_features_override=8192,
+            sift_max_image_size_override=3840,
         )
 
         def _colmap_progress(stage: str, pct: float, msg: str) -> None:

@@ -134,16 +134,25 @@ class ColmapConfig:
     match_budget_tier: str = "default"
     max_num_matches_override: Optional[int] = None
     refine_focal_length: bool = True
-    refine_principal_point: bool = False  # set True for OPENCV_FISHEYE
-    refine_extra_params: bool = False     # set True for OPENCV_FISHEYE (refines k1-k4)
+    refine_principal_point: bool = False  # set True for OPENCV_FISHEYE w/ a prior
+    refine_extra_params: bool = False     # set True for OPENCV_FISHEYE w/ a prior
     vocab_tree_path: Optional[str] = None  # Required when matcher == "vocab_tree"
+    # Override knobs for the fisheye path (where 2048 features at 1600px is
+    # too sparse for 3840-wide raw fisheye). When None, fall back to the
+    # preset-based defaults below.
+    sift_max_num_features_override: Optional[int] = None
+    sift_max_image_size_override: Optional[int] = None
 
     @property
     def sift_max_image_size(self) -> int:
+        if self.sift_max_image_size_override is not None:
+            return self.sift_max_image_size_override
         return 1600 if self.preset == "normal" else 1200
 
     @property
     def sift_max_num_features(self) -> int:
+        if self.sift_max_num_features_override is not None:
+            return self.sift_max_num_features_override
         return 2048 if self.preset == "normal" else 1536
 
     @property

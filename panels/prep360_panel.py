@@ -496,6 +496,15 @@ class Plugin360Panel(lf.ui.Panel):
         # -- Processing --
         model.bind_func("show_processing", lambda: self._is_processing)
         model.bind_func("show_idle", lambda: not self._is_processing)
+        # Post-run summary: visible after a run completes (success or failure)
+        # until the user starts another run (which clears _completion_summary).
+        model.bind_func(
+            "show_completion",
+            lambda: not self._is_processing and bool(self._completion_summary),
+        )
+        model.bind_func("completion_summary_text", lambda: self._completion_summary)
+        model.bind_func("completion_report_text", lambda: self._completion_report)
+        model.bind_event("clear_completion_report", self._on_clear_completion_report)
         model.bind_func("processing_stage_text", lambda: self._processing_stage)
         model.bind_func("processing_status_text", lambda: self._processing_status)
         model.bind_func("processing_progress_value", lambda: f"{self._processing_progress / 100:.4f}")
@@ -858,6 +867,8 @@ class Plugin360Panel(lf.ui.Panel):
         return f"Estimated frames   ~{base}"
 
     def _get_coverage_text(self) -> str:
+        if self._get_output_mode() == "fisheye":
+            return "2 fisheye images per pair (front + back, native resolution)"
         name = resolve_view_preset_name(
             self._get_selected_preset_name(),
             self._get_output_mode(),
@@ -1901,6 +1912,13 @@ class Plugin360Panel(lf.ui.Panel):
         if self._handle:
             self._handle.dirty_all()
 
+    def _on_clear_completion_report(self, handle, event, args):
+        del handle, event, args
+        self._completion_summary = ""
+        self._completion_report = ""
+        if self._handle:
+            self._handle.dirty_all()
+
     def _on_clear_video(self, handle, event, args):
         del handle, event, args
         self._video_loaded = False
@@ -2071,6 +2089,25 @@ class Plugin360Panel(lf.ui.Panel):
         self._completion_report = ""
         if output_mode == "erp":
             self._append_processing_log("Preset: ERP 8-view staggered (forced)")
+        elif output_mode == "fisheye":
+            family = (
+                self._camera_family_detected
+                or (CAMERA_FAMILIES[self._camera_family_idx]
+                    if 0 <= self._camera_family_idx < len(CAMERA_FAMILIES)
+                    else "unknown")
+            )
+            family_label = (
+                CAMERA_FAMILY_LABELS[CAMERA_FAMILIES.index(family)]
+                if family in CAMERA_FAMILIES else family
+            )
+            self._append_processing_log(
+                "Preset: OPENCV_FISHEYE x PER_FOLDER (no rig)"
+            )
+            self._append_processing_log(f"Camera family: {family_label}")
+            if self._source_mode_idx == 1:
+                self._append_processing_log(
+                    f"Source: split files (front + back)"
+                )
         else:
             self._append_processing_log(f"Preset: {PRESET_LABELS[self._preset_idx]}")
         self._append_processing_log(
