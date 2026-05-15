@@ -300,6 +300,14 @@
           <span class="prop-label">Prompts</span>
           <input type="text" data-value="mask_prompts_str" />
         </div>
+        <!-- Fisheye circle mask margin (fisheye mode only) -->
+        <div class="setting-row setting-row--aligned" data-if="show_fisheye_circle_margin">
+          <span class="setting-row__label-col">Circle Margin</span>
+          <div class="setting-row__control-col setting-row__control-col--slider">
+            <input type="range" class="setting-slider" data-value="fisheye_circle_margin_str" min="0" max="15" step="1" />
+            <span class="slider-value">{{fisheye_circle_margin_str}}%</span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -340,7 +348,55 @@
         <select data-value="colmap_matcher_idx">
           <option value="0">Sequential</option>
           <option value="1">Exhaustive</option>
+          <option value="2">Vocab Tree</option>
         </select>
+      </div>
+      <!-- Vocab tree file path (shown when Vocab Tree selected) -->
+      <div class="setting-row" data-if="show_vocab_tree_path">
+        <span class="prop-label">Tree File</span>
+        <div class="path-browse-row">
+          <div class="path-box path-box--small">{{vocab_tree_path_display}}</div>
+          <button class="btn btn--secondary btn--compact" data-event-click="browse_vocab_tree">Choose</button>
+        </div>
+      </div>
+      <div class="setting-row" data-if="show_vocab_tree_missing">
+        <span class="prop-label"></span>
+        <span class="status-text status-muted">Vocab tree file required. Download the standard 32K tree or choose a local file.</span>
+      </div>
+      <!-- COLMAP 4.1 feature controls -->
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
+        <span class="prop-label">Features</span>
+        <select data-value="feature_type_idx">
+          <option value="0" selected>SIFT</option>
+          <option value="1">ALIKED N16 (rot)</option>
+          <option value="2">ALIKED N32</option>
+        </select>
+      </div>
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
+        <span class="prop-label">Matcher Type</span>
+        <select data-value="matcher_type_idx">
+          <option value="0" selected>Bruteforce</option>
+          <option value="1">LightGlue</option>
+        </select>
+      </div>
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
+        <span class="prop-label">Mapper</span>
+        <select data-value="mapper_idx">
+          <option value="0" selected>Incremental</option>
+          <option value="1">Global (GLOMAP)</option>
+        </select>
+      </div>
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
+        <span class="prop-label">BA Solver</span>
+        <select data-value="ba_solver_idx">
+          <option value="0" selected>Auto</option>
+          <option value="1">Ceres</option>
+          <option value="2">Caspar (GPU)</option>
+        </select>
+      </div>
+      <div class="setting-row" data-if="show_ba_solver_note">
+        <span class="prop-label"></span>
+        <span class="status-text status-muted">{{ba_solver_note}}</span>
       </div>
     </div>
 

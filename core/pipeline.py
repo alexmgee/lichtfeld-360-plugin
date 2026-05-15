@@ -691,6 +691,11 @@ class PipelineJob:
             refine_focal_length=True,
             sift_max_num_features_override=cfg.sift_max_features,
             sift_max_image_size_override=cfg.sift_max_image_size,
+            # COLMAP 4.1 features
+            feature_type=cfg.colmap_feature_type,
+            matcher_type=cfg.colmap_matcher_type,
+            mapper=cfg.colmap_mapper,
+            ba_solver=cfg.colmap_ba_solver,
         )
 
         def _colmap_progress(stage: str, pct: float, msg: str) -> None:
@@ -1086,6 +1091,11 @@ class PipelineJob:
             # recommendation) and exposes Custom for further tuning.
             sift_max_num_features_override=cfg.sift_max_features,
             sift_max_image_size_override=cfg.sift_max_image_size,
+            # COLMAP 4.1 features
+            feature_type=cfg.colmap_feature_type,
+            matcher_type=cfg.colmap_matcher_type,
+            mapper=cfg.colmap_mapper,
+            ba_solver=cfg.colmap_ba_solver,
         )
 
         def _colmap_progress(stage: str, pct: float, msg: str) -> None:

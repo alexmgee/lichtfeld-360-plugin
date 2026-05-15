@@ -180,7 +180,13 @@ PRESET_LABELS = [
     "Ultra (24 views)",
 ]
 
-COLMAP_MATCHERS = ["sequential", "exhaustive"]
+COLMAP_MATCHERS = ["sequential", "exhaustive", "vocab_tree"]
+
+# COLMAP 4.1 feature controls
+FEATURE_TYPES = ["sift", "aliked_n16rot", "aliked_n32"]
+MATCHER_TYPES = ["bruteforce", "lightglue"]
+MAPPERS = ["incremental", "global"]
+BA_SOLVERS = ["auto", "ceres", "caspar"]
 MATCH_BUDGET_TIERS = ["fast", "balanced", "default", "high", "custom"]
 
 OUTPUT_SIZES = [960, 1280, 1536, 1920, 2400, 3072, 3840]
@@ -360,6 +366,14 @@ class Plugin360Panel(lf.ui.Panel):
         self._front_video_path: str = ""
         self._back_video_path: str = ""
         self._keep_streams: bool = False
+        self._fisheye_circle_margin: float = 6.0
+
+        # COLMAP 4.1 controls
+        self._feature_type_idx: int = 0   # SIFT
+        self._matcher_type_idx: int = 0   # Bruteforce
+        self._mapper_idx: int = 0         # Incremental
+        self._ba_solver_idx: int = 0      # Auto
+        self._vocab_tree_path: str = ""
 
         # Processing state
         self._is_processing: bool = False
@@ -487,6 +501,24 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind("match_budget_idx", lambda: str(self._match_budget_idx), self._set_match_budget_idx)
         model.bind("colmap_max_matches_str", lambda: str(self._colmap_max_num_matches), self._set_colmap_max_matches)
         model.bind_func("match_budget_text", self._get_match_budget_text)
+
+        # Vocab tree path (visible when Vocab Tree matcher selected)
+        model.bind_func("show_vocab_tree_path", lambda: self._colmap_matcher_idx == 2)
+        model.bind_func("show_vocab_tree_missing", lambda: self._colmap_matcher_idx == 2 and not self._vocab_tree_path)
+        model.bind_func("vocab_tree_path_display", lambda: self._vocab_tree_path or "(not set)")
+        model.bind_event("browse_vocab_tree", self._on_browse_vocab_tree)
+
+        # COLMAP 4.1 controls
+        model.bind("feature_type_idx", lambda: str(self._feature_type_idx), self._set_feature_type_idx)
+        model.bind("matcher_type_idx", lambda: str(self._matcher_type_idx), self._set_matcher_type_idx)
+        model.bind("mapper_idx", lambda: str(self._mapper_idx), self._set_mapper_idx)
+        model.bind("ba_solver_idx", lambda: str(self._ba_solver_idx), self._set_ba_solver_idx)
+        model.bind_func("show_ba_solver_note", lambda: True)
+        model.bind_func("ba_solver_note", self._get_ba_solver_note)
+
+        # Fisheye circle margin (visible when fisheye + masking enabled)
+        model.bind("fisheye_circle_margin_str", lambda: f"{self._fisheye_circle_margin:.0f}", self._set_fisheye_circle_margin)
+        model.bind_func("show_fisheye_circle_margin", lambda: self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX and self._enable_masking)
 
         # SIFT controls (COLMAP Preset dropdown + Advanced disclosure)
         model.bind("sift_preset_idx", lambda: str(self._sift_preset_idx), self._set_sift_preset_idx)
@@ -669,6 +701,12 @@ class Plugin360Panel(lf.ui.Panel):
             self._sift_advanced_expanded,
             self._sift_max_features,
             self._sift_max_image_size,
+            self._feature_type_idx,
+            self._matcher_type_idx,
+            self._mapper_idx,
+            self._ba_solver_idx,
+            self._fisheye_circle_margin,
+            self._vocab_tree_path,
             self._output_path,
             self._is_processing,
             self._processing_stage,
@@ -1846,6 +1884,75 @@ class Plugin360Panel(lf.ui.Panel):
         if self._handle:
             self._handle.dirty_all()
 
+    # ── COLMAP 4.1 controls ──────────────────────────────────
+
+    def _set_feature_type_idx(self, val):
+        try:
+            idx = int(val)
+            if 0 <= idx < len(FEATURE_TYPES):
+                self._feature_type_idx = idx
+        except (ValueError, TypeError):
+            pass
+
+    def _set_matcher_type_idx(self, val):
+        try:
+            idx = int(val)
+            if 0 <= idx < len(MATCHER_TYPES):
+                self._matcher_type_idx = idx
+        except (ValueError, TypeError):
+            pass
+
+    def _set_mapper_idx(self, val):
+        try:
+            idx = int(val)
+            if 0 <= idx < len(MAPPERS):
+                self._mapper_idx = idx
+        except (ValueError, TypeError):
+            pass
+
+    def _set_ba_solver_idx(self, val):
+        try:
+            idx = int(val)
+            if 0 <= idx < len(BA_SOLVERS):
+                self._ba_solver_idx = idx
+        except (ValueError, TypeError):
+            pass
+
+    def _get_ba_solver_note(self) -> str:
+        solver = BA_SOLVERS[self._ba_solver_idx] if 0 <= self._ba_solver_idx < len(BA_SOLVERS) else "auto"
+        output_mode = self._get_output_mode()
+        if output_mode == "fisheye":
+            if solver == "caspar":
+                return "Caspar does not support OPENCV_FISHEYE yet — will use Ceres."
+            elif solver == "auto":
+                return "Auto: Ceres (fisheye not yet supported by Caspar)."
+            return "Ceres solver."
+        else:
+            if solver == "auto":
+                return "Auto: Caspar GPU BA (5-20x faster on Pinhole)."
+            elif solver == "caspar":
+                return "Caspar GPU BA (5-20x faster)."
+            return "Ceres solver."
+
+    def _set_fisheye_circle_margin(self, val):
+        try:
+            v = float(val)
+            if 0 <= v <= 15:
+                self._fisheye_circle_margin = v
+        except (ValueError, TypeError):
+            pass
+
+    def _on_browse_vocab_tree(self, handle, event, args):
+        del handle, event, args
+        path = lf.ui.open_file_dialog(
+            title="Select Vocabulary Tree File",
+            start_dir=self._vocab_tree_path or "",
+        )
+        if path:
+            self._vocab_tree_path = path
+            if self._handle:
+                self._handle.dirty_all()
+
     def _set_output_mode(self, val):
         try:
             idx = int(val)
@@ -2223,6 +2330,12 @@ class Plugin360Panel(lf.ui.Panel):
             sift_preset=SIFT_PRESETS[self._sift_preset_idx],
             sift_max_features=self._sift_max_features,
             sift_max_image_size=self._sift_max_image_size,
+            # COLMAP 4.1 features
+            colmap_feature_type=FEATURE_TYPES[self._feature_type_idx],
+            colmap_matcher_type=MATCHER_TYPES[self._matcher_type_idx],
+            colmap_mapper=MAPPERS[self._mapper_idx],
+            colmap_ba_solver=BA_SOLVERS[self._ba_solver_idx],
+            fisheye_circle_margin=self._fisheye_circle_margin,
             output_mode=output_mode,
             # Dual fisheye fields (only meaningful when output_mode == "fisheye")
             input_type=("dual_fisheye" if output_mode == "fisheye" else "erp"),
