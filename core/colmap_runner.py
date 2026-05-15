@@ -124,6 +124,48 @@ def _collect_staged_image_names(images_dir: Path) -> list[str]:
     return sorted(names, key=os.path.normcase)
 
 
+# ── COLMAP 4.1 dispatch maps ─────────────────────────────────
+
+# Maps (feature_type, matcher_type) → FeatureMatcherType enum member name.
+# The enum values are compound: each combines a detector and a matching algo.
+_MATCHER_TYPE_MAP: dict[tuple[str, str], str] = {
+    ("sift", "bruteforce"): "SIFT_BRUTEFORCE",
+    ("sift", "lightglue"): "SIFT_LIGHTGLUE",
+    ("aliked_n16rot", "bruteforce"): "ALIKED_BRUTEFORCE",
+    ("aliked_n16rot", "lightglue"): "ALIKED_LIGHTGLUE",
+    ("aliked_n32", "bruteforce"): "ALIKED_BRUTEFORCE",
+    ("aliked_n32", "lightglue"): "ALIKED_LIGHTGLUE",
+}
+
+
+def _feature_extractor_type(feature_type: str):
+    """Map config string to pycolmap.FeatureExtractorType enum (lazy import)."""
+    import pycolmap
+    _MAP = {
+        "sift": pycolmap.FeatureExtractorType.SIFT,
+        "aliked_n16rot": pycolmap.FeatureExtractorType.ALIKED_N16ROT,
+        "aliked_n32": pycolmap.FeatureExtractorType.ALIKED_N32,
+    }
+    return _MAP.get(feature_type, pycolmap.FeatureExtractorType.SIFT)
+
+
+def _ba_backend(solver: str, camera_model: str):
+    """Resolve BA solver backend enum from config strings."""
+    import pycolmap
+    CASPAR = pycolmap.BundleAdjustmentBackend(1)  # not named in pybind11
+    CERES = pycolmap.BundleAdjustmentBackend.CERES
+    CASPAR_MODELS = {"PINHOLE", "SIMPLE_RADIAL"}
+
+    if solver == "ceres":
+        return CERES
+    if solver == "caspar":
+        if camera_model in CASPAR_MODELS:
+            return CASPAR
+        return CERES  # unsupported model → silent fallback
+    # "auto": Caspar when model is supported
+    return CASPAR if camera_model in CASPAR_MODELS else CERES
+
+
 @dataclass
 class ColmapConfig:
     preset: str = "normal"
@@ -142,6 +184,11 @@ class ColmapConfig:
     # preset-based defaults below.
     sift_max_num_features_override: Optional[int] = None
     sift_max_image_size_override: Optional[int] = None
+    # COLMAP 4.1 features
+    feature_type: str = "sift"        # "sift", "aliked_n16rot", "aliked_n32"
+    matcher_type: str = "bruteforce"  # "bruteforce", "lightglue"
+    mapper: str = "incremental"       # "incremental", "global"
+    ba_solver: str = "auto"           # "auto", "ceres", "caspar"
 
     @property
     def sift_max_image_size(self) -> int:
@@ -497,8 +544,9 @@ class ColmapRunner:
         # STEP 1: FEATURE EXTRACTION (CameraMode.PER_FOLDER)
         # ================================================
         self._ensure_not_cancelled()
-        _log("Step 1: Feature extraction")
-        self._progress("features", 0.0, f"Extracting SIFT features (0/{total_images})...")
+        feat_type = self._config.feature_type
+        _log(f"Step 1: Feature extraction (type={feat_type})")
+        self._progress("features", 0.0, f"Extracting {feat_type.upper()} features (0/{total_images})...")
 
         from pycolmap import CameraMode
         camera_mode = CameraMode.PER_FOLDER
@@ -532,7 +580,13 @@ class ColmapRunner:
             extraction_gpu_requested = _try_set_attr(extraction_opts, "use_gpu", True) or extraction_gpu_requested
             _try_set_attr(extraction_opts, "num_threads", num_threads)
             _try_set_attr(extraction_opts, "max_image_size", sift_max_image_size)
-            _try_set_attr(extraction_opts, "max_num_features", sift_max_num_features)
+            # Set feature type enum (string assignment raises TypeError)
+            extraction_opts.type = _feature_extractor_type(feat_type)
+            # Route max_num_features to the correct sub-options object
+            if feat_type == "sift":
+                _try_set_attr(extraction_opts.sift, "max_num_features", sift_max_num_features)
+            else:
+                _try_set_attr(extraction_opts.aliked, "max_num_features", sift_max_num_features)
         elif hasattr(pycolmap, "SiftExtractionOptions"):
             extraction_opts = pycolmap.SiftExtractionOptions()
             extraction_gpu_requested = _try_set_attr(extraction_opts, "use_gpu", True) or extraction_gpu_requested
@@ -648,6 +702,17 @@ class ColmapRunner:
         _try_set_attr(matching_opts, "rig_verification", True)
         _try_set_attr(matching_opts, "skip_image_pairs_in_same_frame", True)
 
+        # Set compound matcher type (e.g. SIFT_LIGHTGLUE, ALIKED_BRUTEFORCE)
+        _mt_key = (self._config.feature_type, self._config.matcher_type)
+        _mt_name = _MATCHER_TYPE_MAP.get(_mt_key, "SIFT_BRUTEFORCE")
+        if hasattr(pycolmap, "FeatureMatcherType"):
+            _mt_enum = getattr(pycolmap.FeatureMatcherType, _mt_name, None)
+            if _mt_enum is not None:
+                matching_opts.type = _mt_enum
+                _log(f"Step 3: Matcher type = {_mt_name}")
+            else:
+                _log(f"Step 3: FeatureMatcherType.{_mt_name} not found, using default")
+
         match_kwargs: dict = {
             "database_path": database_path,
             "matching_options": matching_opts,
@@ -708,55 +773,93 @@ class ColmapRunner:
         _trim_process_memory()
 
         # ================================================
-        # STEP 4: INCREMENTAL MAPPING
+        # STEP 4: RECONSTRUCTION (incremental or global)
         # ================================================
         self._ensure_not_cancelled()
-        _log("Step 4: Incremental mapping")
-        self._progress("mapping", 0.0, f"Running incremental mapper ({total_images} images)...")
+        mapper_name = self._config.mapper
+        ba_backend = _ba_backend(self._config.ba_solver, self._config.camera_model)
+        _log(f"Step 4: Mapping (mapper={mapper_name}, ba_solver={self._config.ba_solver}, "
+             f"ba_backend={ba_backend})")
 
-        pipeline_opts = pycolmap.IncrementalPipelineOptions()
-        if hasattr(pipeline_opts, "multiple_models"):
-            _try_set_attr(pipeline_opts, "multiple_models", False)
-        if hasattr(pipeline_opts, "max_num_models"):
-            _try_set_attr(pipeline_opts, "max_num_models", 1)
-        # Virtual cameras reframed from one panorama share an exact optical
-        # center. Letting COLMAP refine sensor_from_rig poses can invent
-        # large per-sensor translations and tear the rig apart, so we lock
-        # rig geometry globally with ba_refine_sensor_from_rig=False.
-        # (constant_rigs is Set[int] of rig IDs in pycolmap 4.0; setting it
-        # to True is a silent no-op via _try_set_attr — ba_refine_sensor_from_rig
-        # alone does the work.)
-        _try_set_attr(pipeline_opts, "ba_refine_sensor_from_rig", False)
-        _try_set_attr(pipeline_opts, "ba_refine_focal_length", self._config.refine_focal_length)
-        _try_set_attr(pipeline_opts, "ba_refine_principal_point", self._config.refine_principal_point)
-        _try_set_attr(pipeline_opts, "ba_refine_extra_params", self._config.refine_extra_params)
-        _log(
-            "Step 4: Rig BA — refine_sensor_from_rig=False, "
-            f"refine_focal_length={self._config.refine_focal_length}, "
-            f"refine_principal_point={self._config.refine_principal_point}, "
-            f"refine_extra_params={self._config.refine_extra_params}"
-        )
+        if mapper_name == "global":
+            # ── GLOMAP (global SfM) ──
+            self._progress("mapping", 0.0, f"Running GLOMAP ({total_images} images)...")
+            global_opts = pycolmap.GlobalPipelineOptions()
+            # BA refinement settings (nested in mapper.bundle_adjustment)
+            ba = global_opts.mapper.bundle_adjustment
+            ba.refine_focal_length = self._config.refine_focal_length
+            ba.refine_principal_point = self._config.refine_principal_point
+            ba.refine_extra_params = self._config.refine_extra_params
+            ba.backend = ba_backend
+            # Lock rig geometry in all sub-stages
+            ba.refine_sensor_from_rig = False
+            global_opts.mapper.refine_sensor_from_rig = False
+            global_opts.mapper.global_positioning.refine_sensor_from_rig = False
+            global_opts.mapper.rotation_averaging.refine_sensor_from_rig = False
+            _log(
+                "Step 4: GLOMAP BA — refine_sensor_from_rig=False (all stages), "
+                f"refine_focal_length={self._config.refine_focal_length}, "
+                f"refine_principal_point={self._config.refine_principal_point}, "
+                f"refine_extra_params={self._config.refine_extra_params}"
+            )
 
-        _log("Step 4: Calling pycolmap.incremental_mapping()")
+            _log("Step 4: Calling pycolmap.global_mapping()")
+            # global_mapping has no next_image_callback — progress is start/finish only
+            self._progress("mapping", 0.1, "GLOMAP running...")
 
-        registered_count = [0]
+            reconstructions = pycolmap.global_mapping(
+                database_path=database_path,
+                image_path=image_path,
+                output_path=sparse_path,
+                options=global_opts,
+            )
+        else:
+            # ── Incremental mapping (default) ──
+            self._progress("mapping", 0.0, f"Running incremental mapper ({total_images} images)...")
 
-        def _on_next_image():
-            registered_count[0] += 1
-            if total_images > 0:
-                pct = registered_count[0] / total_images
-                self._progress(
-                    "mapping", pct,
-                    f"Mapping: {registered_count[0]}/{total_images} images registered",
-                )
+            pipeline_opts = pycolmap.IncrementalPipelineOptions()
+            if hasattr(pipeline_opts, "multiple_models"):
+                _try_set_attr(pipeline_opts, "multiple_models", False)
+            if hasattr(pipeline_opts, "max_num_models"):
+                _try_set_attr(pipeline_opts, "max_num_models", 1)
+            _try_set_attr(pipeline_opts, "ba_refine_sensor_from_rig", False)
+            _try_set_attr(pipeline_opts, "ba_refine_focal_length", self._config.refine_focal_length)
+            _try_set_attr(pipeline_opts, "ba_refine_principal_point", self._config.refine_principal_point)
+            _try_set_attr(pipeline_opts, "ba_refine_extra_params", self._config.refine_extra_params)
+            # Lock rig geometry: constant_rigs takes Set[int] of rig IDs.
+            if os.path.exists(self._rig_config_path):
+                pipeline_opts.constant_rigs = {0}
+            # Set BA solver backend
+            gba = pipeline_opts.get_global_bundle_adjustment()
+            gba.backend = ba_backend
+            _log(
+                "Step 4: Incremental BA — refine_sensor_from_rig=False, "
+                f"refine_focal_length={self._config.refine_focal_length}, "
+                f"refine_principal_point={self._config.refine_principal_point}, "
+                f"refine_extra_params={self._config.refine_extra_params}, "
+                f"constant_rigs={pipeline_opts.constant_rigs}"
+            )
 
-        reconstructions = pycolmap.incremental_mapping(
-            database_path=database_path,
-            image_path=image_path,
-            output_path=sparse_path,
-            options=pipeline_opts,
-            next_image_callback=_on_next_image,
-        )
+            _log("Step 4: Calling pycolmap.incremental_mapping()")
+
+            registered_count = [0]
+
+            def _on_next_image():
+                registered_count[0] += 1
+                if total_images > 0:
+                    pct = registered_count[0] / total_images
+                    self._progress(
+                        "mapping", pct,
+                        f"Mapping: {registered_count[0]}/{total_images} images registered",
+                    )
+
+            reconstructions = pycolmap.incremental_mapping(
+                database_path=database_path,
+                image_path=image_path,
+                output_path=sparse_path,
+                options=pipeline_opts,
+                next_image_callback=_on_next_image,
+            )
 
         _log(f"Step 4: Mapping returned {len(reconstructions) if reconstructions else 0} reconstruction(s)")
 
@@ -765,7 +868,7 @@ class ColmapRunner:
             return ColmapResult(
                 success=False,
                 elapsed_sec=time.monotonic() - t0,
-                error="Incremental mapping produced no reconstructions",
+                error=f"{mapper_name} mapping produced no reconstructions",
             )
 
         reconstruction = next(iter(reconstructions.values()))
