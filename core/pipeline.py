@@ -906,8 +906,93 @@ class PipelineJob:
             raise RuntimeError("Cancelled")
 
         # ===================================================================
-        # Stage 2 (masking): SKIPPED in phase 1
+        # Stage 2: Fisheye masking (SAM3 + circle mask)
         # ===================================================================
+        mask_enabled = cfg.enable_masking
+        if mask_enabled:
+            self._update("masking", 20.0, "Initializing SAM 3 for fisheye masking...")
+
+            from .backends import Sam3Backend
+            from .fisheye_circle_mask import generate_fisheye_circle_mask
+
+            backend = Sam3Backend(confidence_threshold=0.3)
+            backend.initialize()
+
+            try:
+                masks_dir = extracted_dir / "masks"
+                lens_names = ("front", "back")
+                total_frames = sum(
+                    len(list((extracted_dir / lens).glob("*.jpg")))
+                    + len(list((extracted_dir / lens).glob("*.png")))
+                    for lens in lens_names
+                )
+                frame_idx = 0
+                circle_cache: dict[tuple[int, int], np.ndarray] = {}
+
+                for lens in lens_names:
+                    lens_frames_dir = extracted_dir / lens
+                    lens_masks_dir = masks_dir / lens
+                    lens_masks_dir.mkdir(parents=True, exist_ok=True)
+
+                    frame_files = sorted(
+                        f for f in lens_frames_dir.iterdir()
+                        if f.suffix.lower() in (".jpg", ".jpeg", ".png")
+                    )
+
+                    for frame_file in frame_files:
+                        if self._check_cancel():
+                            raise RuntimeError("Cancelled")
+
+                        frame_idx += 1
+                        pct = 20 + (frame_idx / max(total_frames, 1)) * 25
+                        self._update(
+                            "masking", pct,
+                            f"SAM 3 masking {lens}/{frame_file.name} "
+                            f"({frame_idx}/{total_frames})",
+                        )
+
+                        image = cv2.imread(str(frame_file))
+                        if image is None:
+                            logger.warning("Could not read %s, skipping", frame_file)
+                            continue
+
+                        h, w = image.shape[:2]
+
+                        # SAM3 detection: 0=background, 1=detected object
+                        detection = backend.detect_and_segment(
+                            image, cfg.mask_prompts,
+                        )
+
+                        # Convert to COLMAP polarity: 255=keep, 0=remove
+                        keep_mask = ((detection == 0).astype(np.uint8)) * 255
+
+                        # Fisheye circle mask (cached per resolution)
+                        cache_key = (w, h)
+                        if cache_key not in circle_cache:
+                            circle = generate_fisheye_circle_mask(
+                                w, h, margin_percent=cfg.fisheye_circle_margin,
+                            )
+                            # Convert: 0=valid,1=masked → 255=keep,0=remove
+                            circle_cache[cache_key] = (
+                                (1 - circle).astype(np.uint8) * 255
+                            )
+                        circle_keep = circle_cache[cache_key]
+
+                        # Combine: pixel is valid only if BOTH masks say valid
+                        final_mask = cv2.bitwise_and(keep_mask, circle_keep)
+
+                        mask_out = lens_masks_dir / f"{frame_file.stem}.png"
+                        cv2.imwrite(str(mask_out), final_mask)
+
+                logger.info(
+                    "Fisheye masking complete: %d frames across %d lenses",
+                    frame_idx, len(lens_names),
+                )
+            finally:
+                backend.cleanup()
+
+            if self._check_cancel():
+                raise RuntimeError("Cancelled")
 
         # ===================================================================
         # Stage 3: Move frames extracted/{front,back}/ → images/{front,back}/
@@ -927,6 +1012,21 @@ class PipelineJob:
             if dst.exists():
                 shutil.rmtree(dst, ignore_errors=True)
             src.rename(dst)
+
+        # Stage masks alongside images so COLMAP finds them at the same
+        # relative paths (ImageReader.mask_path + "front/xxx.png" etc.)
+        colmap_mask_path: str | None = None
+        if mask_enabled:
+            output_masks_dir = out / "masks"
+            output_masks_dir.mkdir(parents=True, exist_ok=True)
+            for lens in ("front", "back"):
+                src = extracted_dir / "masks" / lens
+                dst = output_masks_dir / lens
+                if src.is_dir():
+                    if dst.exists():
+                        shutil.rmtree(dst, ignore_errors=True)
+                    src.rename(dst)
+            colmap_mask_path = str(output_masks_dir)
 
         # ===================================================================
         # Stage 4 (rig config): SKIPPED in phase 1 (use_rig=False per spec)
@@ -992,7 +1092,7 @@ class PipelineJob:
             images_dir=str(images_dir),
             output_dir=str(out),
             rig_config_path=rig_config_path,
-            mask_path=None,  # phase 1 skips masking
+            mask_path=colmap_mask_path,
             config=colmap_config,
             on_progress=_colmap_progress,
             cancel_check=self._check_cancel,
