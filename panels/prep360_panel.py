@@ -2336,6 +2336,7 @@ class Plugin360Panel(lf.ui.Panel):
             colmap_mapper=MAPPERS[self._mapper_idx],
             colmap_ba_solver=BA_SOLVERS[self._ba_solver_idx],
             fisheye_circle_margin=self._fisheye_circle_margin,
+            vocab_tree_path=self._vocab_tree_path,
             output_mode=output_mode,
             # Dual fisheye fields (only meaningful when output_mode == "fisheye")
             input_type=("dual_fisheye" if output_mode == "fisheye" else "erp"),

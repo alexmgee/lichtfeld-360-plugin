@@ -124,6 +124,7 @@ class PipelineConfig:
     colmap_matcher_type: str = "bruteforce"  # "bruteforce", "lightglue"
     colmap_mapper: str = "incremental"       # "incremental", "global"
     colmap_ba_solver: str = "auto"           # "auto", "ceres", "caspar"
+    vocab_tree_path: str = ""                # path to vocab tree file (when matcher == "vocab_tree")
 
 
 @dataclass
@@ -696,6 +697,7 @@ class PipelineJob:
             matcher_type=cfg.colmap_matcher_type,
             mapper=cfg.colmap_mapper,
             ba_solver=cfg.colmap_ba_solver,
+            vocab_tree_path=cfg.vocab_tree_path or None,
         )
 
         def _colmap_progress(stage: str, pct: float, msg: str) -> None:
@@ -1096,6 +1098,7 @@ class PipelineJob:
             matcher_type=cfg.colmap_matcher_type,
             mapper=cfg.colmap_mapper,
             ba_solver=cfg.colmap_ba_solver,
+            vocab_tree_path=cfg.vocab_tree_path or None,
         )
 
         def _colmap_progress(stage: str, pct: float, msg: str) -> None:
