@@ -149,3 +149,53 @@ def write_rig_config(view_config: ViewConfig, output_path: str) -> str:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(rig, indent=2))
     return str(out.resolve())
+
+
+def write_dual_fisheye_rig_config(
+    output_path: str,
+    baseline_m: float = 0.025,
+    rotation_quat: list[float] | None = None,
+) -> str:
+    """Write a two-sensor rig config for dual fisheye cameras.
+
+    Front lens is the reference sensor (identity). Back lens is rotated
+    180 deg around Y with a translational offset along -Z in the back
+    camera's frame.
+
+    Args:
+        output_path: JSON file path to write.
+        baseline_m: Inter-lens baseline in metres (default 25mm).
+        rotation_quat: [qw, qx, qy, qz] for back sensor's
+            cam_from_rig rotation. Default: 180 deg Y = [0, 0, 1, 0].
+
+    Returns:
+        Absolute path to the written file.
+    """
+    if rotation_quat is None:
+        rotation_quat = [0, 0, 1, 0]
+
+    # cam_from_rig_translation: rig origin (front sensor) expressed in
+    # back camera's coordinate system. Back's +Z points opposite to
+    # front's +Z, so rig origin is at -baseline along back's Z.
+    translation = [0.0, 0.0, -baseline_m]
+
+    # Spec §4.5 sign assertion
+    assert translation[2] < 0, (
+        f"cam_from_rig_translation Z must be negative, got {translation[2]}"
+    )
+
+    rig = [{
+        "cameras": [
+            {"image_prefix": "front/", "ref_sensor": True},
+            {
+                "image_prefix": "back/",
+                "cam_from_rig_rotation": rotation_quat,
+                "cam_from_rig_translation": translation,
+            },
+        ]
+    }]
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(rig, indent=2))
+    return str(out.resolve())

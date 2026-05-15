@@ -1029,10 +1029,16 @@ class PipelineJob:
             colmap_mask_path = str(output_masks_dir)
 
         # ===================================================================
-        # Stage 4 (rig config): SKIPPED in phase 1 (use_rig=False per spec)
+        # Stage 4: Rig config (experimental, only when use_rig=True)
         # ===================================================================
-        # ColmapRunner detects the missing rig_config.json and gracefully
-        # skips the rig-application step (colmap_runner.py:602-619).
+        # When use_rig=False (default), no rig config is written.
+        # ColmapRunner detects the missing file and skips rig application.
+        if cfg.use_rig:
+            self._update("rig_config", 52.0, "Writing dual fisheye rig config...")
+            from .rig_config import write_dual_fisheye_rig_config
+            rig_config_path_str = str(out / "rig_config.json")
+            write_dual_fisheye_rig_config(rig_config_path_str)
+            logger.info("Wrote dual fisheye rig config: %s", rig_config_path_str)
 
         # ===================================================================
         # Stage 5: COLMAP — OPENCV_FISHEYE, PER_FOLDER, no rig (50-95%)
