@@ -183,7 +183,26 @@ PRESET_LABELS = [
 COLMAP_MATCHERS = ["sequential", "exhaustive"]
 MATCH_BUDGET_TIERS = ["fast", "balanced", "default", "high", "custom"]
 
-OUTPUT_SIZES = [960, 1280, 1536, 1920]
+OUTPUT_SIZES = [960, 1280, 1536, 1920, 2400, 3072, 3840]
+
+# COLMAP / SIFT preset matrix exposed via the Output Quality panel.
+# Each entry maps (output_mode, preset_name) -> (max_features, max_image_size).
+# Pinhole/ERP "High" bumps DSLR detail meaningfully; ERP High matches Fisheye
+# Normal because the extended Crop Size dropdown lets ERP render at native
+# fisheye-equivalent resolution. Fisheye baselines are anchored at the
+# integration-report-recommended 8192/3840 (this is the value that fixed the
+# Insta360 .insv alignment failure in commit 131808d).
+SIFT_PRESETS = ["normal", "high", "custom"]
+SIFT_PRESET_LABELS = ["Normal", "High", "Custom"]
+SIFT_NORMAL_IDX, SIFT_HIGH_IDX, SIFT_CUSTOM_IDX = 0, 1, 2
+SIFT_PRESET_MATRIX: dict[tuple[str, str], tuple[int, int]] = {
+    ("pinhole", "normal"): (2048, 1600),
+    ("pinhole", "high"):   (4096, 2400),
+    ("erp",     "normal"): (2048, 1600),
+    ("erp",     "high"):   (8192, 3840),
+    ("fisheye", "normal"): (8192, 3840),
+    ("fisheye", "high"):   (16384, 3840),
+}
 
 OUTPUT_MODES = ["pinhole", "erp", "fisheye"]
 OUTPUT_MODE_LABELS = ["Pinhole", "ERP", "Fisheye"]
@@ -207,6 +226,12 @@ SCRUB_FIELD_SPECS = {
     ),
     "colmap_max_matches_str": ScrubFieldSpec(
         min_value=1024.0, max_value=80000.0, step=128.0, fmt="%d", data_type=int,
+    ),
+    "sift_max_features_str": ScrubFieldSpec(
+        min_value=1024.0, max_value=32768.0, step=1024.0, fmt="%d", data_type=int,
+    ),
+    "sift_max_image_size_str": ScrubFieldSpec(
+        min_value=1024.0, max_value=4096.0, step=128.0, fmt="%d", data_type=int,
     ),
 }
 
@@ -309,6 +334,18 @@ class Plugin360Panel(lf.ui.Panel):
         self._colmap_matcher_idx: int = 1  # default: exhaustive
         self._match_budget_idx: int = 2  # default
         self._colmap_max_num_matches: int = MATCH_BUDGETS["default"]
+
+        # SIFT controls (Output Quality section). Default tracks the
+        # current Output Mode via SIFT_PRESET_MATRIX; preset Normal at init
+        # since output_mode_idx defaults to 0 (Pinhole) below.
+        # _sift_last_non_custom_preset_idx is the Normal/High target the Reset
+        # button restores to when preset has been auto-flipped to Custom by a
+        # slider drag. Preserved across mode switches.
+        self._sift_preset_idx: int = SIFT_NORMAL_IDX
+        self._sift_last_non_custom_preset_idx: int = SIFT_NORMAL_IDX
+        self._sift_advanced_expanded: bool = False
+        self._sift_max_features: int = SIFT_PRESET_MATRIX[("pinhole", "normal")][0]
+        self._sift_max_image_size: int = SIFT_PRESET_MATRIX[("pinhole", "normal")][1]
 
         # Output
         self._output_mode_idx: int = 0  # default: Pinhole
@@ -451,6 +488,15 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind("colmap_max_matches_str", lambda: str(self._colmap_max_num_matches), self._set_colmap_max_matches)
         model.bind_func("match_budget_text", self._get_match_budget_text)
 
+        # SIFT controls (COLMAP Preset dropdown + Advanced disclosure)
+        model.bind("sift_preset_idx", lambda: str(self._sift_preset_idx), self._set_sift_preset_idx)
+        model.bind("sift_max_features_str", lambda: str(self._sift_max_features), self._set_sift_max_features)
+        model.bind("sift_max_image_size_str", lambda: str(self._sift_max_image_size), self._set_sift_max_image_size)
+        model.bind_func("show_sift_advanced", lambda: self._sift_advanced_expanded)
+        model.bind_func("show_sift_reset", self._show_sift_reset)
+        model.bind_func("sift_preset_label", self._get_sift_preset_reset_label)
+        model.bind_func("sift_advanced_arrow", lambda: "▼" if self._sift_advanced_expanded else "▶")
+
         # -- Output --
         model.bind("output_mode_idx", lambda: str(self._output_mode_idx), self._set_output_mode)
         model.bind_func("show_output_mode_note", lambda: self._output_mode_idx in (1, FISHEYE_OUTPUT_MODE_IDX))
@@ -489,6 +535,8 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_event("clear_back_video", self._on_clear_back_video)
         model.bind_event("enter_split_mode", self._on_enter_split_mode)
         model.bind_event("exit_split_mode", self._on_exit_split_mode)
+        model.bind_event("toggle_sift_advanced", self._on_toggle_sift_advanced)
+        model.bind_event("reset_sift_to_preset", self._on_reset_sift_to_preset)
         model.bind_func("output_mode_note", self._get_output_mode_note)
         model.bind_func("output_path_display", lambda: self._output_path or "(not set)")
         model.bind_func("dataset_summary_text", self._get_dataset_summary)
@@ -616,6 +664,11 @@ class Plugin360Panel(lf.ui.Panel):
             self._colmap_matcher_idx,
             self._match_budget_idx,
             self._colmap_max_num_matches,
+            self._sift_preset_idx,
+            self._sift_last_non_custom_preset_idx,
+            self._sift_advanced_expanded,
+            self._sift_max_features,
+            self._sift_max_image_size,
             self._output_path,
             self._is_processing,
             self._processing_stage,
@@ -940,20 +993,8 @@ class Plugin360Panel(lf.ui.Panel):
         return f"Pinhole (COLMAP) | {total:,} images | {self._output_size}px"
 
     def _get_match_budget_text(self) -> str:
-        matcher = (
-            COLMAP_MATCHERS[self._colmap_matcher_idx]
-            if 0 <= self._colmap_matcher_idx < len(COLMAP_MATCHERS)
-            else "sequential"
-        )
-        tier = (
-            MATCH_BUDGET_TIERS[self._match_budget_idx]
-            if 0 <= self._match_budget_idx < len(MATCH_BUDGET_TIERS)
-            else "custom"
-        )
-        tier_label = tier.title()
         return (
-            f"{tier_label} match limit on {matcher} matching: "
-            f"keeps up to {self._colmap_max_num_matches:,} matches per image pair. "
+            f"Up to {self._colmap_max_num_matches:,} matches per image pair. "
             "Higher limits preserve more correspondences but cost more time and memory."
         )
 
@@ -1689,11 +1730,132 @@ class Plugin360Panel(lf.ui.Panel):
         except (ValueError, TypeError):
             pass
 
+    # ── SIFT controls ─────────────────────────────────────────
+
+    def _get_sift_mode_key(self) -> str:
+        """Return the SIFT_PRESET_MATRIX key for the current output_mode_idx."""
+        if 0 <= self._output_mode_idx < len(OUTPUT_MODES):
+            return OUTPUT_MODES[self._output_mode_idx]
+        return "pinhole"
+
+    def _set_sift_preset_idx(self, val):
+        try:
+            idx = int(val)
+            if not (0 <= idx < len(SIFT_PRESETS)):
+                return
+            self._sift_preset_idx = idx
+            if idx != SIFT_CUSTOM_IDX:
+                # Normal or High: snap slider values to the new preset row and
+                # remember this as the "Reset to X" target.
+                self._sift_last_non_custom_preset_idx = idx
+                mode_key = self._get_sift_mode_key()
+                preset_name = SIFT_PRESETS[idx]
+                feat, size = SIFT_PRESET_MATRIX[(mode_key, preset_name)]
+                self._sift_max_features = feat
+                self._sift_max_image_size = size
+            # Refresh sister bindings (max_features_str / max_image_size_str
+            # plus show_sift_reset / sift_preset_label) so the slider widgets
+            # actually re-read their data-value after the snap.
+            if self._handle:
+                self._handle.dirty_all()
+        except (ValueError, TypeError):
+            pass
+
+    def _set_sift_max_features(self, val):
+        try:
+            v = int(float(val))
+            v = max(1024, min(32768, v))
+            self._sift_max_features = v
+            self._recompute_sift_preset_from_values()
+            if self._handle:
+                self._handle.dirty_all()
+        except (ValueError, TypeError):
+            pass
+
+    def _set_sift_max_image_size(self, val):
+        try:
+            v = int(float(val))
+            v = max(1024, min(4096, v))
+            self._sift_max_image_size = v
+            self._recompute_sift_preset_from_values()
+            if self._handle:
+                self._handle.dirty_all()
+        except (ValueError, TypeError):
+            pass
+
+    def _recompute_sift_preset_from_values(self) -> None:
+        """Auto-flip _sift_preset_idx based on whether (max_features,
+        max_image_size) exactly matches a Normal/High row of the active
+        output mode. Editing back to a preset value flips Custom → preset.
+        """
+        mode_key = self._get_sift_mode_key()
+        cur = (self._sift_max_features, self._sift_max_image_size)
+        if cur == SIFT_PRESET_MATRIX[(mode_key, "normal")]:
+            self._sift_preset_idx = SIFT_NORMAL_IDX
+            self._sift_last_non_custom_preset_idx = SIFT_NORMAL_IDX
+        elif cur == SIFT_PRESET_MATRIX[(mode_key, "high")]:
+            self._sift_preset_idx = SIFT_HIGH_IDX
+            self._sift_last_non_custom_preset_idx = SIFT_HIGH_IDX
+        else:
+            # Don't update last_non_custom — preserves the Reset target.
+            self._sift_preset_idx = SIFT_CUSTOM_IDX
+
+    def _resnap_sift_for_mode(self) -> None:
+        """Called when output_mode changes. If user is on Normal/High,
+        re-snap slider values to the new mode's matrix row. If Custom,
+        leave values alone — Custom values persist across mode switches.
+        """
+        if self._sift_preset_idx == SIFT_CUSTOM_IDX:
+            return
+        mode_key = self._get_sift_mode_key()
+        preset_name = SIFT_PRESETS[self._sift_preset_idx]
+        feat, size = SIFT_PRESET_MATRIX[(mode_key, preset_name)]
+        self._sift_max_features = feat
+        self._sift_max_image_size = size
+
+    def _show_sift_reset(self) -> bool:
+        """Reset pill is visible only when sliders are exposed AND the user
+        has dragged values away from a preset (preset == Custom).
+        """
+        return self._sift_advanced_expanded and self._sift_preset_idx == SIFT_CUSTOM_IDX
+
+    def _get_sift_preset_reset_label(self) -> str:
+        """Label for the Reset button — the Normal/High target it restores to."""
+        idx = self._sift_last_non_custom_preset_idx
+        if 0 <= idx < len(SIFT_PRESET_LABELS):
+            return SIFT_PRESET_LABELS[idx]
+        return SIFT_PRESET_LABELS[SIFT_NORMAL_IDX]
+
+    def _on_toggle_sift_advanced(self, handle, event, args):
+        del handle, event, args
+        self._sift_advanced_expanded = not self._sift_advanced_expanded
+        if self._handle:
+            self._handle.dirty_all()
+
+    def _on_reset_sift_to_preset(self, handle, event, args):
+        del handle, event, args
+        target_idx = self._sift_last_non_custom_preset_idx
+        if not (0 <= target_idx < len(SIFT_PRESETS)) or target_idx == SIFT_CUSTOM_IDX:
+            target_idx = SIFT_NORMAL_IDX
+        mode_key = self._get_sift_mode_key()
+        preset_name = SIFT_PRESETS[target_idx]
+        feat, size = SIFT_PRESET_MATRIX[(mode_key, preset_name)]
+        self._sift_max_features = feat
+        self._sift_max_image_size = size
+        self._sift_preset_idx = target_idx
+        if self._handle:
+            self._handle.dirty_all()
+
     def _set_output_mode(self, val):
         try:
             idx = int(val)
             if 0 <= idx < len(OUTPUT_MODES):
                 self._output_mode_idx = idx
+                # Snap SIFT to the new mode's preset row (no-op if Custom).
+                self._resnap_sift_for_mode()
+                # Refresh SIFT slider bindings after the snap.
+                if self._handle:
+                    self._handle.dirty_all()
         except (ValueError, TypeError):
             pass
 
@@ -1844,6 +2006,7 @@ class Plugin360Panel(lf.ui.Panel):
         """
         del handle, event, args
         self._output_mode_idx = FISHEYE_OUTPUT_MODE_IDX
+        self._resnap_sift_for_mode()
         self._source_mode_idx = 1  # "split"
         # Reset any prior single-file state so the UI doesn't show stale info.
         self._video_loaded = False
@@ -1874,6 +2037,7 @@ class Plugin360Panel(lf.ui.Panel):
         input_type, family = detect_input_type(path)
         if input_type == "dual_fisheye":
             self._output_mode_idx = FISHEYE_OUTPUT_MODE_IDX
+            self._resnap_sift_for_mode()
             self._source_mode_idx = 0  # container mode by default
             self._camera_family_detected = family
             if family in CAMERA_FAMILIES:
@@ -2056,6 +2220,9 @@ class Plugin360Panel(lf.ui.Panel):
             colmap_matcher=colmap_matcher,
             colmap_match_budget_tier=match_budget_tier,
             colmap_max_num_matches=self._colmap_max_num_matches,
+            sift_preset=SIFT_PRESETS[self._sift_preset_idx],
+            sift_max_features=self._sift_max_features,
+            sift_max_image_size=self._sift_max_image_size,
             output_mode=output_mode,
             # Dual fisheye fields (only meaningful when output_mode == "fisheye")
             input_type=("dual_fisheye" if output_mode == "fisheye" else "erp"),

@@ -524,7 +524,7 @@ dependencies = [
     { name = "numpy" },
     { name = "opencv-python-headless" },
     { name = "pycolmap", version = "4.0.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'win32'" },
-    { name = "pycolmap", version = "4.0.2", source = { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.0.2/pycolmap-4.0.2%2Bcuda-cp312-cp312-win_amd64.whl" }, marker = "sys_platform == 'win32'" },
+    { name = "pycolmap", version = "4.1.0.dev1", source = { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0-dev1/pycolmap-4.1.0.dev1%2Bcuda-cp312-cp312-win_amd64.whl" }, marker = "sys_platform == 'win32'" },
     { name = "sam2" },
     { name = "segment-anything" },
     { name = "static-ffmpeg" },
@@ -552,7 +552,7 @@ requires-dist = [
     { name = "numpy" },
     { name = "opencv-python-headless" },
     { name = "pycolmap", marker = "python_full_version != '3.12.*' or sys_platform != 'win32'" },
-    { name = "pycolmap", marker = "python_full_version == '3.12.*' and sys_platform == 'win32'", url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.0.2/pycolmap-4.0.2%2Bcuda-cp312-cp312-win_amd64.whl" },
+    { name = "pycolmap", marker = "python_full_version == '3.12.*' and sys_platform == 'win32'", url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0-dev1/pycolmap-4.1.0.dev1%2Bcuda-cp312-cp312-win_amd64.whl" },
     { name = "sam2", specifier = "==1.1.0" },
     { name = "sam3", marker = "extra == 'sam3-masking'", specifier = ">=0.1.3" },
     { name = "segment-anything", specifier = ">=1.0" },
@@ -1040,8 +1040,8 @@ wheels = [
 
 [[package]]
 name = "pycolmap"
-version = "4.0.2"
-source = { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.0.2/pycolmap-4.0.2%2Bcuda-cp312-cp312-win_amd64.whl" }
+version = "4.1.0.dev1"
+source = { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0-dev1/pycolmap-4.1.0.dev1%2Bcuda-cp312-cp312-win_amd64.whl" }
 resolution-markers = [
     "sys_platform == 'win32'",
 ]
@@ -1049,7 +1049,7 @@ dependencies = [
     { name = "numpy", marker = "sys_platform == 'win32'" },
 ]
 wheels = [
-    { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.0.2/pycolmap-4.0.2%2Bcuda-cp312-cp312-win_amd64.whl", hash = "sha256:b95a5773f981d028553604491884c9528a9f14168f1f67267597f76c23a722cf" },
+    { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0-dev1/pycolmap-4.1.0.dev1%2Bcuda-cp312-cp312-win_amd64.whl", hash = "sha256:26e10d8691d9af4439ac2cf3ffc32980ae40ec3644c527ad2aca847a748cf2f8" },
 ]
 
 [package.metadata]
@@ -1455,7 +1455,7 @@ dependencies = [
     { name = "typing-extensions", marker = "sys_platform == 'win32'" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp312-cp312-win_amd64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp312-cp312-win_amd64.whl", hash = "sha256:7c78215c3af4f62e63f2b2e360f1722fc719b0853c7ac22666483d9810613a4c", upload-time = "2026-04-27T17:43:49Z" },
 ]
 
 [[package]]
@@ -1489,7 +1489,7 @@ dependencies = [
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'win32'" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp312-cp312-win_amd64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp312-cp312-win_amd64.whl", hash = "sha256:8c0d1c4fbb2c9a4d5d41d0aaa87da20e525bcb2a154ce405725b0be59456804b", upload-time = "2026-04-09T23:21:36Z" },
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 # Dual Fisheye Pipeline Integration
 
-**Date:** 2026-04-22 (updated 2026-04-27)
-**Status:** Design approved, updated with COLMAP 4.0 feature exposure and UX review findings
+**Date:** 2026-04-22 (updated 2026-05-14)
+**Status:** Design approved, updated with COLMAP 4.1 upgrade (Caspar GPU BA, rig fixes) and UX review findings
 
 ---
 
@@ -302,9 +302,18 @@ Note: the existing `_try_set_attr(pipeline_opts, "constant_rigs", True)` at `cor
 
 When `use_rig=False`, no rig config file is written. `ColmapRunner` is invoked as today; it detects the missing rig config and skips the rig-application step (`core/colmap_runner.py:602-619`) — no runner code change needed.
 
-### 4.7 COLMAP 4.0 Feature Exposure (Cross-Cutting)
+### 4.7 COLMAP 4.1 Upgrade & Feature Exposure (Cross-Cutting)
 
-The plugin pins pycolmap 4.0.2+cuda but only uses COLMAP 3.x-era features. The following 4.0 capabilities are wired into the UI as part of this work. These apply to **both** the ERP and dual fisheye paths.
+The plugin upgrades from pycolmap 4.0.2 to **pycolmap 4.1.0-dev1** (released 2026-05-14, lyehe/build_gpu_colmap v4.1.0-dev1). This is not optional — 4.1.0-dev1 includes rig correctness fixes that directly affect the pipeline:
+
+- **`refine_sensor_from_rig` applied through all global mapper stages** — GLOMAP now properly respects rig constraints
+- **Fixed missing rig pose manifold in generalized absolute pose refinement** — rig BA correctness fix
+- **Clipped extreme pixels in fisheye undistortion** — fisheye-specific improvement
+- **Caspar GPU-accelerated bundle adjustment** — 5-20x faster BA on supported camera models (currently SimpleRadial and Pinhole; OPENCV_FISHEYE falls back to Ceres)
+
+Source: colmap/colmap#4018 (merged 2026-05-05), built from upstream commit `6cfbc040` (2026-05-10).
+
+The following capabilities are wired into the UI as part of this work. These apply to **both** the ERP and dual fisheye paths.
 
 #### New UI controls
 
@@ -313,6 +322,9 @@ The plugin pins pycolmap 4.0.2+cuda but only uses COLMAP 3.x-era features. The f
 | Feature Type | Reframe & Alignment | SIFT, ALIKED N16, ALIKED N32 | SIFT |
 | Matcher Type | Output Quality | Bruteforce, LightGlue | Bruteforce |
 | Mapper | Reframe & Alignment | Incremental, Global (GLOMAP) | Incremental |
+| BA Solver | Reframe & Alignment | Ceres, Caspar (GPU) | Caspar when available |
+
+**Caspar BA availability:** Caspar currently supports SimpleRadial and Pinhole camera models only. For the ERP pinhole path, Caspar is the default when available (5-20x faster BA). For the fisheye path (OPENCV_FISHEYE), the solver automatically falls back to Ceres — no user action needed. The UI should indicate which solver is active. As Caspar adds more camera models in future COLMAP releases, fisheye will benefit automatically.
 
 The existing Matching Strategy dropdown adds **Vocab Tree** as a third option alongside Sequential and Exhaustive. Vocab tree requires a vocabulary tree file — the plugin provides a download button for the standard 32K tree from demuc.de, or the user provides a custom path.
 
@@ -348,15 +360,17 @@ vocab_tree_path: Optional[str] = None  # Path to vocab tree file when matcher ==
 
 #### Open questions requiring testing
 
-1. **GLOMAP + rig constraints:** Does `global_mapping()` respect `ba_refine_sensor_from_rig=False`? If not, GLOMAP may only be available for non-rig workflows. Needs verification before enabling GLOMAP on the experimental rig path (`use_rig=True`). Not a blocker for the v1 default no-rig path.
+1. **GLOMAP + rig constraints:** The 4.1.0-dev1 release includes "applied `refine_sensor_from_rig` through all global mapper stages" which strongly suggests GLOMAP now works with rigs. Needs verification on an actual dual-fisheye dataset before enabling as a recommended option for the rig path.
 
 2. **ALIKED on fisheye frames:** ALIKED is a learned feature detector trained on perspective images. It may perform poorly on 190° fisheye frames with heavy radial distortion. SIFT may remain the better choice for fisheye. Needs benchmarking.
 
 3. **Vocab tree file management:** The standard 32K tree from demuc.de needs to be downloadable from within the plugin. The UI should show a download button when vocab tree is selected but no tree file is present.
 
+4. **Caspar solver stability:** The PR discussion (colmap/colmap#4018) notes that Caspar can diverge on certain scenes (exhibition_hall case). The plugin should fall back to Ceres gracefully if Caspar BA fails.
+
 #### Reference
 
-See `docs/colmap-4.0-upgrade-reference.md` for the full API mapping, parameter key changes (3.14 vs 4.0), and gotchas (quaternion ordering, method vs property, ALIKED namespace differences).
+See `docs/colmap-4.0-upgrade-reference.md` for the full API mapping, parameter key changes, and gotchas. The 4.1 upgrade is additive to the 4.0 reference.
 
 ### 4.8 Transforms Output
 
@@ -547,5 +561,6 @@ Output (fisheye mode only in this spec):
 - **Factory telemetry extraction.** Per-unit calibration from .osv proto messages is interesting but not needed when COLMAP refines from generic priors.
 - **Insta360 calibration values.** Added incrementally as users test.
 - **Dual fisheye -> Pinhole reframing details.** The post-COLMAP step that extracts pinhole crops from fisheye frames needs its own design pass (which pinhole layout, what FOV, how to handle the ~190 deg fisheye FOV vs typical pinhole ~90 deg).
-- **GLOMAP + rig constraint verification.** Whether `global_mapping()` respects `ba_refine_sensor_from_rig` needs testing before GLOMAP can be enabled for the experimental rig-constrained path. (Not a blocker for v1's default no-rig path.)
+- **GLOMAP + rig constraint verification.** 4.1.0-dev1 includes the fix ("refine_sensor_from_rig through all global mapper stages") but still needs testing on actual data before recommending.
+- **Caspar solver stability.** Caspar can diverge on certain scenes (colmap/colmap#4018 discussion). Needs graceful fallback to Ceres.
 - **ALIKED on fisheye benchmarking.** Whether learned features perform well on 190° fisheye frames needs comparison against SIFT.

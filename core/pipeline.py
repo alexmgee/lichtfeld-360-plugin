@@ -85,6 +85,15 @@ class PipelineConfig:
     colmap_match_budget_tier: str = "default"
     colmap_max_num_matches: Optional[int] = None
 
+    # SIFT controls (UI-exposed via the COLMAP Preset dropdown + Advanced disclosure).
+    # sift_preset: "normal" | "high" | "custom" — informational; the actual SIFT
+    # values used during reconstruction come from sift_max_features / sift_max_image_size.
+    # When None, the underlying ColmapConfig falls back to its preset-based defaults
+    # (so old call sites without these fields keep working unchanged).
+    sift_preset: str = "normal"
+    sift_max_features: Optional[int] = None
+    sift_max_image_size: Optional[int] = None
+
     # Output mode: "pinhole" = COLMAP dataset, "erp" = transforms.json,
     #              "fisheye" = OPENCV_FISHEYE COLMAP dataset (phase 1) /
     #              fisheye-native transforms.json (phase 2+)
@@ -668,6 +677,8 @@ class PipelineJob:
             match_budget_tier=cfg.colmap_match_budget_tier,
             max_num_matches_override=cfg.colmap_max_num_matches,
             refine_focal_length=True,
+            sift_max_num_features_override=cfg.sift_max_features,
+            sift_max_image_size_override=cfg.sift_max_image_size,
         )
 
         def _colmap_progress(stage: str, pct: float, msg: str) -> None:
@@ -949,13 +960,14 @@ class PipelineJob:
             # if the initial image set registers sparsely.
             refine_principal_point=has_prior,
             refine_extra_params=has_prior,
-            # Bump SIFT density for fisheye. Default 2048 features at 1600px
+            # SIFT density for fisheye. Default 2048 features at 1600px
             # is too sparse for 3000-3840px wide raw fisheye where many
             # keypoints land in heavily-distorted edge regions and can't
-            # match across views. 8192 at full image size matches the
-            # integration report's recommendation for fisheye SfM.
-            sift_max_num_features_override=8192,
-            sift_max_image_size_override=3840,
+            # match across views. The panel's COLMAP Preset matrix anchors
+            # fisheye Normal at 8192/3840 (matching the integration report's
+            # recommendation) and exposes Custom for further tuning.
+            sift_max_num_features_override=cfg.sift_max_features,
+            sift_max_image_size_override=cfg.sift_max_image_size,
         )
 
         def _colmap_progress(stage: str, pct: float, msg: str) -> None:

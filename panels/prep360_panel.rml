@@ -357,6 +357,9 @@
           <option value="1">1280 px</option>
           <option value="2">1536 px</option>
           <option value="3">1920 px</option>
+          <option value="4">2400 px</option>
+          <option value="5">3072 px</option>
+          <option value="6">3840 px</option>
         </select>
       </div>
       <div class="setting-row setting-row--aligned">
@@ -366,6 +369,40 @@
           <span class="slider-value">{{jpeg_quality_str}}</span>
         </div>
       </div>
+
+      <!-- COLMAP / SIFT preset dropdown -->
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
+        <span class="prop-label">COLMAP Preset</span>
+        <select data-value="sift_preset_idx">
+          <option value="0">Normal</option>
+          <option value="1">High</option>
+          <option value="2">Custom</option>
+        </select>
+      </div>
+
+      <!-- Advanced (SIFT tuning) disclosure -->
+      <div class="setting-row sift-disclosure" data-event-click="toggle_sift_advanced">
+        <span class="text-accent sift-disclosure__arrow">{{sift_advanced_arrow}}</span>
+        <span class="text-accent sift-disclosure__label">Advanced (SIFT tuning)</span>
+        <button data-if="show_sift_reset" class="btn btn--secondary btn--compact" data-event-click="reset_sift_to_preset">&#x21BA; Reset to {{sift_preset_label}}</button>
+      </div>
+
+      <!-- Sliders shown only when Advanced is expanded -->
+      <div class="setting-row setting-row--aligned" data-if="show_sift_advanced">
+        <span class="setting-row__label-col">Max Features</span>
+        <div class="setting-row__control-col setting-row__control-col--slider">
+          <input type="range" class="setting-slider" data-value="sift_max_features_str" min="1024" max="32768" step="1024" />
+          <span class="slider-value">{{sift_max_features_str}}</span>
+        </div>
+      </div>
+      <div class="setting-row setting-row--aligned" data-if="show_sift_advanced">
+        <span class="setting-row__label-col">Max Image Size</span>
+        <div class="setting-row__control-col setting-row__control-col--slider">
+          <input type="range" class="setting-slider" data-value="sift_max_image_size_str" min="1024" max="4096" step="128" />
+          <span class="slider-value">{{sift_max_image_size_str}}</span>
+        </div>
+      </div>
+
       <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
         <span class="prop-label">Match Limit</span>
         <select data-value="match_budget_idx">
@@ -384,7 +421,7 @@
         </div>
       </div>
       <div class="setting-row">
-        <span class="prop-label">Match Limit Info</span>
+        <span class="prop-label"></span>
         <span class="status-text status-muted">{{match_budget_text}}</span>
       </div>
     </div>

@@ -304,3 +304,23 @@ body {
 .scrub-field.is-editing .scrub-field-input {
     opacity: 1;
 }
+
+/* ── SIFT Advanced disclosure ───────────────────────────── */
+
+.sift-disclosure {
+    cursor: pointer;
+    align-items: center;
+    gap: 6dp;
+    margin-left: 28dp;
+}
+
+.sift-disclosure__arrow {
+    min-width: 12dp;
+    text-align: center;
+    font-size: 11dp;
+}
+
+.sift-disclosure__label {
+    flex: 1;
+    font-weight: bold;
+}
