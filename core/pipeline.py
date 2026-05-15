@@ -113,6 +113,18 @@ class PipelineConfig:
     back_video_path: str = ""
     keep_streams: bool = False  # retain demuxed front.mp4/back.mp4 alongside output
 
+    # Fisheye masking
+    fisheye_circle_margin: float = 6.0  # Circle mask margin in percent
+
+    # Rig constraint (experimental — default off)
+    use_rig: bool = False
+
+    # COLMAP 4.1 features (forwarded to ColmapConfig)
+    colmap_feature_type: str = "sift"        # "sift", "aliked_n16rot", "aliked_n32"
+    colmap_matcher_type: str = "bruteforce"  # "bruteforce", "lightglue"
+    colmap_mapper: str = "incremental"       # "incremental", "global"
+    colmap_ba_solver: str = "auto"           # "auto", "ceres", "caspar"
+
 
 @dataclass
 class PipelineResult:
