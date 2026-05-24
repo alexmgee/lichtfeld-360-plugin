@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 SAM3_MODEL_ID = "facebook/sam3"
 
 _hf_access_cache: bool | None = None
+_HF_ACCESS_CACHE_FILE = Path(__file__).resolve().parent.parent / ".hf_access_verified"
 
 
 @dataclass
@@ -178,12 +179,17 @@ def _check_hf_token() -> bool:
 def _check_hf_access() -> bool:
     """Check if cached token has access to SAM 3 model.
 
-    Result is cached in-memory after first successful check to avoid
-    network calls on every panel load.
+    Result is cached both in-memory and on disk (.hf_access_verified)
+    so the HuggingFace network call only happens once per machine,
+    not every time LichtFeld Studio starts.
     """
     global _hf_access_cache
     if _hf_access_cache is not None:
         return _hf_access_cache
+    # Check disk cache before making a network call
+    if _HF_ACCESS_CACHE_FILE.exists():
+        _hf_access_cache = True
+        return True
     try:
         from huggingface_hub import get_token, model_info
         token = get_token()
@@ -193,6 +199,7 @@ def _check_hf_access() -> bool:
         result = info is not None
         if result:
             _hf_access_cache = True
+            _HF_ACCESS_CACHE_FILE.write_text("verified")
         return result
     except Exception:
         return False
@@ -388,6 +395,7 @@ def check_sam3_setup(
                     state.has_access = True
                     global _hf_access_cache
                     _hf_access_cache = True
+                    _HF_ACCESS_CACHE_FILE.write_text("verified")
         except Exception as exc:
             token_status, access_status, detail = _classify_hf_access_exception(
                 exc,
@@ -468,6 +476,7 @@ def verify_hf_token_detailed(token: str) -> Sam3SetupReport:
         info = model_info(SAM3_MODEL_ID, token=token)
         if info is not None:
             _hf_access_cache = True
+            _HF_ACCESS_CACHE_FILE.write_text("verified")
             state = check_masking_setup()
             state.has_token = True
             state.has_access = True
@@ -510,6 +519,7 @@ def forget_hf_token() -> bool:
 
         logout()
         _hf_access_cache = None
+        _HF_ACCESS_CACHE_FILE.unlink(missing_ok=True)
         return True
     except Exception as exc:
         logger.warning("Could not forget saved HuggingFace token: %s", exc)

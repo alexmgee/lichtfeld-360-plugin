@@ -33,7 +33,10 @@ _M = np.diag([1.0, -1.0, -1.0, 1.0])
 # Y pre-compensation — LFS applies a 180° Y rotation on load.
 _Ry180 = np.diag([-1.0, 1.0, -1.0, 1.0])
 
-# applied_transform records the point cloud transform for LFS.
+# applied_transform is LFS-compatibility metadata only (LFS ignores it at
+# runtime). Records the fixed OpenCV→OpenGL flip diag(1,-1,-1) applied to
+# point cloud coordinates. Does NOT include the per-reconstruction
+# auto-orientation rotation R_align, which varies per dataset.
 _APPLIED_TRANSFORM = [[1.0, 0.0, 0.0, 0.0],
                        [0.0, -1.0, 0.0, 0.0],
                        [0.0, 0.0, -1.0, 0.0]]
@@ -58,11 +61,97 @@ def _c2w_opencv_to_lfs(c2w: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Auto-orientation helpers
+# ---------------------------------------------------------------------------
+
+def _normalize(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """Normalize a vector, returning zero vector if magnitude < eps."""
+    n = np.linalg.norm(v)
+    return v / n if n > eps else np.zeros_like(v)
+
+
+def _rotation_between_vectors(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """3x3 rotation matrix that maps unit vector a to unit vector b.
+
+    Handles the degenerate cases:
+    - a or b ≈ zero: returns identity (caller should not pass zero vectors;
+      guarded by concentration check in the export path)
+    - a ≈ b (already aligned): returns identity
+    - a ≈ -b (anti-parallel): 180° rotation around a stable orthogonal axis
+    """
+    a_norm = np.linalg.norm(a)
+    b_norm = np.linalg.norm(b)
+    if a_norm < 1e-12 or b_norm < 1e-12:
+        return np.eye(3)
+    a = a / a_norm
+    b = b / b_norm
+    v = np.cross(a, b)
+    c = np.dot(a, b)
+
+    # Already aligned
+    if c > 1.0 - 1e-8:
+        return np.eye(3)
+
+    # Anti-parallel: pick a stable orthogonal axis for 180° rotation
+    if c < -1.0 + 1e-8:
+        ortho = np.cross(a, np.array([1.0, 0.0, 0.0]))
+        if np.linalg.norm(ortho) < 1e-6:
+            ortho = np.cross(a, np.array([0.0, 0.0, 1.0]))
+        ortho = _normalize(ortho)
+        return 2.0 * np.outer(ortho, ortho) - np.eye(3)
+
+    # General case: Rodrigues
+    skew = np.array([
+        [0.0, -v[2], v[1]],
+        [v[2], 0.0, -v[0]],
+        [-v[1], v[0], 0.0],
+    ])
+    return np.eye(3) + skew + skew @ skew / (1.0 + c)
+
+
+def _compute_mean_camera_up(
+    c2w_poses: list[np.ndarray],
+) -> tuple[np.ndarray, float]:
+    """Compute the mean camera-up direction from OpenCV c2w matrices.
+
+    In OpenCV convention, c2w column 1 is the camera's local Y axis (pointing
+    down). Camera up = -column 1.
+
+    Returns:
+        (mean_up_normalized, concentration) where concentration is the norm of
+        the raw mean vector before normalization. Values near 1.0 indicate
+        strong agreement; near 0.0 indicates inconsistent up directions.
+
+    Raises:
+        ValueError: if c2w_poses is empty.
+    """
+    if not c2w_poses:
+        raise ValueError("Cannot compute mean camera up from empty pose list")
+    ups = []
+    for c2w in c2w_poses:
+        up = -c2w[:3, 1]
+        ups.append(_normalize(up))
+    raw_mean = np.mean(ups, axis=0)
+    concentration = np.linalg.norm(raw_mean)
+    return _normalize(raw_mean), concentration
+
+
+# ---------------------------------------------------------------------------
 # Point cloud export
 # ---------------------------------------------------------------------------
 
-def _write_pointcloud(recon, ply_path: Path) -> int:
-    """Write a sparse point cloud in OpenGL world coordinates."""
+def _write_pointcloud(
+    recon, ply_path: Path, world_rotation: Optional[np.ndarray] = None,
+) -> int:
+    """Write a sparse point cloud in OpenGL world coordinates.
+
+    Args:
+        recon: pycolmap.Reconstruction with point3D data.
+        ply_path: Output PLY file path.
+        world_rotation: Optional 3x3 rotation applied to COLMAP points
+            before the fixed OpenCV→OpenGL flip. Used by auto-orientation
+            to align the reconstruction's up direction with +Y.
+    """
     point_ids = sorted(recon.point3D_ids())
     ply_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -82,6 +171,8 @@ def _write_pointcloud(recon, ply_path: Path) -> int:
             point3d = recon.point3D(point_id)
             xyz = np.asarray(point3d.xyz, dtype=np.float64)
             color = np.asarray(point3d.color, dtype=np.uint8)
+            if world_rotation is not None:
+                xyz = world_rotation @ xyz
             # OpenCV → OpenGL world: negate Y and Z
             handle.write(
                 f"{xyz[0]:.9f} {-xyz[1]:.9f} {-xyz[2]:.9f} "
@@ -176,11 +267,10 @@ def export_erp_scaffold(
             "cannot export ERP scaffold"
         )
 
-    # Pitch correction: the rig's forward direction equals the reference
-    # sensor's forward, which points at ref_pitch_deg (e.g. -35°) below
-    # the ERP image center.  Rotate the rig pose so that forward aligns
-    # with the ERP center (pitch=0°).
-    correction_rad = np.radians(-ref_pitch_deg)
+    # Pitch correction: the reference sensor points at ref_pitch_deg
+    # (e.g. -35°) below the ERP horizon.  Apply Rx(ref_pitch_deg) to
+    # rotate the rig w2c so that forward aligns with pitch=0°.
+    correction_rad = np.radians(ref_pitch_deg)
     cos_p = np.cos(correction_rad)
     sin_p = np.sin(correction_rad)
     Rx_correction = np.array([
@@ -189,7 +279,8 @@ def export_erp_scaffold(
         [0.0, sin_p, cos_p],
     ])
 
-    poses: dict[str, np.ndarray] = {}
+    # Phase A: Collect pitch-corrected ERP c2w poses (OpenCV convention)
+    erp_poses: list[tuple[str, np.ndarray]] = []
     skipped_no_pose = 0
     skipped_no_erp = 0
 
@@ -214,28 +305,23 @@ def export_erp_scaffold(
         c2w_opencv[:3, :3] = R_c2w
         c2w_opencv[:3, 3] = t_c2w
 
-        # Apply the same conversion chain as the working Metashape export
-        c2w = _c2w_opencv_to_lfs(c2w_opencv)
-
-        # Identify the frame stem from any image belonging to this frame.
+        # Identify the frame stem
         image_ids = frame.image_ids
         if not image_ids:
             skipped_no_pose += 1
             continue
-
-        # Use the first image's name to derive the shared frame stem.
         first_image = recon.image(image_ids[0].id)
         frame_stem = _frame_stem_from_image_name(first_image.name)
 
-        # Verify the ERP source file exists before recording.
+        # Verify ERP source file exists
         erp_file = _find_erp_file(frame_stem, erp_frames_dir)
         if erp_file is None:
             skipped_no_erp += 1
             continue
 
-        poses[frame_stem] = c2w
+        erp_poses.append((frame_stem, c2w_opencv))
 
-    if not poses:
+    if not erp_poses:
         raise RuntimeError(
             f"No ERP frames could be matched to registered COLMAP frames "
             f"(skipped_no_pose={skipped_no_pose}, skipped_no_erp={skipped_no_erp})"
@@ -244,8 +330,51 @@ def export_erp_scaffold(
     log_fn(
         "Extracted %d rig-origin poses from %d registered frames "
         "(skipped: %d no pose, %d no ERP match)",
-        len(poses), len(reg_frame_ids), skipped_no_pose, skipped_no_erp,
+        len(erp_poses), len(reg_frame_ids), skipped_no_pose, skipped_no_erp,
     )
+
+    # ------------------------------------------------------------------
+    # Phase B: Auto-orient — rotate world so camera up ≈ +Y
+    # ------------------------------------------------------------------
+    _MIN_CONCENTRATION = 0.3
+
+    mean_up, concentration = _compute_mean_camera_up(
+        [c2w for _, c2w in erp_poses]
+    )
+    angle_before = np.degrees(np.arccos(np.clip(mean_up[1], -1, 1)))
+
+    if concentration < _MIN_CONCENTRATION:
+        log_fn(
+            "ERP auto-orient SKIPPED: camera up is too inconsistent "
+            "(concentration=%.3f < %.1f, %d frames). "
+            "mean up=[%.3f, %.3f, %.3f] (%.1f° from +Y). "
+            "Training may fail — consider checking the reconstruction.",
+            concentration, _MIN_CONCENTRATION, len(erp_poses),
+            mean_up[0], mean_up[1], mean_up[2], angle_before,
+        )
+        R_align = np.eye(3)
+    else:
+        R_align = _rotation_between_vectors(
+            mean_up, np.array([0.0, 1.0, 0.0])
+        )
+        angle_after = np.degrees(np.arccos(np.clip(
+            (R_align @ mean_up)[1], -1, 1)))
+        log_fn(
+            "ERP auto-orient: %d frames, concentration=%.3f, "
+            "mean up before=[%.3f, %.3f, %.3f] (%.1f° from +Y), "
+            "after=%.1f° from +Y",
+            len(erp_poses), concentration,
+            mean_up[0], mean_up[1], mean_up[2],
+            angle_before, angle_after,
+        )
+
+    # Apply R_align to all poses and convert to LFS convention
+    poses: dict[str, np.ndarray] = {}
+    for frame_stem, c2w_opencv in erp_poses:
+        c2w_aligned = c2w_opencv.copy()
+        c2w_aligned[:3, :3] = R_align @ c2w_opencv[:3, :3]
+        c2w_aligned[:3, 3] = R_align @ c2w_opencv[:3, 3]
+        poses[frame_stem] = _c2w_opencv_to_lfs(c2w_aligned)
 
     # ------------------------------------------------------------------
     # 3. Move ERP frames/masks to top-level images/ and masks/
@@ -271,7 +400,7 @@ def export_erp_scaffold(
     # 4. Export sparse point cloud
     # ------------------------------------------------------------------
     ply_path = output_dir / "pointcloud.ply"
-    point_count = _write_pointcloud(recon, ply_path)
+    point_count = _write_pointcloud(recon, ply_path, world_rotation=R_align)
     log_fn("Exported ERP sparse point cloud (%d points): %s", point_count, ply_path)
 
     # ------------------------------------------------------------------
@@ -329,33 +458,54 @@ def export_erp_scaffold(
 # Cleanup helpers
 # ---------------------------------------------------------------------------
 
-def cleanup_pinhole_crops(output_dir: Path, log_fn: Callable[..., object] = logger.info) -> None:
-    """Move pinhole image/mask directories out of the way before ERP export.
+def cleanup_pinhole_crops(
+    output_dir: Path,
+    keep: bool = False,
+    log_fn: Callable[..., object] = logger.info,
+) -> None:
+    """Remove or relocate pinhole scaffolding before ERP export.
 
     Called before ``export_erp_scaffold`` so that ``extracted/frames/``
-    can be renamed to ``images/``.  Pinhole crops are kept under
-    ``pinhole_images/`` and ``pinhole_masks/`` for debugging.
+    can be renamed to ``images/``.
+
+    Args:
+        output_dir: Root output directory containing ``images/`` and ``masks/``.
+        keep: If *True*, rename to ``pinhole_images/`` / ``pinhole_masks/``
+            for inspection.  If *False* (default), delete them.
+        log_fn: Logging callback.
     """
     for item_name in ("images", "masks"):
         src = output_dir / item_name
-        dst = output_dir / f"pinhole_{item_name}"
-        if src.is_dir():
+        if not src.is_dir():
+            continue
+        if keep:
+            dst = output_dir / f"pinhole_{item_name}"
             if dst.exists():
                 shutil.rmtree(dst, ignore_errors=True)
             src.rename(dst)
-    log_fn("Moved pinhole crops to pinhole_images/ and pinhole_masks/ in %s", output_dir)
+        else:
+            shutil.rmtree(str(src), ignore_errors=True)
+    if keep:
+        log_fn("Kept pinhole crops in pinhole_images/ and pinhole_masks/ in %s", output_dir)
+    else:
+        log_fn("Deleted pinhole scaffolding from %s", output_dir)
 
 
 def cleanup_colmap_artifacts(output_dir: Path, log_fn: Callable[..., object] = logger.info) -> None:
-    """Delete remaining COLMAP artifacts after ERP export.
+    """Delete COLMAP scaffold artifacts after ERP export.
 
-    Called after ``export_erp_scaffold`` has read the reconstruction.
-    Removes ``sparse/`` (which triggers LFS pinhole auto-detection),
-    the feature database, and other intermediate files.
+    Called after ``export_erp_scaffold`` has extracted rig poses from the
+    reconstruction. The scaffold's ``sparse/`` references pinhole crop
+    camera geometry, but ``images/`` now contains ERP frames — loading
+    ``sparse/`` produces a broken dataset (same ERP image assigned to
+    every pinhole camera slot). Must be removed.
     """
-    for item_name in ("database.db", "colmap_debug.log"):
+    import shutil
+    for item_name in ("sparse", "database.db", "rig_config.json",
+                       "database.db-wal", "database.db-shm"):
         target = output_dir / item_name
-        if not target.exists():
-            continue
-        target.unlink(missing_ok=True)
-    log_fn("Removed COLMAP database from %s (kept sparse/ and rig_config.json)", output_dir)
+        if target.is_dir():
+            shutil.rmtree(str(target), ignore_errors=True)
+        elif target.is_file():
+            target.unlink(missing_ok=True)
+    log_fn("Cleaned COLMAP scaffold artifacts from %s", output_dir)

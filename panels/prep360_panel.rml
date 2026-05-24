@@ -39,19 +39,6 @@
   <!-- ══════════════════════════════════════════════════════════ -->
   <div data-if="show_idle">
 
-    <!-- ── Last-run summary (visible after success or failure) ── -->
-    <div data-if="show_completion">
-      <div class="processing-block">
-        <div class="processing-header">
-          <span class="status-text status-muted">Last Run</span>
-          <button class="btn btn--secondary btn--compact" data-event-click="clear_completion_report">Dismiss</button>
-        </div>
-        <span class="status-text">{{completion_summary_text}}</span>
-        <div class="completion-report processing-report">{{completion_report_text}}</div>
-      </div>
-    </div>
-
-
     <!-- ── Always-visible input/output setup ───────────────── -->
     <div class="section-content">
 
@@ -59,6 +46,7 @@
       <div data-if="show_split_entry">
         <button class="btn btn--primary btn--full" data-event-click="select_video">Select 360&#xb0; Video</button>
         <button class="btn btn--secondary btn--full" data-event-click="enter_split_mode">Select Front + Back Lens Videos</button>
+        <button class="btn btn--secondary btn--full" data-event-click="enter_resume_mode">Re-run COLMAP on Existing Output</button>
         <span class="status-text status-muted">Single file: ERP video, .osv (DJI), or .insv (Insta360). Two-file mode: pre-split fisheye lens pair (e.g. graded .mp4s).</span>
       </div>
 
@@ -67,6 +55,19 @@
         <div class="path-box">{{video_path_text}}</div>
         <span class="status-text status-muted">{{video_info_text}}</span>
         <button class="btn btn--secondary btn--full" data-event-click="clear_video">Clear</button>
+      </div>
+
+      <!-- Resume mode: re-run COLMAP on existing output directory -->
+      <div data-if="show_resume_mode">
+        <div class="setting-row">
+          <span class="prop-label">Output</span>
+          <div class="path-browse-row">
+            <div class="path-box path-box--small">{{output_path_display}}</div>
+            <button class="btn btn--secondary btn--compact" data-event-click="browse_output">Choose</button>
+          </div>
+        </div>
+        <span class="status-text status-muted">{{resume_status_text}}</span>
+        <button class="btn btn--secondary btn--full btn--compact" data-event-click="exit_resume_mode">&#x2190; Back to normal mode</button>
       </div>
 
       <!-- Split-mode pickers (fisheye + source_mode=split) -->
@@ -118,11 +119,21 @@
           <option value="0" selected>Pinhole</option>
           <option value="1">ERP</option>
           <option value="2">Fisheye</option>
+          <option value="3">Fisheye (Pinhole)</option>
         </select>
       </div>
       <div class="setting-row" data-if="show_output_mode_note">
         <span class="prop-label"></span>
         <span class="status-text status-muted">{{output_mode_note}}</span>
+      </div>
+      <div class="setting-row" data-if="show_keep_pinhole_scaffolding">
+        <span class="prop-label"></span>
+        <span class="status-text status-muted">
+          <div class="loop-closure-group">
+            <input type="checkbox" data-checked="keep_pinhole_scaffolding" id="keep_scaffold_cb"/>
+            <label class="checkbox-label" for="keep_scaffold_cb">Keep pinhole scaffolding</label>
+          </div>
+        </span>
       </div>
       <div class="setting-row">
         <span class="prop-label">Summary</span>
@@ -134,6 +145,7 @@
     <div class="section-header text-accent" id="hdr-extraction" data-event-click="toggle_section('extraction')">
       <span class="section-arrow text-accent is-expanded" id="arrow-extraction">&#x25B6;</span>
       <span class="text-accent">Frame Extraction</span>
+      <span class="gpu-indicator" id="gpu-indicator">{{gpu_indicator_text}}</span>
     </div>
     <div class="section-content" id="sec-extraction">
       <div class="setting-row setting-row--aligned">
@@ -342,29 +354,31 @@
       <div class="setting-row">
         <span class="prop-label">Total Output</span>
         <span class="status-text status-muted">{{total_output_text}}</span>
+        <div class="loop-closure-group">
+          <input type="checkbox" data-checked="loop_closure_enabled" id="loop_closure_cb"/>
+          <label class="checkbox-label" for="loop_closure_cb">Loop closure</label>
+        </div>
       </div>
-      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
+      <div class="setting-row" data-if="show_loop_closure_tree">
+        <span class="prop-label"></span>
+        <span class="status-text status-muted">Vocab tree: {{vocab_tree_status}}</span>
+      </div>
+      <div class="setting-row setting-row--dropdown" style="z-index: 36;">
         <span class="prop-label">Matcher</span>
         <select data-value="colmap_matcher_idx">
           <option value="0">Sequential</option>
           <option value="1">Exhaustive</option>
-          <option value="2">Vocab Tree</option>
         </select>
       </div>
-      <!-- Vocab tree file path (shown when Vocab Tree selected) -->
-      <div class="setting-row" data-if="show_vocab_tree_path">
-        <span class="prop-label">Tree File</span>
-        <div class="path-browse-row">
-          <div class="path-box path-box--small">{{vocab_tree_path_display}}</div>
-          <button class="btn btn--secondary btn--compact" data-event-click="browse_vocab_tree">Choose</button>
+      <div class="setting-row setting-row--aligned" data-if="show_sequential_overlap">
+        <span class="setting-row__label-col">Overlap</span>
+        <div class="setting-row__control-col setting-row__control-col--slider">
+          <input type="range" class="setting-slider" data-value="sequential_overlap_str" min="2" max="20" step="1" />
+          <span class="slider-value">{{sequential_overlap_str}}</span>
         </div>
       </div>
-      <div class="setting-row" data-if="show_vocab_tree_missing">
-        <span class="prop-label"></span>
-        <span class="status-text status-muted">Vocab tree file required. Download the standard 32K tree or choose a local file.</span>
-      </div>
-      <!-- COLMAP 4.1 feature controls -->
-      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
+      <!-- COLMAP 4.1 feature controls (z-index descends so upper dropdowns overlay lower) -->
+      <div class="setting-row setting-row--dropdown" style="z-index: 35;">
         <span class="prop-label">Features</span>
         <select data-value="feature_type_idx">
           <option value="0" selected>SIFT</option>
@@ -372,26 +386,31 @@
           <option value="2">ALIKED N32</option>
         </select>
       </div>
-      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
+      <div class="setting-row setting-row--dropdown" style="z-index: 33;">
         <span class="prop-label">Matcher Type</span>
         <select data-value="matcher_type_idx">
           <option value="0" selected>Bruteforce</option>
           <option value="1">LightGlue</option>
         </select>
       </div>
-      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
+      <div class="setting-row setting-row--dropdown" style="z-index: 32;">
         <span class="prop-label">Mapper</span>
         <select data-value="mapper_idx">
           <option value="0" selected>Incremental</option>
           <option value="1">Global (GLOMAP)</option>
         </select>
       </div>
-      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
+      <div class="setting-row" data-if="show_mapper_note">
+        <span class="prop-label"></span>
+        <span class="status-text status-muted">{{mapper_note}}</span>
+      </div>
+      <div class="setting-row setting-row--dropdown" style="z-index: 31;">
         <span class="prop-label">BA Solver</span>
         <select data-value="ba_solver_idx">
-          <option value="0" selected>Auto</option>
-          <option value="1">Ceres</option>
-          <option value="2">Caspar (GPU)</option>
+          <option value="0" selected>Hybrid</option>
+          <option value="1">Caspar</option>
+          <option value="2">Ceres GPU</option>
+          <option value="3">Ceres CPU</option>
         </select>
       </div>
       <div class="setting-row" data-if="show_ba_solver_note">
@@ -406,7 +425,7 @@
       <span class="text-accent">Output Quality</span>
     </div>
     <div class="section-content" id="sec-quality">
-      <div class="setting-row setting-row--dropdown setting-row--dropdown-high">
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-high" data-if="show_crop_size">
         <span class="prop-label">Crop Size</span>
         <select data-value="output_size_idx">
           <option value="0">960 px</option>
@@ -436,10 +455,10 @@
         </select>
       </div>
 
-      <!-- Advanced (SIFT tuning) disclosure -->
+      <!-- Advanced (feature tuning) disclosure -->
       <div class="setting-row sift-disclosure" data-event-click="toggle_sift_advanced">
         <span class="text-accent sift-disclosure__arrow">{{sift_advanced_arrow}}</span>
-        <span class="text-accent sift-disclosure__label">Advanced (SIFT tuning)</span>
+        <span class="text-accent sift-disclosure__label">Advanced (feature tuning)</span>
         <button data-if="show_sift_reset" class="btn btn--secondary btn--compact" data-event-click="reset_sift_to_preset">&#x21BA; Reset to {{sift_preset_label}}</button>
       </div>
 
@@ -486,6 +505,18 @@
     <div class="process-section">
       <button class="btn btn--success btn--full" data-event-click="run_pipeline">Process &amp; Import</button>
       <button class="btn btn--secondary btn--full" data-event-click="run_pipeline_only">Process Only</button>
+    </div>
+
+    <!-- ── Last-run summary ───────────────────────────────── -->
+    <div data-if="show_completion">
+      <div class="section-header text-accent" style="margin-top: 8dp;">
+        <span class="text-accent">Summary</span>
+        <button class="btn btn--secondary btn--compact" style="margin-left: auto;" data-event-click="clear_completion_report">Dismiss</button>
+      </div>
+      <div class="section-content">
+        <span class="status-text">{{completion_summary_text}}</span>
+        <div class="summary-report">{{completion_report_text}}</div>
+      </div>
     </div>
 
   </div>

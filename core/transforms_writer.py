@@ -258,32 +258,51 @@ def write_fisheye_transforms(
     # Cache per-camera intrinsics so we don't re-read them per frame.
     # Each entry: {"w","h","fl_x","fl_y","cx","cy","k1","k2","k3","k4"}.
     camera_intrinsics: dict[int, dict] = {}
+    detected_model: str = ""
     for cam_id, cam in recon.cameras.items():
         model_name = cam.model_name  # property in pycolmap 4.0
-        if model_name != "OPENCV_FISHEYE":
+        params = list(cam.params)
+        if model_name == "OPENCV_FISHEYE":
+            if len(params) != 8:
+                raise RuntimeError(
+                    f"OPENCV_FISHEYE expects 8 params, got {len(params)} on "
+                    f"camera {cam_id}"
+                )
+            fx, fy, cx, cy, k1, k2, k3, k4 = params
+            camera_intrinsics[cam_id] = {
+                "w": int(cam.width),
+                "h": int(cam.height),
+                "fl_x": float(fx),
+                "fl_y": float(fy),
+                "cx": float(cx),
+                "cy": float(cy),
+                "k1": float(k1),
+                "k2": float(k2),
+                "k3": float(k3),
+                "k4": float(k4),
+            }
+            detected_model = "OPENCV_FISHEYE"
+        elif model_name == "PINHOLE":
+            if len(params) != 4:
+                raise RuntimeError(
+                    f"PINHOLE expects 4 params, got {len(params)} on "
+                    f"camera {cam_id}"
+                )
+            fx, fy, cx, cy = params
+            camera_intrinsics[cam_id] = {
+                "w": int(cam.width),
+                "h": int(cam.height),
+                "fl_x": float(fx),
+                "fl_y": float(fy),
+                "cx": float(cx),
+                "cy": float(cy),
+            }
+            detected_model = "PINHOLE"
+        else:
             raise RuntimeError(
                 f"Camera {cam_id} has model {model_name!r}; "
-                "write_fisheye_transforms only supports OPENCV_FISHEYE"
+                "write_fisheye_transforms supports OPENCV_FISHEYE and PINHOLE"
             )
-        params = list(cam.params)
-        if len(params) != 8:
-            raise RuntimeError(
-                f"OPENCV_FISHEYE expects 8 params, got {len(params)} on "
-                f"camera {cam_id}"
-            )
-        fx, fy, cx, cy, k1, k2, k3, k4 = params
-        camera_intrinsics[cam_id] = {
-            "w": int(cam.width),
-            "h": int(cam.height),
-            "fl_x": float(fx),
-            "fl_y": float(fy),
-            "cx": float(cx),
-            "cy": float(cy),
-            "k1": float(k1),
-            "k2": float(k2),
-            "k3": float(k3),
-            "k4": float(k4),
-        }
 
     log_fn("Found %d unique cameras: %s",
            len(camera_intrinsics), sorted(camera_intrinsics.keys()))
@@ -331,7 +350,7 @@ def write_fisheye_transforms(
     # transforms.json
     transforms_path = out_dir / transforms_filename
     transforms_data = {
-        "camera_model": "OPENCV_FISHEYE",
+        "camera_model": detected_model,
         "applied_transform": _APPLIED_TRANSFORM,
         "ply_file_path": ply_filename,
         "frames": frames,
@@ -342,5 +361,236 @@ def write_fisheye_transforms(
         "Wrote fisheye transforms.json with %d frames across %d cameras: %s",
         len(frames), len(camera_intrinsics), transforms_path,
     )
+
+    return transforms_path
+
+
+def write_rig_propagated_transforms(
+    colmap_sparse_dir: str | Path,
+    images_root: str | Path,
+    output_dir: str | Path,
+    view_config,
+    baseline_m: float = 0.026,
+    back_intrinsics: dict | None = None,
+    transforms_filename: str = "transforms.json",
+    ply_filename: str = "pointcloud.ply",
+    log_fn: Callable[..., object] = logger.info,
+) -> Path:
+    """Write transforms.json by propagating a reference-view COLMAP reconstruction
+    to all rig views via known geometry.
+
+    COLMAP reconstructs only the reference sensor (``views[0]``, typically
+    ``front_ctr_hi``). This function derives every other view's pose from the
+    known ``cam_from_rig`` rotation (and baseline for back-lens views), then
+    writes a single transforms.json covering all 16 views × N registered frames.
+
+    Args:
+        colmap_sparse_dir: COLMAP sparse model directory (contains the
+            reference-view-only reconstruction).
+        images_root: Parent directory of all view subfolders
+            (e.g. ``<output>/images/``).
+        output_dir: Where to write transforms.json + pointcloud.ply.
+        view_config: ``FisheyeViewConfig`` with all 16 view definitions.
+        baseline_m: Inter-lens baseline in metres (default 0.026 for DJI Osmo).
+        back_intrinsics: Optional dict with w/h/fl_x/fl_y/cx/cy for back views.
+            If None, computed from ``view_config.crop_size`` at 90° FOV.
+        transforms_filename: Output transforms filename.
+        ply_filename: Output pointcloud filename.
+        log_fn: Logging callback.
+
+    Returns:
+        Path to the written transforms.json.
+    """
+    import pycolmap
+    from .fisheye_reframer import _rotation_matrix
+
+    sparse_dir = Path(colmap_sparse_dir)
+    images_root = Path(images_root)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Step 1: Load reconstruction
+    log_fn("Loading reference-view reconstruction from %s", sparse_dir)
+    recon = pycolmap.Reconstruction(str(sparse_dir))
+
+    reg_image_ids = sorted(recon.reg_image_ids())
+    if not reg_image_ids:
+        raise RuntimeError(
+            "Reference-view reconstruction has no registered images — "
+            "cannot propagate poses"
+        )
+    log_fn("Reference reconstruction: %d registered images", len(reg_image_ids))
+
+    views = view_config.views
+    ref_view = views[0]   # front_ctr_hi (rig reference)
+    lo_view = views[7]    # front_ctr_lo (second reference)
+    ref_prefix = ref_view.name + "/"
+    lo_prefix = lo_view.name + "/"
+
+    # Step 2: Find reference camera intrinsics from the reconstruction.
+    # With PER_FOLDER, each subfolder gets its own camera. Find the one
+    # belonging to the ref view by checking registered image names.
+    ref_cam_id = None
+    for img_id in reg_image_ids:
+        image = recon.image(img_id)
+        if image.name.startswith(ref_prefix):
+            ref_cam_id = image.camera_id
+            break
+    if ref_cam_id is None:
+        # All registered images are from the lo view — use that camera
+        ref_cam_id = recon.image(reg_image_ids[0]).camera_id
+
+    cam = recon.cameras[ref_cam_id]
+    params = list(cam.params)
+    front_intrinsics = {
+        "w": int(cam.width),
+        "h": int(cam.height),
+        "fl_x": float(params[0]),
+        "fl_y": float(params[1]),
+        "cx": float(params[2]),
+        "cy": float(params[3]),
+    }
+    log_fn("Refined front intrinsics: fl=%.2f,%.2f cx=%.2f cy=%.2f",
+           front_intrinsics["fl_x"], front_intrinsics["fl_y"],
+           front_intrinsics["cx"], front_intrinsics["cy"])
+
+    # Step 3: Default back intrinsics from crop geometry
+    if back_intrinsics is None:
+        crop = view_config.crop_size
+        fl = crop / 2.0  # 90° FOV
+        back_intrinsics = {
+            "w": crop, "h": crop,
+            "fl_x": fl, "fl_y": fl,
+            "cx": crop / 2.0, "cy": crop / 2.0,
+        }
+
+    # Step 4: Precompute cam_from_rig for all 16 views
+    R_back = np.array([[-1, 0, 0], [0, 1, 0], [0, 0, -1]], dtype=np.float64)
+    R_ref = _rotation_matrix(ref_view.yaw_deg, ref_view.pitch_deg)
+
+    view_transforms = []  # (R_rel, d_rig, is_back) per view
+    for view in views:
+        R_view = _rotation_matrix(view.yaw_deg, view.pitch_deg)
+        if view.source_lens == "back":
+            R_view = R_view @ R_back
+        R_rel = R_view @ R_ref.T
+        # d_rig: position of this view's optical center in the rig frame.
+        # Front views share the rig origin (front lens); back views are offset
+        # by baseline_m along rig -Z (behind the front lens).
+        d_rig = (np.array([0.0, 0.0, -baseline_m], dtype=np.float64)
+                 if view.source_lens == "back"
+                 else np.zeros(3, dtype=np.float64))
+        view_transforms.append((R_rel, d_rig, view.source_lens == "back"))
+
+    # Precompute lo→ref derivation rotation (for frames where only lo registered)
+    R_lo_from_ref = _rotation_matrix(lo_view.yaw_deg, lo_view.pitch_deg) @ R_ref.T
+
+    # Step 5: Build per-frame pose map from both reference views.
+    # Prefer front_ctr_hi; derive ref pose from front_ctr_lo when needed.
+    frame_poses: dict[str, tuple] = {}  # bare_name → (R_w2c, t_w2c, source)
+    for img_id in reg_image_ids:
+        image = recon.image(img_id)
+        name = image.name
+        if name.startswith(ref_prefix):
+            bare = name[len(ref_prefix):]
+            source = "ref"
+        elif name.startswith(lo_prefix):
+            bare = name[len(lo_prefix):]
+            source = "lo"
+        else:
+            log_fn("WARNING: unexpected image name %r in reconstruction", name)
+            continue
+        # Prefer ref; only use lo if ref isn't registered for this frame
+        if bare not in frame_poses or source == "ref":
+            cam_from_world = image.cam_from_world()
+            R_w2c = np.asarray(cam_from_world.rotation.matrix(), dtype=np.float64)
+            t_w2c = np.asarray(cam_from_world.translation, dtype=np.float64)
+            frame_poses[bare] = (R_w2c, t_w2c, source)
+
+    # Derive ref pose from lo pose for frames where only lo registered
+    ref_count = sum(1 for _, _, s in frame_poses.values() if s == "ref")
+    lo_count = sum(1 for _, _, s in frame_poses.values() if s == "lo")
+    for bare in frame_poses:
+        R_w2c, t_w2c, source = frame_poses[bare]
+        if source == "lo":
+            R_w2c = R_lo_from_ref.T @ R_w2c
+            t_w2c = R_lo_from_ref.T @ t_w2c
+            frame_poses[bare] = (R_w2c, t_w2c, "derived_from_lo")
+    log_fn("Frame poses: %d from ref, %d derived from lo, %d total",
+           ref_count, lo_count, len(frame_poses))
+
+    # Step 6: Propagate each frame's ref pose to all 16 views
+    frames = []
+    missing_count = 0
+
+    for bare_name, (R_w2c, t_w2c, _source) in sorted(frame_poses.items()):
+        for i, view in enumerate(views):
+            R_rel, d_rig, is_back = view_transforms[i]
+
+            # Propagate w2c: cam_from_world = cam_from_rig @ rig_from_world
+            # The rig-frame offset d_rig is subtracted BEFORE rotating into
+            # the view's coordinate frame, so all views on the same lens
+            # share one optical center in world space.
+            R_v = R_rel @ R_w2c
+            t_v = R_rel @ (t_w2c - d_rig)
+
+            # Invert to c2w (OpenCV convention)
+            R_c2w = R_v.T
+            t_c2w = -R_v.T @ t_v
+            c2w_opencv = np.eye(4, dtype=np.float64)
+            c2w_opencv[:3, :3] = R_c2w
+            c2w_opencv[:3, 3] = t_c2w
+
+            # Convert to LFS coordinate system
+            c2w_lfs = _c2w_opencv_to_lfs(c2w_opencv)
+
+            # Flat naming: images/{view_name}_{frame_id}.jpg
+            flat_name = f"{view.name}_{bare_name}"
+            rel_path = f"images/{flat_name}"
+            abs_path = images_root / flat_name
+            if not abs_path.exists():
+                # Pre-flatten layout: try subfolder path
+                abs_path_sub = images_root / view.name / bare_name
+                if not abs_path_sub.exists():
+                    missing_count += 1
+                    continue
+
+            intr = back_intrinsics if is_back else front_intrinsics
+            frames.append({
+                "file_path": rel_path,
+                "transform_matrix": c2w_lfs.tolist(),
+                **intr,
+            })
+
+    if missing_count:
+        log_fn("WARNING: %d view images missing on disk (skipped)", missing_count)
+
+    if not frames:
+        raise RuntimeError("No valid frames after pose propagation")
+
+    n_frames = len(frame_poses)
+    log_fn("Propagated %d frame poses → %d total entries (%d views × %d frames)",
+           n_frames, len(frames), len(views), n_frames)
+
+    # Step 7: Write pointcloud + transforms.json
+    ply_path = out_dir / ply_filename
+    point_count = _write_sparse_pointcloud(recon, ply_path)
+    log_fn("Wrote sparse pointcloud (%d points): %s", point_count, ply_path)
+
+    transforms_path = out_dir / transforms_filename
+    transforms_data = {
+        "camera_model": "PINHOLE",
+        # Top-level intrinsics required by LFS — it ignores per-frame values.
+        # Use the front-lens (refined by COLMAP BA) as the shared intrinsics.
+        **front_intrinsics,
+        "applied_transform": _APPLIED_TRANSFORM,
+        "ply_file_path": ply_filename,
+        "frames": sorted(frames, key=lambda e: e["file_path"]),
+    }
+    with transforms_path.open("w", encoding="utf-8") as fp:
+        json.dump(transforms_data, fp, indent=4)
+
+    log_fn("Wrote propagated transforms.json with %d frames: %s",
+           len(frames), transforms_path)
 
     return transforms_path

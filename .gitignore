@@ -6,8 +6,10 @@ __pycache__/
 settings.json
 *.egg-info/
 masking_setup_debug.txt
+.hf_access_verified
 .lichtfeld-source.json
 .tmp-dll/
+lib/vocab_tree*.bin
 tmp/
 COLMAP_RIG_REPORT.md
 CLAUDE.md
@@ -19,3 +21,5 @@ dev/bp_harness_output/
 docs/*
 tests/
 DIAGNOSTICS.md
+HANDOVER.md
+AGENTS.md

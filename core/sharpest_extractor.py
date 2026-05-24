@@ -22,6 +22,8 @@ Algorithm (Basic/Better/Best modes):
 
 import bisect
 import json
+import logging
+import math
 import os
 import re
 import subprocess
@@ -29,6 +31,8 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # ffmpeg / ffprobe binary discovery
@@ -149,12 +153,15 @@ class SharpestResult:
     output_dir: str = ""
     frame_paths: List[str] = field(default_factory=list)
     error: Optional[str] = None
+    gpu_accelerated: bool = False
 
 
 # -- main class -------------------------------------------------------------
 
 class SharpestExtractor:
     """Extract the sharpest frame per interval from a video."""
+
+    _gpu_ok: Optional[bool] = None
 
     def __init__(
         self,
@@ -164,6 +171,445 @@ class SharpestExtractor:
         resolved_ffmpeg, resolved_ffprobe = _resolve_ffmpeg_binaries()
         self.ffmpeg_path = ffmpeg_path or resolved_ffmpeg
         self.ffprobe_path = ffprobe_path or resolved_ffprobe
+
+    # -- GPU availability ---------------------------------------------------
+
+    @classmethod
+    def _gpu_available(cls) -> bool:
+        """Check if CUDA OpenCV with cudacodec and required ops is available."""
+        if cls._gpu_ok is None:
+            try:
+                import cv2
+                cls._gpu_ok = (
+                    cv2.cuda.getCudaEnabledDeviceCount() > 0
+                    and callable(getattr(cv2.cudacodec, 'createVideoReader', None))
+                    and callable(getattr(cv2.cudacodec, 'VideoReaderInitParams', None))
+                    and callable(getattr(cv2.cuda, 'createSobelFilter', None))
+                    and callable(getattr(cv2.cuda, 'createLaplacianFilter', None))
+                    and callable(getattr(cv2.cuda, 'resize', None))
+                    and callable(getattr(cv2.cuda, 'cvtColor', None))
+                    and callable(getattr(cv2.cuda, 'sum', None))
+                    and callable(getattr(cv2.cuda, 'multiply', None))
+                    and callable(getattr(cv2.cuda, 'add', None))
+                    and hasattr(cv2.cuda, 'GpuMat')
+                )
+            except Exception:
+                cls._gpu_ok = False
+        return cls._gpu_ok
+
+    @staticmethod
+    def _frame_range_for_seconds(
+        fps: float,
+        total_frame_count: int,
+        start_sec: Optional[float],
+        end_sec: Optional[float],
+    ) -> Tuple[float, int, int]:
+        """Convert a user time range to an exclusive frame range."""
+        range_start_sec = max(0.0, float(start_sec or 0.0))
+        start_frame = max(0, int(math.ceil(range_start_sec * fps - 1e-9)))
+        if end_sec is None:
+            end_frame = total_frame_count
+        else:
+            range_end_sec = max(range_start_sec, float(end_sec))
+            end_frame = min(
+                total_frame_count,
+                int(math.ceil(range_end_sec * fps - 1e-9)),
+            )
+        return range_start_sec, start_frame, end_frame
+
+    @staticmethod
+    def _time_window_index(
+        frame_idx: int,
+        fps: float,
+        range_start_sec: float,
+        interval_sec: float,
+    ) -> int:
+        """Return the user-time interval window containing frame_idx."""
+        interval = max(float(interval_sec), 1e-9)
+        frame_time = frame_idx / fps
+        elapsed = max(0.0, frame_time - range_start_sec)
+        return int(math.floor((elapsed + 1e-9) / interval))
+
+    @staticmethod
+    def _detect_scene_change(prev_bgr, curr_bgr, threshold: float) -> bool:
+        """Detect scene change via HSV histogram correlation."""
+        import cv2
+        corr_threshold = 1.0 - threshold
+        prev_hsv = cv2.cvtColor(prev_bgr, cv2.COLOR_BGR2HSV)
+        curr_hsv = cv2.cvtColor(curr_bgr, cv2.COLOR_BGR2HSV)
+        hist_prev = cv2.calcHist([prev_hsv], [0, 1], None, [50, 60], [0, 180, 0, 256])
+        hist_curr = cv2.calcHist([curr_hsv], [0, 1], None, [50, 60], [0, 180, 0, 256])
+        cv2.normalize(hist_prev, hist_prev)
+        cv2.normalize(hist_curr, hist_curr)
+        corr = cv2.compareHist(hist_prev, hist_curr, cv2.HISTCMP_CORREL)
+        return corr < corr_threshold
+
+    @staticmethod
+    def _nvdec_failure_hint(media_summary: str) -> str:
+        """Return a concise hint for common non-NVDEC media formats."""
+        summary = media_summary.lower()
+        if any(token in summary for token in ("dnxhd", "dnxhr", "vc3", "avdh")):
+            return (
+                "DNxHD/DNxHR is not supported by NVDEC; CPU fallback is expected. "
+                "Use HEVC/H.265 or H.264 for GPU extraction."
+            )
+        if "prores" in summary or "apch" in summary or "apcn" in summary:
+            return (
+                "ProRes is not supported by NVDEC; CPU fallback is expected. "
+                "Use HEVC/H.265 or H.264 for GPU extraction."
+            )
+        if media_summary:
+            return (
+                "NVDEC may not support this codec, profile, chroma format, "
+                "container, or resolution on this GPU."
+            )
+        return "NVDEC could not open this stream; CPU fallback is expected."
+
+    def _gpu_reader_failure_messages(
+        self,
+        video_path: str,
+        exc: Optional[BaseException] = None,
+    ) -> List[str]:
+        """Build user-facing log lines for cudacodec reader failures."""
+        messages = ["  GPU: cudacodec reader failed"]
+        try:
+            proc = subprocess.run(
+                [
+                    self.ffprobe_path, "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries",
+                    "stream=codec_name,profile,codec_tag_string,pix_fmt,width,height,r_frame_rate",
+                    "-of", "json",
+                    str(video_path),
+                ],
+                capture_output=True, text=True, check=True, timeout=10,
+                **_SUBPROCESS_FLAGS,
+            )
+            data = json.loads(proc.stdout)
+            streams = data.get("streams") or []
+            if streams:
+                s = streams[0]
+                parts = [s.get("codec_name", "?")]
+                if s.get("profile"):
+                    parts[0] = f"{s['profile']} / {parts[0]}"
+                if s.get("pix_fmt"):
+                    parts.append(s["pix_fmt"])
+                if s.get("width") and s.get("height"):
+                    parts.append(f"{s['width']}x{s['height']}")
+                summary = ", ".join(parts)
+                messages.append(f"       media: {summary}")
+                messages.append(f"       note: {self._nvdec_failure_hint(summary)}")
+        except Exception:
+            messages.append(f"       note: {self._nvdec_failure_hint('')}")
+        if exc is not None:
+            detail = str(exc).strip().splitlines()
+            if detail:
+                messages.append(f"       OpenCV: {detail[0]}")
+        return messages
+
+    # -- GPU single-pass extraction -----------------------------------------
+
+    def _extract_gpu_single_pass(
+        self,
+        video_path: str,
+        output_dir: str,
+        config: SharpestConfig,
+        scene_aware: bool = True,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        prefix_source: bool = True,
+    ) -> Optional[SharpestResult]:
+        """GPU-accelerated single-pass extraction using NVDEC + CUDA scoring.
+
+        Returns SharpestResult on success or cancellation.
+        Returns None on GPU init/runtime failure (caller falls back to CPU).
+        """
+        import cv2
+        import numpy as np
+        import time
+
+        out = Path(output_dir)
+        video = Path(video_path)
+
+        # Get video metadata from CPU VideoCapture (reliable)
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return None
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+
+        if fps <= 0:
+            return None
+
+        approx_window_frames = max(1, int(round(fps * config.interval)))
+        range_start_sec, start_frame, end_frame = self._frame_range_for_seconds(
+            fps, total_frame_count, config.start_sec, config.end_sec)
+        frames_in_range = end_frame - start_frame
+        if frames_in_range <= 0:
+            return SharpestResult(success=False, error="Invalid time range")
+
+        # Open cudacodec reader with firstFrameIdx for seeking
+        params = cv2.cudacodec.VideoReaderInitParams()
+        if start_frame > 0:
+            params.firstFrameIdx = start_frame
+        try:
+            reader = cv2.cudacodec.createVideoReader(video_path, params=params)
+        except (cv2.error, TypeError) as e:
+            for msg in self._gpu_reader_failure_messages(video_path, exc=e):
+                logger.info(msg)
+            return None
+
+        gpu_written_paths: List[str] = []
+
+        try:
+            # Read first frame for format detection
+            ret, first_gpu = reader.nextFrame()
+            if not ret:
+                logger.info("  GPU: could not read first frame")
+                return None
+
+            channels = first_gpu.channels()
+            gpu_type = first_gpu.type()
+            depth = gpu_type & 7
+            is_16bit = (depth == 2)
+            is_8bit = (depth == 0)
+
+            if not (is_8bit or is_16bit):
+                logger.info("  GPU: unsupported frame depth (type=%d, depth=%d)", gpu_type, depth)
+                return None
+
+            if channels == 4:
+                gray_code = cv2.COLOR_BGRA2GRAY
+                bgr_code = cv2.COLOR_BGRA2BGR
+            elif channels == 3:
+                gray_code = cv2.COLOR_BGR2GRAY
+                bgr_code = None
+            else:
+                logger.info("  GPU: unsupported frame format (%d channels)", channels)
+                return None
+
+            logger.info("  GPU: NVDEC decode, %dch %s, scoring: %s, scene detection: %s",
+                        channels, 'uint16' if is_16bit else 'uint8',
+                        config.blur_metric, scene_aware)
+
+            # Pre-create GPU filters
+            if config.blur_metric == "tenengrad":
+                sobel_x = cv2.cuda.createSobelFilter(cv2.CV_8UC1, cv2.CV_32F, 1, 0, ksize=3)
+                sobel_y = cv2.cuda.createSobelFilter(cv2.CV_8UC1, cv2.CV_32F, 0, 1, ksize=3)
+            else:
+                lap_filter = cv2.cuda.createLaplacianFilter(cv2.CV_32FC1, cv2.CV_32FC1, ksize=1)
+
+            # -- Helper functions --
+
+            def _prepare_gray(gpu_frm):
+                w, h = gpu_frm.size()
+                if config.scale_width and w > config.scale_width:
+                    gpu_small = cv2.cuda.resize(
+                        gpu_frm, (config.scale_width, int(h * config.scale_width / w)))
+                else:
+                    gpu_small = gpu_frm
+                gpu_gray = cv2.cuda.cvtColor(gpu_small, gray_code)
+                if is_16bit:
+                    gpu_8u = cv2.cuda.GpuMat(gpu_gray.size(), cv2.CV_8UC1)
+                    gpu_gray.convertTo(cv2.CV_8UC1, gpu_8u, alpha=1.0 / 256.0)
+                else:
+                    gpu_8u = gpu_gray
+                return gpu_8u
+
+            def _score_tenengrad(gpu_8u):
+                gx = sobel_x.apply(gpu_8u)
+                gy = sobel_y.apply(gpu_8u)
+                gx2 = cv2.cuda.multiply(gx, gx)
+                gy2 = cv2.cuda.multiply(gy, gy)
+                energy = cv2.cuda.add(gx2, gy2)
+                s = cv2.cuda.sum(energy)
+                n = energy.size()[0] * energy.size()[1]
+                return s[0] / n
+
+            def _score_laplacian(gpu_8u):
+                gpu_32f = cv2.cuda.GpuMat(gpu_8u.size(), cv2.CV_32FC1)
+                gpu_8u.convertTo(cv2.CV_32FC1, gpu_32f)
+                dst = lap_filter.apply(gpu_32f)
+                sq = cv2.cuda.multiply(dst, dst)
+                sum_sq = cv2.cuda.sum(sq)
+                sum_val = cv2.cuda.sum(dst)
+                n = dst.size()[0] * dst.size()[1]
+                mean = sum_val[0] / n
+                return sum_sq[0] / n - mean * mean
+
+            score_fn = _score_tenengrad if config.blur_metric == "tenengrad" else _score_laplacian
+
+            def _prepare_scene_bgr(gpu_frm):
+                w, h = gpu_frm.size()
+                scene_w = min(480, w)
+                scene_h = int(h * scene_w / w)
+                gpu_small = cv2.cuda.resize(gpu_frm, (scene_w, scene_h))
+                gpu_bgr = cv2.cuda.cvtColor(gpu_small, cv2.COLOR_BGRA2BGR) if channels == 4 else gpu_small
+                if is_16bit:
+                    gpu_bgr_8u = cv2.cuda.GpuMat(gpu_bgr.size(), cv2.CV_8UC3)
+                    gpu_bgr.convertTo(cv2.CV_8UC3, gpu_bgr_8u, alpha=1.0 / 256.0)
+                    return gpu_bgr_8u.download()
+                return gpu_bgr.download()
+
+            def _save_winner_gpu(gpu_frm, filepath):
+                frame = gpu_frm.download()
+                if is_16bit:
+                    frame = (frame >> 8).astype(np.uint8)
+                if bgr_code is not None:
+                    frame = cv2.cvtColor(frame, bgr_code)
+                ext = config.output_format
+                if ext in ("jpg", "jpeg"):
+                    cv2.imwrite(str(filepath), frame,
+                                [cv2.IMWRITE_JPEG_QUALITY, config.quality])
+                else:
+                    cv2.imwrite(str(filepath), frame)
+
+            # -- Output setup --
+
+            ext = config.output_format
+            stem = video.stem + "_" if prefix_source else ""
+            winners_written = 0
+            frame_paths: List[str] = []
+            best_frame_numbers: List[int] = []
+
+            def _write_gpu_winner(gpu_frm, frame_num):
+                nonlocal winners_written
+                winners_written += 1
+                filename = f"{stem}{winners_written:05d}.{ext}"
+                filepath = out / filename
+                _save_winner_gpu(gpu_frm, filepath)
+                path_str = str(filepath)
+                frame_paths.append(path_str)
+                best_frame_numbers.append(frame_num)
+                gpu_written_paths.append(path_str)
+
+            # -- Single-pass streaming loop --
+
+            t_start = time.perf_counter()
+            total_scored = 0
+            scene_count = 0
+            all_sharpness: List[float] = []
+            prev_scene_bgr = None
+
+            best_score = -1.0
+            best_gpu_frame = None
+            best_frame_idx = -1
+            current_window_idx: Optional[int] = None
+
+            if cancel_check and cancel_check():
+                return SharpestResult(success=False, error="Cancelled")
+
+            # Process first frame (already read for format detection)
+            gpu_8u = _prepare_gray(first_gpu)
+            sharpness = score_fn(gpu_8u)
+            total_scored += 1
+            all_sharpness.append(sharpness)
+
+            if scene_aware:
+                prev_scene_bgr = _prepare_scene_bgr(first_gpu)
+
+            best_score = sharpness
+            best_gpu_frame = first_gpu.clone()
+            best_frame_idx = start_frame
+            current_window_idx = self._time_window_index(
+                start_frame, fps, range_start_sec, config.interval)
+
+            # Continue with remaining frames
+            for frame_idx in range(start_frame + 1, end_frame):
+                if cancel_check and cancel_check():
+                    for p in gpu_written_paths:
+                        Path(p).unlink(missing_ok=True)
+                    return SharpestResult(success=False, error="Cancelled")
+
+                ret, gpu_frame = reader.nextFrame()
+                if not ret:
+                    break
+
+                gpu_8u = _prepare_gray(gpu_frame)
+                sharpness = score_fn(gpu_8u)
+                total_scored += 1
+                all_sharpness.append(sharpness)
+
+                relative_idx = frame_idx - start_frame
+                window_idx = self._time_window_index(
+                    frame_idx, fps, range_start_sec, config.interval)
+
+                is_scene = False
+                if scene_aware:
+                    scene_bgr = _prepare_scene_bgr(gpu_frame)
+                    if prev_scene_bgr is not None:
+                        is_scene = self._detect_scene_change(
+                            prev_scene_bgr, scene_bgr, config.scene_threshold)
+                    prev_scene_bgr = scene_bgr
+
+                if current_window_idx is None:
+                    current_window_idx = window_idx
+                elif window_idx != current_window_idx:
+                    if best_gpu_frame is not None:
+                        _write_gpu_winner(best_gpu_frame, best_frame_idx)
+                    best_score = -1.0
+                    best_gpu_frame = None
+                    best_frame_idx = -1
+                    current_window_idx = window_idx
+
+                if is_scene:
+                    scene_count += 1
+                    if best_gpu_frame is not None:
+                        _write_gpu_winner(best_gpu_frame, best_frame_idx)
+                        best_score = -1.0
+                        best_gpu_frame = None
+                        best_frame_idx = -1
+
+                if sharpness > best_score:
+                    best_score = sharpness
+                    best_gpu_frame = gpu_frame.clone()
+                    best_frame_idx = frame_idx
+
+                if frames_in_range > 0:
+                    pct = int(relative_idx / frames_in_range * 100)
+                    if relative_idx % max(1, frames_in_range // 10) == 0:
+                        if progress_callback:
+                            progress_callback(pct, 100,
+                                f"Processing (GPU): {pct}% ({relative_idx}/{frames_in_range})")
+
+            # Final flush
+            if best_gpu_frame is not None:
+                _write_gpu_winner(best_gpu_frame, best_frame_idx)
+
+        except cv2.error as e:
+            logger.info("  GPU error during processing: %s", e)
+            for p in gpu_written_paths:
+                Path(p).unlink(missing_ok=True)
+            return None
+
+        elapsed = time.perf_counter() - t_start
+
+        if total_scored == 0:
+            return SharpestResult(success=False, error="No frames scored")
+
+        logger.info("  GPU %s scoring: %d frames (%.1fs)",
+                     config.blur_metric.title(), total_scored, elapsed)
+        logger.info("  Sharpness: min=%.1f max=%.1f mean=%.1f",
+                     min(all_sharpness), max(all_sharpness),
+                     sum(all_sharpness) / len(all_sharpness))
+        if scene_aware:
+            logger.info("  Scene changes detected: %d", scene_count)
+        logger.info("  Winners: %d frames extracted", winners_written)
+
+        # Write manifest — convert frame numbers to timestamps
+        timestamps = [frame_num / fps for frame_num in best_frame_numbers]
+        self._write_manifest(out, frame_paths, video, config,
+                             timestamps, fps, range_start_sec)
+
+        return SharpestResult(
+            success=True,
+            total_frames_analyzed=total_scored,
+            frames_extracted=winners_written,
+            output_dir=output_dir,
+            frame_paths=frame_paths,
+            gpu_accelerated=True,
+        )
 
     # -- public API ---------------------------------------------------------
 
@@ -211,7 +657,18 @@ class SharpestExtractor:
                 prefix_source=prefix_source,
             )
 
-        # Basic / Better / Best: two-pass pipeline (scene detect + OpenCV scoring)
+        # Basic / Better / Best: try GPU first, fall back to CPU two-pass
+        if self._gpu_available():
+            gpu_result = self._extract_gpu_single_pass(
+                str(video), str(out), config,
+                scene_aware=True,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                prefix_source=prefix_source,
+            )
+            if gpu_result is not None:
+                return gpu_result
+
         return self._extract_scored(
             str(video), str(out), config,
             progress_callback=progress_callback,

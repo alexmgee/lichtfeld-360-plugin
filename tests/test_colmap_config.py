@@ -31,6 +31,11 @@ def test_matcher_type_map():
     assert _MATCHER_TYPE_MAP[("aliked_n32", "bruteforce")] == "ALIKED_BRUTEFORCE"
 
 
+def test_ba_solver_ceres_gpu():
+    c = ColmapConfig(ba_solver="ceres_gpu")
+    assert c.ba_solver == "ceres_gpu"
+
+
 def test_fisheye_config():
     c = ColmapConfig(
         camera_model="OPENCV_FISHEYE",

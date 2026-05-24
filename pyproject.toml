@@ -8,7 +8,7 @@ license = { text = "GPL-3.0-or-later" }
 authors = [{name = "Alex Gee"}]
 dependencies = [
     "huggingface-hub==1.9.0",
-    "opencv-python-headless",
+    "opencv-contrib-python==4.13.0.90",
     "numpy",
     "pycolmap",
     "static-ffmpeg",
@@ -31,9 +31,15 @@ sam3-masking = [
 Repository = "https://github.com/alexmgee/lichtfeld-360-plugin"
 Issues = "https://github.com/alexmgee/lichtfeld-360-plugin/issues"
 
+[tool.uv]
+exclude-dependencies = ["opencv-python", "opencv-python-headless"]
+
 [tool.uv.sources]
+opencv-contrib-python = [
+  { url = "https://github.com/cudawarped/opencv-python-cuda-wheels/releases/download/4.13.0.90/opencv_contrib_python-4.13.0.90-cp37-abi3-win_amd64.whl", marker = "sys_platform == 'win32'" },
+]
 pycolmap = [
-  { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0-dev1/pycolmap-4.1.0.dev1%2Bcuda-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
+  { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0-dev2/pycolmap-4.1.0.dev2%2Bcuda-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
 ]
 torch = [
   { index = "pytorch-cu128", marker = "sys_platform == 'win32'" },
@@ -48,7 +54,7 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.lichtfeld]
-hot_reload = true
+hot_reload = false
 display_name = "360 Plugin"
 plugin_api = ">=1,<2"
 lichtfeld_version = ">=0.5.0"

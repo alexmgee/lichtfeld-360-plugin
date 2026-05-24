@@ -24,6 +24,28 @@ body {
     z-index: 0;
 }
 
+.gpu-indicator {
+    margin-left: auto;
+    font-size: 11dp;
+    padding-right: 8dp;
+}
+
+.gpu-indicator.gpu-ready {
+    color: #4CAF50;
+}
+
+.gpu-indicator.gpu-cpu-only {
+    color: #666688;
+}
+
+.loop-closure-group {
+    margin-left: auto;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 4dp;
+}
+
 .setting-row {
     position: relative;
     z-index: 0;
@@ -67,6 +89,65 @@ body {
 .setting-slider {
     position: relative;
     z-index: 1;
+}
+
+/* ── Scrub field layout (mirrors LFS components.rcss) ──── */
+
+.scrub-field {
+    position: relative;
+    overflow: hidden;
+    min-height: 18dp;
+    padding: 0 6dp;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    box-sizing: border-box;
+    border-width: 1dp;
+    border-radius: 6dp;
+    font-size: 12dp;
+    cursor: ew-resize;
+}
+
+.scrub-field-fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 0%;
+    border-radius: 5dp;
+}
+
+.scrub-field-display,
+.scrub-field-input {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    text-align: right;
+    font-size: 12dp;
+}
+
+.scrub-field-display {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.scrub-field-input {
+    display: none;
+    padding: 0;
+    margin: 0;
+    min-height: 0;
+    background-color: transparent;
+    border-width: 0;
+    box-shadow: none;
+}
+
+.scrub-field.is-editing .scrub-field-display {
+    display: none;
+}
+
+.scrub-field.is-editing .scrub-field-input {
+    display: block;
 }
 
 /* ── Path display box ───────────────────────────────────── */
@@ -225,6 +306,12 @@ body {
     line-height: 14dp;
 }
 
+.summary-report {
+    margin: 0dp;
+    white-space: pre-line;
+    line-height: 14dp;
+}
+
 /* ── Text input (for mask prompts) ──────────────────────── */
 
 .text-input {
@@ -311,7 +398,8 @@ body {
     cursor: pointer;
     align-items: center;
     gap: 6dp;
-    margin-left: 28dp;
+    margin-left: 12dp;
+    overflow: visible;
 }
 
 .sift-disclosure__arrow {

@@ -180,19 +180,27 @@ PRESET_LABELS = [
     "Ultra (24 views)",
 ]
 
-COLMAP_MATCHERS = ["sequential", "exhaustive", "vocab_tree"]
+COLMAP_MATCHERS = ["sequential", "exhaustive"]
+
+# Bundled faiss-format vocab trees keyed by feature type
+_PLUGIN_DIR = Path(__file__).resolve().parent.parent
+_VOCAB_TREE_BUNDLED = {
+    "sift": _PLUGIN_DIR / "lib" / "vocab_tree_faiss_flickr100K_words256K.bin",
+    "aliked_n16rot": _PLUGIN_DIR / "lib" / "vocab_tree_faiss_flickr100K_words64K_aliked_n16rot.bin",
+    "aliked_n32": _PLUGIN_DIR / "lib" / "vocab_tree_faiss_flickr100K_words64K_aliked_n32.bin",
+}
 
 # COLMAP 4.1 feature controls
 FEATURE_TYPES = ["sift", "aliked_n16rot", "aliked_n32"]
 MATCHER_TYPES = ["bruteforce", "lightglue"]
 MAPPERS = ["incremental", "global"]
-BA_SOLVERS = ["auto", "ceres", "caspar"]
+BA_SOLVERS = ["auto", "caspar", "ceres_gpu", "ceres"]
 MATCH_BUDGET_TIERS = ["fast", "balanced", "default", "high", "custom"]
 
 OUTPUT_SIZES = [960, 1280, 1536, 1920, 2400, 3072, 3840]
 
 # COLMAP / SIFT preset matrix exposed via the Output Quality panel.
-# Each entry maps (output_mode, preset_name) -> (max_features, max_image_size).
+# Each entry maps (output_mode, preset_name) -> (max_features, max_image_size, max_matches).
 # Pinhole/ERP "High" bumps DSLR detail meaningfully; ERP High matches Fisheye
 # Normal because the extended Crop Size dropdown lets ERP render at native
 # fisheye-equivalent resolution. Fisheye baselines are anchored at the
@@ -201,21 +209,34 @@ OUTPUT_SIZES = [960, 1280, 1536, 1920, 2400, 3072, 3840]
 SIFT_PRESETS = ["normal", "high", "custom"]
 SIFT_PRESET_LABELS = ["Normal", "High", "Custom"]
 SIFT_NORMAL_IDX, SIFT_HIGH_IDX, SIFT_CUSTOM_IDX = 0, 1, 2
-SIFT_PRESET_MATRIX: dict[tuple[str, str], tuple[int, int]] = {
-    ("pinhole", "normal"): (2048, 1600),
-    ("pinhole", "high"):   (4096, 2400),
-    ("erp",     "normal"): (2048, 1600),
-    ("erp",     "high"):   (8192, 3840),
-    ("fisheye", "normal"): (8192, 3840),
-    ("fisheye", "high"):   (16384, 3840),
+SIFT_PRESET_MATRIX: dict[tuple[str, str], tuple[int, int, int]] = {
+    ("pinhole", "normal"): (2048, 1600, 32768),
+    ("pinhole", "high"):   (4096, 2400, 65536),
+    ("erp",     "normal"): (2048, 1600, 32768),
+    ("erp",     "high"):   (8192, 3840, 65536),
+    ("fisheye", "normal"):         (8192, 3840, 32768),
+    ("fisheye", "high"):           (16384, 3840, 65536),
+    ("fisheye_pinhole", "normal"): (8192, 1920, 32768),
+    ("fisheye_pinhole", "high"):   (16384, 1920, 65536),
 }
 
-OUTPUT_MODES = ["pinhole", "erp", "fisheye"]
-OUTPUT_MODE_LABELS = ["Pinhole", "ERP", "Fisheye"]
-FISHEYE_OUTPUT_MODE_IDX = 2  # index of "fisheye" in OUTPUT_MODES — used by visibility checks
+# Default max_num_features per extractor type (from COLMAP docs).
+# Used by _set_feature_type_idx to reset max_features when switching extractors,
+# and by _set_sift_preset_idx / _resnap_sift_for_mode to cap values for non-SIFT.
+_FEATURE_MAX_DEFAULTS = {
+    "sift": 8192,
+    "aliked_n16rot": 2048,
+    "aliked_n32": 2048,
+}
+
+OUTPUT_MODES = ["pinhole", "erp", "fisheye", "fisheye_pinhole"]
+OUTPUT_MODE_LABELS = ["Pinhole", "ERP", "Fisheye", "Fisheye (Pinhole)"]
+FISHEYE_OUTPUT_MODE_IDX = 2  # index of "fisheye" in OUTPUT_MODES
+FISHEYE_PINHOLE_OUTPUT_MODE_IDX = 3  # index of "fisheye_pinhole"
+_FISHEYE_MODES = {FISHEYE_OUTPUT_MODE_IDX, FISHEYE_PINHOLE_OUTPUT_MODE_IDX}
 
 # Source modes for dual fisheye input (fisheye output mode only)
-SOURCE_MODES = ["container", "split"]
+SOURCE_MODES = ["container", "split", "resume"]
 SOURCE_MODE_LABELS = ["Single file", "Two files (split)"]
 
 # Camera families for split mode (auto-detected for container; manual for split)
@@ -238,6 +259,9 @@ SCRUB_FIELD_SPECS = {
     ),
     "sift_max_image_size_str": ScrubFieldSpec(
         min_value=1024.0, max_value=4096.0, step=128.0, fmt="%d", data_type=int,
+    ),
+    "sequential_overlap_str": ScrubFieldSpec(
+        min_value=2.0, max_value=20.0, step=1.0, fmt="%d", data_type=int,
     ),
 }
 
@@ -366,14 +390,16 @@ class Plugin360Panel(lf.ui.Panel):
         self._front_video_path: str = ""
         self._back_video_path: str = ""
         self._keep_streams: bool = False
+        self._keep_pinhole_scaffolding: bool = False
         self._fisheye_circle_margin: float = 6.0
 
         # COLMAP 4.1 controls
         self._feature_type_idx: int = 0   # SIFT
         self._matcher_type_idx: int = 0   # Bruteforce
         self._mapper_idx: int = 0         # Incremental
-        self._ba_solver_idx: int = 0      # Auto
-        self._vocab_tree_path: str = ""
+        self._ba_solver_idx: int = 0      # Auto (hybrid)
+        self._loop_closure_enabled: bool = False
+        self._sequential_overlap: int = 10
 
         # Processing state
         self._is_processing: bool = False
@@ -436,6 +462,7 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind("extract_sharpness_idx", lambda: str(self._extract_sharpness_idx), self._set_extract_sharpness)
         model.bind("blur_metric_idx", lambda: str(self._blur_metric_idx), self._set_blur_metric)
         model.bind_func("est_frames_text", self._get_est_frames_text)
+        model.bind_func("gpu_indicator_text", self._get_gpu_indicator_text)
 
         # -- Masking --
         model.bind("enable_masking", lambda: self._enable_masking, self._set_enable_masking)
@@ -491,7 +518,7 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("show_preset_select", lambda: self._output_mode_idx == 0)
         model.bind_func("show_erp_scaffold_preset", lambda: self._output_mode_idx == 1)
         model.bind_func("erp_scaffold_preset_text", self._get_erp_scaffold_preset_text)
-        model.bind_func("show_fisheye_preset", lambda: self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX)
+        model.bind_func("show_fisheye_preset", lambda: self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX)  # native fisheye only
         model.bind_func("fisheye_preset_text", self._get_fisheye_preset_text)
         model.bind_func("coverage_text", self._get_coverage_text)
         model.bind_func("total_output_text", self._get_total_output_text)
@@ -502,11 +529,10 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind("colmap_max_matches_str", lambda: str(self._colmap_max_num_matches), self._set_colmap_max_matches)
         model.bind_func("match_budget_text", self._get_match_budget_text)
 
-        # Vocab tree path (visible when Vocab Tree matcher selected)
-        model.bind_func("show_vocab_tree_path", lambda: self._colmap_matcher_idx == 2)
-        model.bind_func("show_vocab_tree_missing", lambda: self._colmap_matcher_idx == 2 and not self._vocab_tree_path)
-        model.bind_func("vocab_tree_path_display", lambda: self._vocab_tree_path or "(not set)")
-        model.bind_event("browse_vocab_tree", self._on_browse_vocab_tree)
+        # Loop closure detection
+        model.bind("loop_closure_enabled", lambda: self._loop_closure_enabled, self._set_loop_closure)
+        model.bind_func("show_loop_closure_tree", lambda: self._loop_closure_enabled)
+        model.bind_func("vocab_tree_status", self._get_vocab_tree_status)
 
         # COLMAP 4.1 controls
         model.bind("feature_type_idx", lambda: str(self._feature_type_idx), self._set_feature_type_idx)
@@ -515,10 +541,16 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind("ba_solver_idx", lambda: str(self._ba_solver_idx), self._set_ba_solver_idx)
         model.bind_func("show_ba_solver_note", lambda: True)
         model.bind_func("ba_solver_note", self._get_ba_solver_note)
+        model.bind_func("mapper_note", self._get_mapper_note)
+        model.bind_func("show_mapper_note", lambda: bool(self._get_mapper_note()))
+
+        # Sequential overlap (visible when Matcher = Sequential)
+        model.bind("sequential_overlap_str", lambda: str(self._sequential_overlap), self._set_sequential_overlap)
+        model.bind_func("show_sequential_overlap", lambda: self._colmap_matcher_idx == 0)
 
         # Fisheye circle margin (visible when fisheye + masking enabled)
         model.bind("fisheye_circle_margin_str", lambda: f"{self._fisheye_circle_margin:.0f}", self._set_fisheye_circle_margin)
-        model.bind_func("show_fisheye_circle_margin", lambda: self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX and self._enable_masking)
+        model.bind_func("show_fisheye_circle_margin", lambda: self._output_mode_idx in _FISHEYE_MODES and self._enable_masking)
 
         # SIFT controls (COLMAP Preset dropdown + Advanced disclosure)
         model.bind("sift_preset_idx", lambda: str(self._sift_preset_idx), self._set_sift_preset_idx)
@@ -531,26 +563,30 @@ class Plugin360Panel(lf.ui.Panel):
 
         # -- Output --
         model.bind("output_mode_idx", lambda: str(self._output_mode_idx), self._set_output_mode)
-        model.bind_func("show_output_mode_note", lambda: self._output_mode_idx in (1, FISHEYE_OUTPUT_MODE_IDX))
+        model.bind_func("show_output_mode_note", lambda: self._output_mode_idx in (1, FISHEYE_OUTPUT_MODE_IDX, FISHEYE_PINHOLE_OUTPUT_MODE_IDX))
+        model.bind_func("show_crop_size", lambda: self._output_mode_idx not in {FISHEYE_OUTPUT_MODE_IDX})
 
         # ── Fisheye-specific bindings ──
         # Split mode is determined by direct user choice (the "Front + Back"
         # button on the empty state) rather than nested under Output Mode.
         # output_mode_idx still flips to Fisheye automatically when split is
         # active or when the user loads a .osv/.insv container.
-        is_fisheye = lambda: self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX
+        is_fisheye = lambda: self._output_mode_idx in _FISHEYE_MODES
         is_split = lambda: self._source_mode_idx == 1
-        is_fisheye_container = lambda: is_fisheye() and not is_split()
+        is_resume = lambda: self._source_mode_idx == 2
+        is_fisheye_container = lambda: is_fisheye() and not is_split() and not is_resume()
 
         # Empty-state visibility: show two entry buttons when nothing loaded
-        # (no single video AND not in split mode).
-        empty_state = lambda: not self._video_loaded and not is_split()
+        # (no single video AND not in split mode AND not in resume mode).
+        empty_state = lambda: not self._video_loaded and not is_split() and not is_resume()
         model.bind_func("show_split_entry", empty_state)
+        model.bind_func("show_resume_mode", is_resume)
+        model.bind_func("resume_status_text", self._get_resume_status_text)
         # Single-file picker visible when video loaded (regular flow) or
         # when nothing loaded and not in split mode (so the "Select 360°
         # Video" half of the empty state still works).
         model.bind_func("show_split_pickers", is_split)
-        model.bind_func("show_single_picker", lambda: not is_split())
+        model.bind_func("show_single_picker", lambda: not is_split() and not is_resume())
         model.bind_func("show_camera_family_select", is_split)
         model.bind_func("show_camera_family_detected", lambda: is_fisheye_container() and self._camera_family_detected is not None)
         model.bind_func("show_keep_streams", is_fisheye_container)
@@ -560,13 +596,17 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("front_video_path_text", lambda: self._front_video_path or "(not set)")
         model.bind_func("back_video_path_text", lambda: self._back_video_path or "(not set)")
         model.bind_func("camera_family_detected_text", self._get_camera_family_detected_text)
-        model.bind("keep_streams", lambda: "true" if self._keep_streams else "false", self._set_keep_streams)
+        model.bind("keep_streams", lambda: self._keep_streams, self._set_keep_streams)
+        model.bind("keep_pinhole_scaffolding", lambda: self._keep_pinhole_scaffolding, self._set_keep_pinhole_scaffolding)
+        model.bind_func("show_keep_pinhole_scaffolding", lambda: self._output_mode_idx == 1)
         model.bind_event("select_front_video", self._on_select_front_video)
         model.bind_event("select_back_video", self._on_select_back_video)
         model.bind_event("clear_front_video", self._on_clear_front_video)
         model.bind_event("clear_back_video", self._on_clear_back_video)
         model.bind_event("enter_split_mode", self._on_enter_split_mode)
         model.bind_event("exit_split_mode", self._on_exit_split_mode)
+        model.bind_event("enter_resume_mode", self._on_enter_resume_mode)
+        model.bind_event("exit_resume_mode", self._on_exit_resume_mode)
         model.bind_event("toggle_sift_advanced", self._on_toggle_sift_advanced)
         model.bind_event("reset_sift_to_preset", self._on_reset_sift_to_preset)
         model.bind_func("output_mode_note", self._get_output_mode_note)
@@ -625,6 +665,12 @@ class Plugin360Panel(lf.ui.Panel):
         self._doc = doc
         self._scrub_fields.mount(doc)
         self._start_setup_probe(auto_enable=True)
+        # Set GPU indicator class (cached, won't change at runtime)
+        gpu_el = doc.get_element_by_id("gpu-indicator")
+        if gpu_el:
+            from ..core.sharpest_extractor import SharpestExtractor
+            cls = "gpu-ready" if SharpestExtractor._gpu_available() else "gpu-cpu-only"
+            gpu_el.set_class(cls, True)
 
     def on_unmount(self, doc):
         self._scrub_fields.unmount()
@@ -706,7 +752,7 @@ class Plugin360Panel(lf.ui.Panel):
             self._mapper_idx,
             self._ba_solver_idx,
             self._fisheye_circle_margin,
-            self._vocab_tree_path,
+            self._loop_closure_enabled,
             self._output_path,
             self._is_processing,
             self._processing_stage,
@@ -957,9 +1003,17 @@ class Plugin360Panel(lf.ui.Panel):
             return f"Estimated frames   ~{base}\u2013{base + extra}"
         return f"Estimated frames   ~{base}"
 
+    def _get_gpu_indicator_text(self) -> str:
+        from ..core.sharpest_extractor import SharpestExtractor
+        if SharpestExtractor._gpu_available():
+            return "GPU ready"
+        return "CPU only"
+
     def _get_coverage_text(self) -> str:
         if self._get_output_mode() == "fisheye":
             return "2 fisheye images per pair (front + back, native resolution)"
+        if self._get_output_mode() == "fisheye_pinhole":
+            return "8+8 pinhole crops per pair (Default preset, 90° FOV, rig-constrained)"
         name = resolve_view_preset_name(
             self._get_selected_preset_name(),
             self._get_output_mode(),
@@ -974,6 +1028,12 @@ class Plugin360Panel(lf.ui.Panel):
             _interval_fish = 1.0 / max(0.1, self._extract_fps)
             _pairs_fish = VideoAnalyzer.estimate_frame_count(self._video_info, _interval_fish)
             return f"~{_pairs_fish} pairs x 2 = {2 * _pairs_fish:,} fisheye images"
+        if output_mode == "fisheye_pinhole":
+            if not self._video_info:
+                return "16 pinhole crops per pair (8 front + 8 back)"
+            _interval_fp = 1.0 / max(0.1, self._extract_fps)
+            _pairs_fp = VideoAnalyzer.estimate_frame_count(self._video_info, _interval_fp)
+            return f"~{_pairs_fp} pairs x 16 = {16 * _pairs_fp:,} pinhole crops"
         vc = self._get_current_view_config()
         views = vc.total_views()
         if not self._video_info:
@@ -1013,6 +1073,26 @@ class Plugin360Panel(lf.ui.Panel):
             )
             return (
                 f"Fisheye | {family_label} | OPENCV_FISHEYE \u00d7 2 cameras | "
+                f"~{pairs:,} pairs"
+            )
+
+        if output_mode == "fisheye_pinhole":
+            family = self._camera_family_detected
+            if family is None and 0 <= self._camera_family_idx < len(CAMERA_FAMILIES):
+                family = CAMERA_FAMILIES[self._camera_family_idx]
+            family_label = (
+                CAMERA_FAMILY_LABELS[CAMERA_FAMILIES.index(family)]
+                if family in CAMERA_FAMILIES else (family or "unknown")
+            )
+            if not self._video_loaded:
+                return "No video loaded"
+            interval = 1.0 / max(0.1, self._extract_fps)
+            pairs = (
+                VideoAnalyzer.estimate_frame_count(self._video_info, interval)
+                if self._video_info else 0
+            )
+            return (
+                f"Fisheye (Pinhole) | {family_label} | PINHOLE \u00d7 16 cameras | "
                 f"~{pairs:,} pairs"
             )
 
@@ -1095,10 +1175,11 @@ class Plugin360Panel(lf.ui.Panel):
         Fisheye native (camera_model=OPENCV_FISHEYE) outputs — both produce
         transforms.json at the dataset root.
 
-        LichtFeld expects the dataset *directory* (containing transforms.json),
-        not the transforms.json file itself.  Passing the file directly causes
-        LFS to use the filename as the scene name and to mis-resolve relative
-        mask / pointcloud paths.
+        Passes the transforms.json file path directly (not the directory)
+        so LFS's BlenderLoader picks it up instead of ColmapLoader. When
+        the directory is passed and sparse/ also exists, ColmapLoader wins
+        (registered first) and loads pinhole scaffold cameras instead of
+        the ERP/fisheye cameras declared in transforms.json.
         """
         transforms_file = Path(transforms_path)
         if transforms_file.suffix.lower() != ".json":
@@ -1107,7 +1188,7 @@ class Plugin360Panel(lf.ui.Panel):
             raise RuntimeError(f"transforms.json not found: {transforms_path}")
         dataset_dir = transforms_file.parent
         output_path = str(dataset_dir / "output")
-        return str(dataset_dir), output_path
+        return str(transforms_file), output_path
 
     def _build_stage_timing_lines(
         self,
@@ -1198,7 +1279,9 @@ class Plugin360Panel(lf.ui.Panel):
             if output_images > 0:
                 lines.append(f"Images written: {output_images}")
             lines.append(f"Output path: {output_root}")
-            log_path = output_root / "colmap_debug.log"
+            log_path = output_root / "metadata" / "colmap_debug.log"
+            if not log_path.is_file():
+                log_path = output_root / "colmap_debug.log"
             if log_path.is_file():
                 lines.append(f"COLMAP log: {log_path}")
 
@@ -1265,7 +1348,9 @@ class Plugin360Panel(lf.ui.Panel):
         if not self._output_path:
             return
 
-        timing_path = Path(self._output_path) / "timing.json"
+        metadata_dir = Path(self._output_path) / "metadata"
+        metadata_dir.mkdir(exist_ok=True)
+        timing_path = metadata_dir / "timing.json"
         mask_diagnostics_summary = self._load_mask_diagnostics_summary(
             result.mask_diagnostics_path
         )
@@ -1360,6 +1445,10 @@ class Plugin360Panel(lf.ui.Panel):
                 f"Frames: {result.num_source_frames} -> Images: "
                 f"{result.num_output_images} -> Aligned: {result.num_aligned_cameras}"
             )
+
+        if result.gpu_extraction:
+            lines.append("Extraction: GPU (NVDEC + CUDA scoring)")
+        lines.append(f"Output path:\n{result.dataset_path}")
 
         summary = f"Completed in {total:.1f}s - {', '.join(parts)}"
         return summary, "\n".join(lines)
@@ -1765,6 +1854,7 @@ class Plugin360Panel(lf.ui.Panel):
                 self._match_budget_idx = len(MATCH_BUDGET_TIERS) - 1
             else:
                 self._match_budget_idx = matched_tier
+            self._recompute_sift_preset_from_values()
         except (ValueError, TypeError):
             pass
 
@@ -1788,9 +1878,16 @@ class Plugin360Panel(lf.ui.Panel):
                 self._sift_last_non_custom_preset_idx = idx
                 mode_key = self._get_sift_mode_key()
                 preset_name = SIFT_PRESETS[idx]
-                feat, size = SIFT_PRESET_MATRIX[(mode_key, preset_name)]
+                feat, size, matches = SIFT_PRESET_MATRIX[(mode_key, preset_name)]
                 self._sift_max_features = feat
                 self._sift_max_image_size = size
+                self._colmap_max_num_matches = matches
+                # If the current extractor is not SIFT, cap max_features at
+                # the extractor's documented default (e.g. 2048 for ALIKED).
+                cur_feat_type = FEATURE_TYPES[self._feature_type_idx]
+                feat_cap = _FEATURE_MAX_DEFAULTS.get(cur_feat_type)
+                if feat_cap is not None and self._sift_max_features > feat_cap:
+                    self._sift_max_features = feat_cap
             # Refresh sister bindings (max_features_str / max_image_size_str
             # plus show_sift_reset / sift_preset_label) so the slider widgets
             # actually re-read their data-value after the snap.
@@ -1803,6 +1900,8 @@ class Plugin360Panel(lf.ui.Panel):
         try:
             v = int(float(val))
             v = max(1024, min(32768, v))
+            if v == self._sift_max_features:
+                return
             self._sift_max_features = v
             self._recompute_sift_preset_from_values()
             if self._handle:
@@ -1814,6 +1913,8 @@ class Plugin360Panel(lf.ui.Panel):
         try:
             v = int(float(val))
             v = max(1024, min(4096, v))
+            if v == self._sift_max_image_size:
+                return
             self._sift_max_image_size = v
             self._recompute_sift_preset_from_values()
             if self._handle:
@@ -1827,29 +1928,42 @@ class Plugin360Panel(lf.ui.Panel):
         output mode. Editing back to a preset value flips Custom → preset.
         """
         mode_key = self._get_sift_mode_key()
-        cur = (self._sift_max_features, self._sift_max_image_size)
-        if cur == SIFT_PRESET_MATRIX[(mode_key, "normal")]:
+        cur = (self._sift_max_features, self._sift_max_image_size, self._colmap_max_num_matches)
+        if cur == SIFT_PRESET_MATRIX.get((mode_key, "normal")):
             self._sift_preset_idx = SIFT_NORMAL_IDX
             self._sift_last_non_custom_preset_idx = SIFT_NORMAL_IDX
-        elif cur == SIFT_PRESET_MATRIX[(mode_key, "high")]:
+        elif cur == SIFT_PRESET_MATRIX.get((mode_key, "high")):
             self._sift_preset_idx = SIFT_HIGH_IDX
             self._sift_last_non_custom_preset_idx = SIFT_HIGH_IDX
         else:
             # Don't update last_non_custom — preserves the Reset target.
             self._sift_preset_idx = SIFT_CUSTOM_IDX
 
-    def _resnap_sift_for_mode(self) -> None:
+    def _resnap_sift_for_mode(self, force: bool = False) -> None:
         """Called when output_mode changes. If user is on Normal/High,
         re-snap slider values to the new mode's matrix row. If Custom,
         leave values alone — Custom values persist across mode switches.
+
+        Args:
+            force: If True, snap to the last non-custom preset even if
+                the current preset is Custom. Used on auto-detect to
+                ensure fisheye defaults override stale initial values.
         """
-        if self._sift_preset_idx == SIFT_CUSTOM_IDX:
+        if self._sift_preset_idx == SIFT_CUSTOM_IDX and not force:
             return
+        if force and self._sift_preset_idx == SIFT_CUSTOM_IDX:
+            self._sift_preset_idx = self._sift_last_non_custom_preset_idx
         mode_key = self._get_sift_mode_key()
         preset_name = SIFT_PRESETS[self._sift_preset_idx]
-        feat, size = SIFT_PRESET_MATRIX[(mode_key, preset_name)]
+        feat, size, matches = SIFT_PRESET_MATRIX[(mode_key, preset_name)]
         self._sift_max_features = feat
         self._sift_max_image_size = size
+        self._colmap_max_num_matches = matches
+        # Cap max_features for non-SIFT extractors
+        cur_feat_type = FEATURE_TYPES[self._feature_type_idx]
+        feat_cap = _FEATURE_MAX_DEFAULTS.get(cur_feat_type)
+        if feat_cap is not None and self._sift_max_features > feat_cap:
+            self._sift_max_features = feat_cap
 
     def _show_sift_reset(self) -> bool:
         """Reset pill is visible only when sliders are exposed AND the user
@@ -1877,9 +1991,10 @@ class Plugin360Panel(lf.ui.Panel):
             target_idx = SIFT_NORMAL_IDX
         mode_key = self._get_sift_mode_key()
         preset_name = SIFT_PRESETS[target_idx]
-        feat, size = SIFT_PRESET_MATRIX[(mode_key, preset_name)]
+        feat, size, matches = SIFT_PRESET_MATRIX[(mode_key, preset_name)]
         self._sift_max_features = feat
         self._sift_max_image_size = size
+        self._colmap_max_num_matches = matches
         self._sift_preset_idx = target_idx
         if self._handle:
             self._handle.dirty_all()
@@ -1890,7 +2005,17 @@ class Plugin360Panel(lf.ui.Panel):
         try:
             idx = int(val)
             if 0 <= idx < len(FEATURE_TYPES):
+                old_type = FEATURE_TYPES[self._feature_type_idx]
                 self._feature_type_idx = idx
+                new_type = FEATURE_TYPES[idx]
+                # Reset max_features to new extractor's default if user hasn't
+                # manually adjusted (i.e., current value matches old default)
+                old_default = _FEATURE_MAX_DEFAULTS.get(old_type, 8192)
+                if self._sift_max_features == old_default:
+                    new_default = _FEATURE_MAX_DEFAULTS.get(new_type, 8192)
+                    self._sift_max_features = new_default
+                if self._handle:
+                    self._handle.dirty_all()
         except (ValueError, TypeError):
             pass
 
@@ -1918,21 +2043,42 @@ class Plugin360Panel(lf.ui.Panel):
         except (ValueError, TypeError):
             pass
 
+    def _set_loop_closure(self, val):
+        self._loop_closure_enabled = bool(val)
+        if self._handle:
+            self._handle.dirty_all()
+
+    def _set_sequential_overlap(self, val):
+        try:
+            v = int(float(val))
+            self._sequential_overlap = max(2, min(20, v))
+        except (ValueError, TypeError):
+            pass
+
     def _get_ba_solver_note(self) -> str:
         solver = BA_SOLVERS[self._ba_solver_idx] if 0 <= self._ba_solver_idx < len(BA_SOLVERS) else "auto"
         output_mode = self._get_output_mode()
-        if output_mode == "fisheye":
-            if solver == "caspar":
-                return "Caspar does not support OPENCV_FISHEYE yet — will use Ceres."
-            elif solver == "auto":
-                return "Auto: Ceres (fisheye not yet supported by Caspar)."
-            return "Ceres solver."
-        else:
-            if solver == "auto":
-                return "Auto: Caspar GPU BA (5-20x faster on Pinhole)."
-            elif solver == "caspar":
-                return "Caspar GPU BA (5-20x faster)."
-            return "Ceres solver."
+        if solver == "auto":
+            if output_mode == "fisheye":
+                return "Hybrid: Ceres-GPU on both local and global BA (OPENCV_FISHEYE)."
+            return "Hybrid: Ceres-GPU local BA + Caspar global BA."
+        if solver == "caspar":
+            if output_mode == "fisheye":
+                return "OPENCV_FISHEYE not supported by Caspar — will fall back to Ceres-GPU."
+            return "Caspar GPU BA on both local and global (fast, PINHOLE only)."
+        if solver == "ceres_gpu":
+            return "Ceres with cuDSS GPU acceleration on both local and global BA."
+        return "Ceres CPU solver (no GPU — for debugging/comparison)."
+
+    def _get_mapper_note(self) -> str:
+        """Warning when GLOMAP is selected in a rig-dependent output mode."""
+        if self._mapper_idx != 1:  # not GLOMAP
+            return ""
+        mode = self._get_output_mode()
+        if mode == "fisheye":
+            return ""  # fisheye native doesn't use rig constraints
+        return ("GLOMAP lacks rig constraints — cameras will drift relative to "
+                "each other. Use Incremental mapper for rig-dependent modes.")
 
     def _set_fisheye_circle_margin(self, val):
         try:
@@ -1942,16 +2088,16 @@ class Plugin360Panel(lf.ui.Panel):
         except (ValueError, TypeError):
             pass
 
-    def _on_browse_vocab_tree(self, handle, event, args):
-        del handle, event, args
-        path = lf.ui.open_file_dialog(
-            title="Select Vocabulary Tree File",
-            start_dir=self._vocab_tree_path or "",
-        )
-        if path:
-            self._vocab_tree_path = path
-            if self._handle:
-                self._handle.dirty_all()
+    def _get_vocab_tree_status(self) -> str:
+        """Status text showing which bundled vocab tree will be used."""
+        feat = FEATURE_TYPES[self._feature_type_idx]
+        tree = _VOCAB_TREE_BUNDLED.get(feat)
+        if tree and tree.exists():
+            return tree.name
+        for p in _VOCAB_TREE_BUNDLED.values():
+            if p.exists():
+                return f"{p.name} (fallback)"
+        return "Not available — no bundled tree found"
 
     def _set_output_mode(self, val):
         try:
@@ -1960,7 +2106,14 @@ class Plugin360Panel(lf.ui.Panel):
                 self._output_mode_idx = idx
                 # Snap SIFT to the new mode's preset row (no-op if Custom).
                 self._resnap_sift_for_mode()
-                # Refresh SIFT slider bindings after the snap.
+                # Fisheye (Pinhole) defaults to sequential matching (rig-constrained)
+                if idx == FISHEYE_PINHOLE_OUTPUT_MODE_IDX:
+                    self._colmap_matcher_idx = 0  # sequential
+                # Force incremental mapper for rig-dependent modes
+                # (GLOMAP lacks constant_rigs constraint)
+                if OUTPUT_MODES[idx] != "fisheye" and self._mapper_idx != 0:
+                    self._mapper_idx = 0
+                # Refresh bindings after the snap.
                 if self._handle:
                     self._handle.dirty_all()
         except (ValueError, TypeError):
@@ -1978,6 +2131,12 @@ class Plugin360Panel(lf.ui.Panel):
                 "Outputs raw fisheye frames aligned via COLMAP's OPENCV_FISHEYE "
                 "camera model with PER_FOLDER mode. Each lens (front/back) is "
                 "calibrated independently by bundle adjustment."
+            )
+        if self._output_mode_idx == FISHEYE_PINHOLE_OUTPUT_MODE_IDX:
+            return (
+                "Reframes fisheye into 16 pinhole crops (8 per lens) and aligns "
+                "via COLMAP with PINHOLE model + rig constraints + sequential "
+                "matching. Faster and more robust than native fisheye."
             )
         return ""
 
@@ -2007,6 +2166,12 @@ class Plugin360Panel(lf.ui.Panel):
             self._keep_streams = val
         else:
             self._keep_streams = str(val).lower() in ("true", "1", "yes", "on")
+
+    def _set_keep_pinhole_scaffolding(self, val):
+        if isinstance(val, bool):
+            self._keep_pinhole_scaffolding = val
+        else:
+            self._keep_pinhole_scaffolding = str(val).lower() in ("true", "1", "yes", "on")
 
     def _set_front_video_path_noop(self, val):
         # Path is set by _on_select_front_video, not by user typing.
@@ -2052,6 +2217,12 @@ class Plugin360Panel(lf.ui.Panel):
             return float(self._jpeg_quality)
         if prop == "colmap_max_matches_str":
             return float(self._colmap_max_num_matches)
+        if prop == "sift_max_features_str":
+            return float(self._sift_max_features)
+        if prop == "sift_max_image_size_str":
+            return float(self._sift_max_image_size)
+        if prop == "sequential_overlap_str":
+            return float(self._sequential_overlap)
         raise KeyError(prop)
 
     def _set_scrub_value(self, prop: str, value: float) -> None:
@@ -2061,6 +2232,12 @@ class Plugin360Panel(lf.ui.Panel):
             self._jpeg_quality = max(50, min(100, int(value)))
         elif prop == "colmap_max_matches_str":
             self._set_colmap_max_matches(value)
+        elif prop == "sift_max_features_str":
+            self._set_sift_max_features(value)
+        elif prop == "sift_max_image_size_str":
+            self._set_sift_max_image_size(value)
+        elif prop == "sequential_overlap_str":
+            self._sequential_overlap = max(2, min(20, int(value)))
         else:
             raise KeyError(prop)
 
@@ -2112,8 +2289,9 @@ class Plugin360Panel(lf.ui.Panel):
         dialog. The user clicks Choose on each picker separately afterward.
         """
         del handle, event, args
-        self._output_mode_idx = FISHEYE_OUTPUT_MODE_IDX
-        self._resnap_sift_for_mode()
+        self._output_mode_idx = FISHEYE_PINHOLE_OUTPUT_MODE_IDX
+        self._colmap_matcher_idx = 0  # sequential
+        self._resnap_sift_for_mode(force=True)
         self._source_mode_idx = 1  # "split"
         # Reset any prior single-file state so the UI doesn't show stale info.
         self._video_loaded = False
@@ -2134,6 +2312,42 @@ class Plugin360Panel(lf.ui.Panel):
         if self._handle:
             self._handle.dirty_all()
 
+    def _on_enter_resume_mode(self, handle, event, args):
+        """Switch to resume mode — re-run COLMAP on existing output images."""
+        del handle, event, args
+        self._source_mode_idx = 2  # "resume"
+        self._error_message = ""
+        if self._handle:
+            self._handle.dirty_all()
+
+    def _on_exit_resume_mode(self, handle, event, args):
+        """Leave resume mode and return to normal empty state."""
+        del handle, event, args
+        self._source_mode_idx = 0  # "container"
+        if self._handle:
+            self._handle.dirty_all()
+
+    def _get_resume_status_text(self) -> str:
+        """Status text for resume mode — detect existing images."""
+        if not self._output_path:
+            return "Set an output path to a previous pipeline run."
+        from pathlib import Path
+        images_dir = Path(self._output_path) / "images"
+        if not images_dir.is_dir():
+            return f"No images/ directory found in {self._output_path}"
+        # Count images (flat or subfolder)
+        flat_count = len(list(images_dir.glob("*.jpg")))
+        if flat_count > 0:
+            return f"Found {flat_count} images (flat layout). Ready to re-run COLMAP."
+        # Check subfolders
+        sub_count = 0
+        sub_dirs = [d for d in images_dir.iterdir() if d.is_dir()]
+        if sub_dirs:
+            for d in sub_dirs:
+                sub_count += len(list(d.glob("*.jpg")))
+            return f"Found {sub_count} images in {len(sub_dirs)} subfolders. Ready to re-run COLMAP."
+        return f"No .jpg images found in {images_dir}"
+
     def _load_video(self, path: str):
         self._error_message = ""
         # Auto-detect dual fisheye input from extension and flip Output Mode
@@ -2143,8 +2357,9 @@ class Plugin360Panel(lf.ui.Panel):
 
         input_type, family = detect_input_type(path)
         if input_type == "dual_fisheye":
-            self._output_mode_idx = FISHEYE_OUTPUT_MODE_IDX
-            self._resnap_sift_for_mode()
+            self._output_mode_idx = FISHEYE_PINHOLE_OUTPUT_MODE_IDX
+            self._colmap_matcher_idx = 0  # sequential
+            self._resnap_sift_for_mode(force=True)
             self._source_mode_idx = 0  # container mode by default
             self._camera_family_detected = family
             if family in CAMERA_FAMILIES:
@@ -2267,11 +2482,15 @@ class Plugin360Panel(lf.ui.Panel):
             return
         # In Fisheye + split mode the user provides front + back files instead of
         # one container; the standard "video loaded" check doesn't apply.
+        # In resume mode, no video is needed — only the output directory.
         is_fisheye_split = (
-            self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX
+            self._output_mode_idx in _FISHEYE_MODES
             and self._source_mode_idx == 1
         )
-        if is_fisheye_split:
+        is_resume = self._source_mode_idx == 2
+        if is_resume:
+            pass  # no video required — pipeline reads existing images/
+        elif is_fisheye_split:
             if not self._front_video_path or not self._back_video_path:
                 self._error_message = (
                     "Split mode requires both front and back video files"
@@ -2336,29 +2555,32 @@ class Plugin360Panel(lf.ui.Panel):
             colmap_mapper=MAPPERS[self._mapper_idx],
             colmap_ba_solver=BA_SOLVERS[self._ba_solver_idx],
             fisheye_circle_margin=self._fisheye_circle_margin,
-            vocab_tree_path=self._vocab_tree_path,
+            vocab_tree_path="",  # auto-resolved from feature type by ColmapRunner
+            loop_detection=self._loop_closure_enabled,
+            colmap_sequential_overlap=self._sequential_overlap,
             output_mode=output_mode,
-            # Dual fisheye fields (only meaningful when output_mode == "fisheye")
-            input_type=("dual_fisheye" if output_mode == "fisheye" else "erp"),
+            # Dual fisheye fields
+            input_type=("dual_fisheye" if output_mode in ("fisheye", "fisheye_pinhole") else "erp"),
             camera_family=(
                 self._camera_family_detected
-                if (output_mode == "fisheye" and self._source_mode_idx == 0)
+                if (output_mode in ("fisheye", "fisheye_pinhole") and self._source_mode_idx == 0)
                 else (
                     CAMERA_FAMILIES[self._camera_family_idx]
-                    if (output_mode == "fisheye"
+                    if (output_mode in ("fisheye", "fisheye_pinhole")
                         and 0 <= self._camera_family_idx < len(CAMERA_FAMILIES))
                     else None
                 )
             ),
             source_mode=(
                 SOURCE_MODES[self._source_mode_idx]
-                if (output_mode == "fisheye"
+                if (output_mode in ("fisheye", "fisheye_pinhole")
                     and 0 <= self._source_mode_idx < len(SOURCE_MODES))
                 else "container"
             ),
             front_video_path=self._front_video_path,
             back_video_path=self._back_video_path,
             keep_streams=self._keep_streams,
+            keep_pinhole_scaffolding=self._keep_pinhole_scaffolding,
         )
 
         self._is_processing = True
@@ -2612,9 +2834,11 @@ class Plugin360Panel(lf.ui.Panel):
             print(self._completion_report)
             print(f"{'=' * 60}\n")
 
-            # Write timing.json
+            # Write timing.json into metadata/
             try:
-                timing_path = Path(self._output_path) / "timing.json"
+                metadata_dir = Path(self._output_path) / "metadata"
+                metadata_dir.mkdir(exist_ok=True)
+                timing_path = metadata_dir / "timing.json"
                 mask_diagnostics_summary = self._load_mask_diagnostics_summary(
                     result.mask_diagnostics_path
                 )

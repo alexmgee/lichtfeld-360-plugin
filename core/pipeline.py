@@ -102,16 +102,19 @@ class PipelineConfig:
     # Dual fisheye input (phase 1)
     # input_type: "erp" (default) or "dual_fisheye"
     # camera_family: "dji_osmo360" | "insta360" | None
-    # source_mode: "container" (single .osv/.insv) or "split" (two pre-split videos)
+    # source_mode: "container" (single .osv/.insv), "split" (two pre-split videos),
+    #              or "resume" (re-run COLMAP on existing images in output_dir)
     # When source_mode == "split", front_video_path / back_video_path are used and
-    # the top-level video_path is ignored. Auto-set by detect_input_type() when
-    # video_path is loaded via the panel; can be overridden by the user.
+    # the top-level video_path is ignored. When source_mode == "resume", no video
+    # is needed — the pipeline skips extraction/masking/reframing and runs COLMAP
+    # directly on existing images/ in the output directory.
     input_type: str = "erp"
     camera_family: Optional[str] = None
     source_mode: str = "container"
     front_video_path: str = ""
     back_video_path: str = ""
     keep_streams: bool = False  # retain demuxed front.mp4/back.mp4 alongside output
+    keep_pinhole_scaffolding: bool = False  # retain pinhole crops after ERP export
 
     # Fisheye masking
     fisheye_circle_margin: float = 6.0  # Circle mask margin in percent
@@ -123,8 +126,10 @@ class PipelineConfig:
     colmap_feature_type: str = "sift"        # "sift", "aliked_n16rot", "aliked_n32"
     colmap_matcher_type: str = "bruteforce"  # "bruteforce", "lightglue"
     colmap_mapper: str = "incremental"       # "incremental", "global"
-    colmap_ba_solver: str = "auto"           # "auto", "ceres", "caspar"
-    vocab_tree_path: str = ""                # path to vocab tree file (when matcher == "vocab_tree")
+    colmap_ba_solver: str = "auto"           # "auto", "ceres", "ceres_gpu", "caspar"
+    vocab_tree_path: str = ""                # path to vocab tree file (auto-resolved if empty)
+    loop_detection: bool = False             # sequential matcher loop closure via vocab tree
+    colmap_sequential_overlap: int = 10      # sequential matching overlap (2-20)
 
 
 @dataclass
@@ -151,6 +156,7 @@ class PipelineResult:
     used_fallback_video_backend: bool = False
     video_backend_error: str = ""
     mask_diagnostics_path: str = ""
+    gpu_extraction: bool = False
     elapsed_sec: float = 0.0
     error: str = ""
 
@@ -202,6 +208,28 @@ def _format_preset_signature(preset_name: str, view_config: ViewConfig) -> str:
     if view_config.include_nadir:
         parts.append(f"ND@-90/f{view_config.zenith_fov:g}")
     return f"{preset_name} | " + "; ".join(parts) if parts else preset_name
+
+
+def _flatten_view_folders(parent_dir: Path) -> None:
+    """Move files from view subfolders to parent, prefixing with folder name.
+
+    ``images/front_ctr_hi/000042.jpg`` → ``images/front_ctr_hi_000042.jpg``
+
+    Empty subfolders are removed after all files are moved.
+    Idempotent: non-directory children are left untouched.
+    """
+    for subfolder in sorted(parent_dir.iterdir()):
+        if not subfolder.is_dir():
+            continue
+        view_name = subfolder.name
+        for file in sorted(subfolder.iterdir()):
+            if file.is_file():
+                flat_name = f"{view_name}_{file.name}"
+                file.rename(parent_dir / flat_name)
+        try:
+            subfolder.rmdir()
+        except OSError:
+            pass  # not empty — skip
 
 
 # ---------------------------------------------------------------------------
@@ -698,6 +726,8 @@ class PipelineJob:
             mapper=cfg.colmap_mapper,
             ba_solver=cfg.colmap_ba_solver,
             vocab_tree_path=cfg.vocab_tree_path or None,
+            loop_detection=False,  # rig-constrained: sequential pairs sufficient
+            sequential_overlap=cfg.colmap_sequential_overlap,
         )
 
         def _colmap_progress(stage: str, pct: float, msg: str) -> None:
@@ -744,9 +774,11 @@ class PipelineJob:
                     "cannot export ERP scaffold"
                 )
 
-            # 1. Delete pinhole images/ and masks/ so the ERP export
+            # 1. Remove pinhole images/ and masks/ so the ERP export
             #    can rename extracted/frames/ → images/.
-            cleanup_pinhole_crops(out, log_fn=logger.info)
+            cleanup_pinhole_crops(
+                out, keep=cfg.keep_pinhole_scaffolding, log_fn=logger.info,
+            )
 
             self._update("output", 88.0, "Extracting rig poses...")
 
@@ -827,7 +859,6 @@ class PipelineJob:
         """
         import shutil
 
-        from .paired_extractor import PairedExtractorConfig, extract_dual_fisheye
         from .fisheye_priors import infer_fisheye_camera_params
 
         out = Path(cfg.output_dir)
@@ -836,8 +867,19 @@ class PipelineJob:
         images_dir = out / "images"
 
         # ===================================================================
+        # Resume mode: skip extraction/masking/reframing, jump to COLMAP
+        # ===================================================================
+        if cfg.source_mode == "resume":
+            return self._run_fisheye_resume(cfg, t0, out, images_dir)
+
+        # ===================================================================
         # Stage 1: Paired sharpest-frame extraction (0-50%)
         # ===================================================================
+        from .paired_extractor import PairedExtractorConfig, extract_dual_fisheye
+
+        print(f"\n[pipeline] Output mode: {cfg.output_mode}")
+        print(f"[pipeline] Output: {out}")
+        print(f"[pipeline] Stage 1: Paired extraction starting...")
         self._update("extraction", 0.0, "Extracting paired fisheye frames...")
 
         # Map plugin's extraction_sharpness → paired extractor mode/scene flags.
@@ -885,7 +927,7 @@ class PipelineJob:
                 config=extract_config,
                 progress_callback=_extract_progress,
                 cancel_check=self._check_cancel,
-                log=lambda m: logger.info("[paired_extract] %s", m),
+                log=lambda m: (logger.info("[paired_extract] %s", m), print(f"[paired_extract] {m}")),
             )
         else:
             # Container mode: single .osv / .insv input. extract_dual_fisheye
@@ -898,7 +940,7 @@ class PipelineJob:
                 keep_streams=cfg.keep_streams,
                 progress_callback=_extract_progress,
                 cancel_check=self._check_cancel,
-                log=lambda m: logger.info("[paired_extract] %s", m),
+                log=lambda m: (logger.info("[paired_extract] %s", m), print(f"[paired_extract] {m}")),
             )
 
         if not extract_result.success:
@@ -907,7 +949,9 @@ class PipelineJob:
             )
 
         num_pairs = extract_result.pair_count
-        logger.info("Phase 1: extracted %d frame pairs", num_pairs)
+        gpu_accel = getattr(extract_result, 'gpu_accelerated', False)
+        logger.info("Phase 1: extracted %d frame pairs%s", num_pairs,
+                     " (GPU)" if gpu_accel else "")
 
         if self._check_cancel():
             raise RuntimeError("Cancelled")
@@ -916,9 +960,12 @@ class PipelineJob:
         # Stage 2: Fisheye masking (SAM3 + circle mask)
         # ===================================================================
         mask_enabled = cfg.enable_masking
+        print(f"[pipeline] Stage 2: Masking {'enabled' if mask_enabled else 'disabled'}")
         if mask_enabled:
             self._update("masking", 20.0, "Initializing SAM 3 for fisheye masking...")
 
+            import cv2
+            import numpy as np
             from .backends import Sam3Backend
             from .fisheye_circle_mask import generate_fisheye_circle_mask
 
@@ -995,6 +1042,7 @@ class PipelineJob:
                     "Fisheye masking complete: %d frames across %d lenses",
                     frame_idx, len(lens_names),
                 )
+                print(f"[pipeline] Masking complete: {frame_idx} frames")
             finally:
                 backend.cleanup()
 
@@ -1002,159 +1050,343 @@ class PipelineJob:
                 raise RuntimeError("Cancelled")
 
         # ===================================================================
-        # Stage 3: Move frames extracted/{front,back}/ → images/{front,back}/
+        # Stage 3: Staging (direct move OR fisheye→pinhole reframe)
         # ===================================================================
-        # Per spec §4.10: final layout has images/front/ and images/back/.
-        # Per spec §6: "Copy frames to images/front/, images/back/" — we move
-        # (rename) since extracted/ doesn't need to persist in phase 1.
-        self._update("staging", 50.0, "Staging images for COLMAP...")
-        images_dir.mkdir(parents=True, exist_ok=True)
-        for lens in ("front", "back"):
-            src = extracted_dir / lens
-            dst = images_dir / lens
-            if not src.is_dir():
-                raise RuntimeError(
-                    f"Extraction did not produce {lens}/ subdirectory at {src}"
-                )
-            if dst.exists():
-                shutil.rmtree(dst, ignore_errors=True)
-            src.rename(dst)
-
-        # Stage masks alongside images so COLMAP finds them at the same
-        # relative paths (ImageReader.mask_path + "front/xxx.png" etc.)
         colmap_mask_path: str | None = None
-        if mask_enabled:
-            output_masks_dir = out / "masks"
-            output_masks_dir.mkdir(parents=True, exist_ok=True)
-            for lens in ("front", "back"):
-                src = extracted_dir / "masks" / lens
-                dst = output_masks_dir / lens
-                if src.is_dir():
-                    if dst.exists():
-                        shutil.rmtree(dst, ignore_errors=True)
-                    src.rename(dst)
-            colmap_mask_path = str(output_masks_dir)
+        rig_config_path_str = str(out / "rig_config.json")
 
-        # ===================================================================
-        # Stage 4: Rig config (experimental, only when use_rig=True)
-        # ===================================================================
-        # When use_rig=False (default), no rig config is written.
-        # ColmapRunner detects the missing file and skips rig application.
-        if cfg.use_rig:
-            self._update("rig_config", 52.0, "Writing dual fisheye rig config...")
-            from .rig_config import write_dual_fisheye_rig_config
-            rig_config_path_str = str(out / "rig_config.json")
-            write_dual_fisheye_rig_config(rig_config_path_str)
-            logger.info("Wrote dual fisheye rig config: %s", rig_config_path_str)
+        if cfg.output_mode == "fisheye_pinhole":
+            # ── Fisheye → pinhole reframe path ──
+            self._update("staging", 50.0, "Reframing fisheye → pinhole crops...")
 
-        # ===================================================================
-        # Stage 5: COLMAP — OPENCV_FISHEYE, PER_FOLDER, no rig (50-95%)
-        # ===================================================================
-        self._update("colmap", 55.0, "Running COLMAP (OPENCV_FISHEYE, PER_FOLDER)...")
+            import cv2
+            from .fisheye_calibration import default_osmo360_calibration
+            from .fisheye_reframer import FisheyeReframer, FISHEYE_PINHOLE_PRESET
 
-        camera_params = infer_fisheye_camera_params(cfg.camera_family)
-        has_prior = camera_params is not None
-        if not has_prior:
-            logger.info(
-                "No calibrated prior for camera_family=%r — using fisheye-"
-                "appropriate default_focal_length_factor=0.30 and locking "
-                "refine_principal_point + refine_extra_params to prevent BA "
-                "runaway from a bad starting point",
-                cfg.camera_family,
+            calib = default_osmo360_calibration()
+            reframer = FisheyeReframer(calib)
+            view_config = FISHEYE_PINHOLE_PRESET
+
+            images_dir.mkdir(parents=True, exist_ok=True)
+            output_masks_dir = out / "masks" if mask_enabled else None
+            if output_masks_dir:
+                output_masks_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create output subfolders for each virtual camera
+            for view in view_config.views:
+                (images_dir / view.name).mkdir(parents=True, exist_ok=True)
+                if output_masks_dir:
+                    (output_masks_dir / view.name).mkdir(parents=True, exist_ok=True)
+
+            # Collect extracted frame pairs
+            front_frames_dir = extracted_dir / "front"
+            back_frames_dir = extracted_dir / "back"
+            front_files = sorted(
+                f for f in front_frames_dir.iterdir()
+                if f.suffix.lower() in (".jpg", ".jpeg", ".png")
             )
 
-        # Default focal-length factor:
-        # - Pinhole heuristic is 0.5 * image_width (roughly 90° FOV).
-        # - For an equidistant ~190° fisheye: f = (image_width/2) / radians(95°)
-        #   ≈ 0.30 * image_width. Using 0.5 starts BA at a focal length 65%
-        #   too high, which on a few-image starter set leads to runaway
-        #   intrinsics during refinement.
-        FISHEYE_DEFAULT_FOCAL_FACTOR = 0.30
+            total_pairs = len(front_files)
+            logger.info("Reframing %d pairs into %d views each (%d total crops)",
+                        total_pairs, view_config.total_views(),
+                        total_pairs * view_config.total_views())
+            print(f"[reframe] Starting: {total_pairs} pairs × {view_config.total_views()} views")
+            for pair_idx, front_file in enumerate(front_files):
+                if self._check_cancel():
+                    raise RuntimeError("Cancelled")
 
-        colmap_config = ColmapConfig(
-            preset=cfg.colmap_preset,
-            camera_model="OPENCV_FISHEYE",
-            camera_params=camera_params,
-            default_focal_length_factor=None if has_prior else FISHEYE_DEFAULT_FOCAL_FACTOR,
-            matcher=cfg.colmap_matcher,
-            match_budget_tier=cfg.colmap_match_budget_tier,
-            max_num_matches_override=cfg.colmap_max_num_matches,
-            refine_focal_length=True,
-            # Only refine principal point + distortion when we start from a
-            # known-good prior. With no prior, BA can refine garbage values
-            # if the initial image set registers sparsely.
-            refine_principal_point=has_prior,
-            refine_extra_params=has_prior,
-            # SIFT density for fisheye. Default 2048 features at 1600px
-            # is too sparse for 3000-3840px wide raw fisheye where many
-            # keypoints land in heavily-distorted edge regions and can't
-            # match across views. The panel's COLMAP Preset matrix anchors
-            # fisheye Normal at 8192/3840 (matching the integration report's
-            # recommendation) and exposes Custom for further tuning.
-            sift_max_num_features_override=cfg.sift_max_features,
-            sift_max_image_size_override=cfg.sift_max_image_size,
-            # COLMAP 4.1 features
-            feature_type=cfg.colmap_feature_type,
-            matcher_type=cfg.colmap_matcher_type,
-            mapper=cfg.colmap_mapper,
-            ba_solver=cfg.colmap_ba_solver,
-            vocab_tree_path=cfg.vocab_tree_path or None,
-        )
+                back_file = back_frames_dir / front_file.name
+                if not back_file.exists():
+                    logger.warning("No matching back frame for %s", front_file.name)
+                    continue
+
+                pct = 50 + (pair_idx / max(total_pairs, 1)) * 15
+                self._update("staging", pct,
+                             f"Reframing pair {pair_idx + 1}/{total_pairs}")
+                if pair_idx % 10 == 0:
+                    print(f"[reframe] Pair {pair_idx + 1}/{total_pairs}")
+
+                front_img = cv2.imread(str(front_file))
+                back_img = cv2.imread(str(back_file))
+
+                front_mask = None
+                back_mask = None
+                if mask_enabled:
+                    fm = extracted_dir / "masks" / "front" / f"{front_file.stem}.png"
+                    bm = extracted_dir / "masks" / "back" / f"{front_file.stem}.png"
+                    if fm.exists():
+                        front_mask = cv2.imread(str(fm), cv2.IMREAD_GRAYSCALE)
+                    if bm.exists():
+                        back_mask = cv2.imread(str(bm), cv2.IMREAD_GRAYSCALE)
+
+                results = reframer.extract_all_views(
+                    front_img, back_img, view_config,
+                    front_mask, back_mask,
+                )
+
+                for view, crop, mask_crop in results:
+                    crop_path = images_dir / view.name / front_file.name
+                    cv2.imwrite(str(crop_path), crop,
+                                [cv2.IMWRITE_JPEG_QUALITY, cfg.quality])
+                    if mask_crop is not None and output_masks_dir:
+                        mask_path = output_masks_dir / view.name / f"{front_file.stem}.png"
+                        cv2.imwrite(str(mask_path), mask_crop)
+
+            if output_masks_dir:
+                colmap_mask_path = str(output_masks_dir)
+
+            logger.info("Reframed %d pairs into %d views (%d images total)",
+                        total_pairs, view_config.total_views(),
+                        total_pairs * view_config.total_views())
+
+            # Write mini-rig config for the 2 reference views (front_ctr_hi + front_ctr_lo)
+            from .fisheye_reframer import _rotation_matrix
+            import json as _json
+            from .rig_config import rotation_matrix_to_quaternion
+
+            ref_view = view_config.views[0]   # front_ctr_hi
+            lo_view = view_config.views[7]    # front_ctr_lo
+
+            R_ref_m = _rotation_matrix(ref_view.yaw_deg, ref_view.pitch_deg)
+            R_lo_m = _rotation_matrix(lo_view.yaw_deg, lo_view.pitch_deg)
+            R_rel_m = R_lo_m @ R_ref_m.T
+            qw, qx, qy, qz = rotation_matrix_to_quaternion(R_rel_m)
+
+            mini_rig = [{"cameras": [
+                {"image_prefix": f"{ref_view.name}/", "ref_sensor": True},
+                {"image_prefix": f"{lo_view.name}/",
+                 "cam_from_rig_rotation": [qw, qx, qy, qz],
+                 "cam_from_rig_translation": [0.0, 0.0, 0.0]},
+            ]}]
+            rig_path = out / "colmap_mini_rig.json"
+            rig_path.write_text(_json.dumps(mini_rig, indent=2))
+            print(f"[pipeline] Mini-rig written: {rig_path}")
+
+        else:
+            # ── Native fisheye path (direct move) ──
+            self._update("staging", 50.0, "Staging images for COLMAP...")
+            images_dir.mkdir(parents=True, exist_ok=True)
+            for lens in ("front", "back"):
+                src = extracted_dir / lens
+                dst = images_dir / lens
+                if not src.is_dir():
+                    raise RuntimeError(
+                        f"Extraction did not produce {lens}/ subdirectory at {src}"
+                    )
+                if dst.exists():
+                    shutil.rmtree(dst, ignore_errors=True)
+                src.rename(dst)
+
+            if mask_enabled:
+                output_masks_dir = out / "masks"
+                output_masks_dir.mkdir(parents=True, exist_ok=True)
+                for lens in ("front", "back"):
+                    src = extracted_dir / "masks" / lens
+                    dst = output_masks_dir / lens
+                    if src.is_dir():
+                        if dst.exists():
+                            shutil.rmtree(dst, ignore_errors=True)
+                        src.rename(dst)
+                colmap_mask_path = str(output_masks_dir)
+
+            if cfg.use_rig:
+                self._update("rig_config", 52.0, "Writing dual fisheye rig config...")
+                from .rig_config import write_dual_fisheye_rig_config
+                write_dual_fisheye_rig_config(rig_config_path_str)
+                logger.info("Wrote dual fisheye rig config: %s", rig_config_path_str)
+
+        # ===================================================================
+        # Stage 5: COLMAP alignment (67-95%)
+        # ===================================================================
+        print(f"[pipeline] Stage 5: COLMAP alignment starting...")
+        if cfg.output_mode == "fisheye_pinhole":
+            # Dual-ref COLMAP: front_ctr_hi + front_ctr_lo with mini-rig
+            crop_size = view_config.crop_size
+            fl = crop_size / 2.0  # 90° FOV
+            camera_params = f"{fl:.1f},{fl:.1f},{crop_size/2:.1f},{crop_size/2:.1f}"
+
+            # Copy the 2 reference view folders into a staging directory for COLMAP.
+            # (Symlinks are unreliable on Windows — LFS/pycolmap can't follow them.)
+            import shutil as _shutil
+            colmap_images_dir = out / "colmap_input"
+            if colmap_images_dir.exists():
+                _shutil.rmtree(str(colmap_images_dir), ignore_errors=True)
+            colmap_images_dir.mkdir(exist_ok=True)
+            _shutil.copytree(str(images_dir / ref_view.name),
+                             str(colmap_images_dir / ref_view.name))
+            _shutil.copytree(str(images_dir / lo_view.name),
+                             str(colmap_images_dir / lo_view.name))
+
+            # Stage masks for the 2 reference views
+            colmap_masks_dir = None
+            if mask_enabled and output_masks_dir:
+                colmap_masks_dir = out / "colmap_masks"
+                if colmap_masks_dir.exists():
+                    _shutil.rmtree(str(colmap_masks_dir), ignore_errors=True)
+                colmap_masks_dir.mkdir(exist_ok=True)
+                _shutil.copytree(str(output_masks_dir / ref_view.name),
+                                 str(colmap_masks_dir / ref_view.name))
+                _shutil.copytree(str(output_masks_dir / lo_view.name),
+                                 str(colmap_masks_dir / lo_view.name))
+
+            print(f"[pipeline] COLMAP config: PINHOLE, matcher={cfg.colmap_matcher}, "
+                  f"dual-ref ({ref_view.name} + {lo_view.name})")
+            self._update("colmap", 67.0,
+                         f"Running COLMAP ({ref_view.name} + {lo_view.name})...")
+            colmap_config = ColmapConfig(
+                preset=cfg.colmap_preset,
+                camera_model="PINHOLE",
+                camera_mode="PER_FOLDER",
+                camera_params=camera_params,
+                matcher=cfg.colmap_matcher,
+                match_budget_tier=cfg.colmap_match_budget_tier,
+                max_num_matches_override=cfg.colmap_max_num_matches,
+                refine_focal_length=True,
+                refine_principal_point=False,
+                refine_extra_params=False,
+                sift_max_num_features_override=cfg.sift_max_features,
+                sift_max_image_size_override=cfg.sift_max_image_size,
+                feature_type=cfg.colmap_feature_type,
+                matcher_type=cfg.colmap_matcher_type,
+                mapper=cfg.colmap_mapper,
+                ba_solver=cfg.colmap_ba_solver,
+                loop_detection=cfg.loop_detection,
+                sequential_overlap=cfg.colmap_sequential_overlap,
+            )
+        else:
+            self._update("colmap", 55.0, "Running COLMAP (OPENCV_FISHEYE, PER_FOLDER)...")
+
+            camera_params = infer_fisheye_camera_params(cfg.camera_family)
+            has_prior = camera_params is not None
+            if not has_prior:
+                logger.info(
+                    "No calibrated prior for camera_family=%r — using fisheye-"
+                    "appropriate default_focal_length_factor=0.30",
+                    cfg.camera_family,
+                )
+
+            FISHEYE_DEFAULT_FOCAL_FACTOR = 0.30
+
+            colmap_config = ColmapConfig(
+                preset=cfg.colmap_preset,
+                camera_model="OPENCV_FISHEYE",
+                camera_params=camera_params,
+                default_focal_length_factor=None if has_prior else FISHEYE_DEFAULT_FOCAL_FACTOR,
+                matcher=cfg.colmap_matcher,
+                match_budget_tier=cfg.colmap_match_budget_tier,
+                max_num_matches_override=cfg.colmap_max_num_matches,
+                refine_focal_length=True,
+                refine_principal_point=has_prior,
+                refine_extra_params=has_prior,
+                sift_max_num_features_override=cfg.sift_max_features,
+                sift_max_image_size_override=cfg.sift_max_image_size,
+                feature_type=cfg.colmap_feature_type,
+                matcher_type=cfg.colmap_matcher_type,
+                mapper=cfg.colmap_mapper,
+                ba_solver=cfg.colmap_ba_solver,
+                vocab_tree_path=cfg.vocab_tree_path or None,
+                loop_detection=cfg.loop_detection,
+                sequential_overlap=cfg.colmap_sequential_overlap,
+            )
 
         def _colmap_progress(stage: str, pct: float, msg: str) -> None:
-            self._update("colmap", 55 + pct * 40, msg)
+            base = 67.0 if cfg.output_mode == "fisheye_pinhole" else 55.0
+            self._update("colmap", base + pct * (95 - base), msg)
 
-        # Pass a non-existent rig path; ColmapRunner skips rig step gracefully.
-        rig_config_path = str(out / "rig_config.json")  # intentionally absent
-
-        runner = ColmapRunner(
-            images_dir=str(images_dir),
-            output_dir=str(out),
-            rig_config_path=rig_config_path,
-            mask_path=colmap_mask_path,
-            config=colmap_config,
-            on_progress=_colmap_progress,
-            cancel_check=self._check_cancel,
-        )
+        if cfg.output_mode == "fisheye_pinhole":
+            # Dual-ref with mini-rig
+            runner = ColmapRunner(
+                images_dir=str(colmap_images_dir),
+                output_dir=str(out),
+                rig_config_path=str(rig_path),
+                mask_path=str(colmap_masks_dir) if colmap_masks_dir else None,
+                config=colmap_config,
+                on_progress=_colmap_progress,
+                cancel_check=self._check_cancel,
+            )
+        else:
+            runner = ColmapRunner(
+                images_dir=str(images_dir),
+                output_dir=str(out),
+                rig_config_path=rig_config_path_str,
+                mask_path=colmap_mask_path,
+                config=colmap_config,
+                on_progress=_colmap_progress,
+                cancel_check=self._check_cancel,
+            )
 
         colmap_result = runner.run()
         if not colmap_result.success:
             raise RuntimeError(f"COLMAP failed: {colmap_result.error}")
 
-        # ===================================================================
-        # Stage 6: Write fisheye-native transforms.json + pointcloud.ply (95-100%)
-        # ===================================================================
-        self._update("output", 95.0, "Writing fisheye transforms.json...")
-        from .transforms_writer import write_fisheye_transforms
+        # Clean up COLMAP staging copies
+        if cfg.output_mode == "fisheye_pinhole":
+            import shutil
+            shutil.rmtree(str(colmap_images_dir), ignore_errors=True)
+            if colmap_masks_dir:
+                shutil.rmtree(str(colmap_masks_dir), ignore_errors=True)
+            rig_path.unlink(missing_ok=True)
 
+        # ===================================================================
+        # Stage 6: Write transforms.json + pointcloud.ply (95-100%)
+        # ===================================================================
         sparse_dir = out / "sparse" / "0"
         if not sparse_dir.is_dir():
-            # Older COLMAP layouts sometimes write directly to sparse/.
             sparse_dir = out / "sparse"
 
-        try:
-            transforms_path = write_fisheye_transforms(
-                colmap_sparse_dir=sparse_dir,
-                images_root=images_dir,
-                output_dir=out,
-                log_fn=logger.info,
-            )
-            dataset_path = str(transforms_path)
-        except Exception as exc:
-            # If transforms output fails, surface the error but keep the
-            # COLMAP reconstruction available so the user can debug.
-            logger.exception("Fisheye transforms output failed")
-            raise RuntimeError(
-                f"COLMAP succeeded but transforms.json export failed: {exc}"
-            ) from exc
+        if cfg.output_mode == "fisheye_pinhole":
+            # Flatten view subfolders: images/front_ctr_hi/000042.jpg → images/front_ctr_hi_000042.jpg
+            self._update("output", 93.0, "Flattening output folders...")
+            _flatten_view_folders(images_dir)
+            if output_masks_dir:
+                _flatten_view_folders(output_masks_dir)
+
+            # Propagate reference-view poses to all 16 views via rig geometry
+            self._update("output", 95.0, "Propagating poses to all views...")
+            from .transforms_writer import write_rig_propagated_transforms
+            try:
+                transforms_path = write_rig_propagated_transforms(
+                    colmap_sparse_dir=sparse_dir,
+                    images_root=images_dir,
+                    output_dir=out,
+                    view_config=view_config,
+                    baseline_m=calib.baseline_m,
+                    log_fn=logger.info,
+                )
+                dataset_path = str(transforms_path)
+            except Exception as exc:
+                logger.exception("Pose propagation failed")
+                raise RuntimeError(
+                    f"COLMAP succeeded but pose propagation failed: {exc}"
+                ) from exc
+        else:
+            # Native fisheye — write per-frame OPENCV_FISHEYE transforms
+            self._update("output", 95.0, "Writing fisheye transforms.json...")
+            from .transforms_writer import write_fisheye_transforms
+            try:
+                transforms_path = write_fisheye_transforms(
+                    colmap_sparse_dir=sparse_dir,
+                    images_root=images_dir,
+                    output_dir=out,
+                    log_fn=logger.info,
+                )
+                dataset_path = str(transforms_path)
+            except Exception as exc:
+                logger.exception("Fisheye transforms output failed")
+                raise RuntimeError(
+                    f"COLMAP succeeded but transforms.json export failed: {exc}"
+                ) from exc
 
         self._update("complete", 100.0, "Fisheye reconstruction + transforms.json ready")
+
+        # Clean up intermediate files and organize metadata
+        self._cleanup_fisheye_output(out, extracted_dir)
 
         elapsed = time.time() - t0
         return PipelineResult(
             success=True,
             dataset_path=dataset_path,
-            output_mode="fisheye",
+            output_mode=cfg.output_mode,
             num_source_frames=num_pairs,
             num_output_images=2 * num_pairs,  # one per lens per pair
             num_aligned_cameras=colmap_result.num_registered_images,
@@ -1167,5 +1399,308 @@ class PipelineJob:
             partial_frame_examples=colmap_result.partial_frame_examples,
             dropped_frame_examples=colmap_result.dropped_frame_examples,
             preset_signature=f"dual_fisheye | family={cfg.camera_family or 'unknown'}",
+            gpu_extraction=gpu_accel,
             elapsed_sec=elapsed,
         )
+
+    def _run_fisheye_resume(
+        self, cfg: PipelineConfig, t0: float, out: Path, images_dir: Path,
+    ) -> PipelineResult:
+        """Resume mode: re-run COLMAP on existing images, skip earlier stages.
+
+        Detects flat or subfolder pinhole crops in images/, cleans stale COLMAP
+        artifacts, stages reference views, runs COLMAP, and writes transforms.
+        """
+        import shutil
+        import cv2
+
+        from .fisheye_reframer import (
+            FisheyeReframer, FISHEYE_PINHOLE_PRESET, _rotation_matrix,
+        )
+        from .fisheye_calibration import default_osmo360_calibration
+        from .colmap_runner import ColmapRunner, ColmapConfig
+        from .rig_config import rotation_matrix_to_quaternion
+        import json as _json
+
+        print(f"\n[pipeline] Output mode: {cfg.output_mode} (COLMAP only — resuming from existing images)")
+        print(f"[pipeline] Output: {out}")
+
+        view_config = FISHEYE_PINHOLE_PRESET
+        calib = default_osmo360_calibration()
+        masks_dir = out / "masks"
+
+        # Detect existing images
+        if cfg.output_mode == "fisheye_pinhole":
+            ref_view = view_config.views[0]
+            # Try flat layout first
+            flat_candidates = sorted(images_dir.glob(f"{ref_view.name}_*.jpg"))
+            if flat_candidates:
+                num_pairs = len(flat_candidates)
+                layout = "flat"
+            else:
+                # Try subfolder layout
+                subfolder = images_dir / ref_view.name
+                if subfolder.is_dir():
+                    sub_candidates = sorted(subfolder.glob("*.jpg"))
+                    num_pairs = len(sub_candidates)
+                    layout = "subfolder"
+                else:
+                    raise RuntimeError(
+                        f"Resume mode: no images found in {images_dir}. "
+                        f"Expected flat ({ref_view.name}_*.jpg) or subfolder "
+                        f"({ref_view.name}/*.jpg) layout."
+                    )
+        else:
+            # Fisheye native: images/front/ and images/back/
+            front_dir = images_dir / "front"
+            if not front_dir.is_dir():
+                raise RuntimeError(
+                    f"Resume mode: no images/front/ directory in {images_dir}"
+                )
+            num_pairs = len(sorted(front_dir.glob("*.jpg")))
+            layout = "fisheye_native"
+
+        print(f"[pipeline] Detected {num_pairs} existing frames ({layout} layout)")
+        self._update("colmap", 0.0, f"Resuming from {num_pairs} existing frames...")
+
+        # Clean stale COLMAP artifacts
+        for stale in ("sparse", "colmap_input", "colmap_masks",
+                       "colmap_mini_rig.json", "database.db",
+                       "database.db-shm", "database.db-wal",
+                       "transforms.json", "pointcloud.ply"):
+            p = out / stale
+            if p.is_dir():
+                shutil.rmtree(str(p), ignore_errors=True)
+            elif p.is_file():
+                p.unlink(missing_ok=True)
+        print("[pipeline] Cleaned stale COLMAP artifacts")
+
+        # ── fisheye_pinhole: stage reference views + mini-rig ──
+        if cfg.output_mode == "fisheye_pinhole":
+            ref_view = view_config.views[0]   # front_ctr_hi
+            lo_view = view_config.views[7]    # front_ctr_lo
+
+            # Write mini-rig config
+            R_ref_m = _rotation_matrix(ref_view.yaw_deg, ref_view.pitch_deg)
+            R_lo_m = _rotation_matrix(lo_view.yaw_deg, lo_view.pitch_deg)
+            R_rel_m = R_lo_m @ R_ref_m.T
+            qw, qx, qy, qz = rotation_matrix_to_quaternion(R_rel_m)
+            mini_rig = [{"cameras": [
+                {"image_prefix": f"{ref_view.name}/", "ref_sensor": True},
+                {"image_prefix": f"{lo_view.name}/",
+                 "cam_from_rig_rotation": [qw, qx, qy, qz],
+                 "cam_from_rig_translation": [0.0, 0.0, 0.0]},
+            ]}]
+            rig_path = out / "colmap_mini_rig.json"
+            rig_path.write_text(_json.dumps(mini_rig, indent=2))
+
+            # Stage reference views into subfolder layout for COLMAP PER_FOLDER
+            colmap_images_dir = out / "colmap_input"
+            colmap_images_dir.mkdir(exist_ok=True)
+            for ref_name in [ref_view.name, lo_view.name]:
+                ref_staging = colmap_images_dir / ref_name
+                ref_staging.mkdir(parents=True, exist_ok=True)
+                if layout == "flat":
+                    for img in sorted(images_dir.glob(f"{ref_name}_*.jpg")):
+                        shutil.copy2(str(img), str(ref_staging / img.name))
+                else:
+                    # subfolder: copytree
+                    src = images_dir / ref_name
+                    if src.is_dir():
+                        shutil.copytree(str(src), str(ref_staging), dirs_exist_ok=True)
+
+            # Stage masks for reference views (if they exist)
+            colmap_masks_dir = None
+            if masks_dir.is_dir():
+                colmap_masks_dir = out / "colmap_masks"
+                colmap_masks_dir.mkdir(exist_ok=True)
+                for ref_name in [ref_view.name, lo_view.name]:
+                    if layout == "flat":
+                        mask_staging = colmap_masks_dir / ref_name
+                        mask_staging.mkdir(parents=True, exist_ok=True)
+                        for m in sorted(masks_dir.glob(f"{ref_name}_*.png")):
+                            shutil.copy2(str(m), str(mask_staging / m.name))
+                    else:
+                        src = masks_dir / ref_name
+                        if src.is_dir():
+                            dst = colmap_masks_dir / ref_name
+                            shutil.copytree(str(src), str(dst), dirs_exist_ok=True)
+
+            # COLMAP config
+            crop_size = view_config.crop_size
+            fl = crop_size / 2.0
+            camera_params = f"{fl:.1f},{fl:.1f},{crop_size/2:.1f},{crop_size/2:.1f}"
+
+            print(f"[pipeline] COLMAP config: PINHOLE, matcher={cfg.colmap_matcher}, "
+                  f"dual-ref ({ref_view.name} + {lo_view.name})")
+            self._update("colmap", 10.0,
+                         f"Running COLMAP ({ref_view.name} + {lo_view.name})...")
+            colmap_config = ColmapConfig(
+                preset=cfg.colmap_preset,
+                camera_model="PINHOLE",
+                camera_mode="PER_FOLDER",
+                camera_params=camera_params,
+                matcher=cfg.colmap_matcher,
+                match_budget_tier=cfg.colmap_match_budget_tier,
+                max_num_matches_override=cfg.colmap_max_num_matches,
+                refine_focal_length=True,
+                refine_principal_point=False,
+                refine_extra_params=False,
+                sift_max_num_features_override=cfg.sift_max_features,
+                sift_max_image_size_override=cfg.sift_max_image_size,
+                feature_type=cfg.colmap_feature_type,
+                matcher_type=cfg.colmap_matcher_type,
+                mapper=cfg.colmap_mapper,
+                ba_solver=cfg.colmap_ba_solver,
+                loop_detection=cfg.loop_detection,
+                sequential_overlap=cfg.colmap_sequential_overlap,
+            )
+
+            def _colmap_progress(stage: str, pct: float, msg: str) -> None:
+                self._update("colmap", 10.0 + pct * 80, msg)
+
+            runner = ColmapRunner(
+                images_dir=str(colmap_images_dir),
+                output_dir=str(out),
+                rig_config_path=str(rig_path),
+                mask_path=str(colmap_masks_dir) if colmap_masks_dir else None,
+                config=colmap_config,
+                on_progress=_colmap_progress,
+                cancel_check=self._check_cancel,
+            )
+            colmap_result = runner.run()
+            if not colmap_result.success:
+                raise RuntimeError(f"COLMAP failed: {colmap_result.error}")
+
+            # Clean staging
+            shutil.rmtree(str(colmap_images_dir), ignore_errors=True)
+            if colmap_masks_dir:
+                shutil.rmtree(str(colmap_masks_dir), ignore_errors=True)
+            rig_path.unlink(missing_ok=True)
+
+            # Write transforms
+            sparse_dir = out / "sparse" / "0"
+            if not sparse_dir.is_dir():
+                sparse_dir = out / "sparse"
+
+            if layout == "subfolder":
+                _flatten_view_folders(images_dir)
+                if masks_dir.is_dir():
+                    _flatten_view_folders(masks_dir)
+
+            self._update("output", 92.0, "Propagating poses to all views...")
+            from .transforms_writer import write_rig_propagated_transforms
+            transforms_path = write_rig_propagated_transforms(
+                colmap_sparse_dir=sparse_dir,
+                images_root=images_dir,
+                output_dir=out,
+                view_config=view_config,
+                baseline_m=calib.baseline_m,
+                log_fn=logger.info,
+            )
+            dataset_path = str(transforms_path)
+
+        else:
+            # Fisheye native resume — run COLMAP directly on images/
+            from .fisheye_priors import infer_fisheye_camera_params
+            camera_params = infer_fisheye_camera_params(cfg.camera_family)
+            has_prior = camera_params is not None
+
+            colmap_config = ColmapConfig(
+                preset=cfg.colmap_preset,
+                camera_model="OPENCV_FISHEYE",
+                camera_params=camera_params,
+                default_focal_length_factor=None if has_prior else 0.30,
+                matcher=cfg.colmap_matcher,
+                match_budget_tier=cfg.colmap_match_budget_tier,
+                max_num_matches_override=cfg.colmap_max_num_matches,
+                refine_focal_length=True,
+                refine_principal_point=has_prior,
+                refine_extra_params=has_prior,
+                sift_max_num_features_override=cfg.sift_max_features,
+                sift_max_image_size_override=cfg.sift_max_image_size,
+                feature_type=cfg.colmap_feature_type,
+                matcher_type=cfg.colmap_matcher_type,
+                mapper=cfg.colmap_mapper,
+                ba_solver=cfg.colmap_ba_solver,
+                loop_detection=cfg.loop_detection,
+                sequential_overlap=cfg.colmap_sequential_overlap,
+            )
+
+            def _colmap_progress(stage: str, pct: float, msg: str) -> None:
+                self._update("colmap", 10.0 + pct * 80, msg)
+
+            runner = ColmapRunner(
+                images_dir=str(images_dir),
+                output_dir=str(out),
+                rig_config_path=None,
+                mask_path=str(masks_dir) if masks_dir.is_dir() else None,
+                config=colmap_config,
+                on_progress=_colmap_progress,
+                cancel_check=self._check_cancel,
+            )
+            colmap_result = runner.run()
+            if not colmap_result.success:
+                raise RuntimeError(f"COLMAP failed: {colmap_result.error}")
+
+            sparse_dir = out / "sparse" / "0"
+            if not sparse_dir.is_dir():
+                sparse_dir = out / "sparse"
+
+            self._update("output", 92.0, "Writing fisheye transforms...")
+            from .transforms_writer import write_fisheye_transforms
+            transforms_path = write_fisheye_transforms(
+                colmap_sparse_dir=sparse_dir,
+                images_root=images_dir,
+                output_dir=out,
+                log_fn=logger.info,
+            )
+            dataset_path = str(transforms_path)
+
+        self._update("complete", 100.0, "Resume complete — COLMAP + transforms ready")
+
+        elapsed = time.time() - t0
+        return PipelineResult(
+            success=True,
+            dataset_path=dataset_path,
+            output_mode=cfg.output_mode,
+            num_source_frames=num_pairs,
+            num_output_images=num_pairs * (view_config.total_views() if cfg.output_mode == "fisheye_pinhole" else 2),
+            num_aligned_cameras=colmap_result.num_registered_images,
+            num_registered_frames=colmap_result.num_registered_frames,
+            num_complete_frames=colmap_result.num_complete_frames,
+            num_partial_frames=colmap_result.num_partial_frames,
+            views_per_frame=colmap_result.views_per_frame,
+            expected_images_by_view=colmap_result.expected_images_by_view,
+            registered_images_by_view=colmap_result.registered_images_by_view,
+            partial_frame_examples=colmap_result.partial_frame_examples,
+            dropped_frame_examples=colmap_result.dropped_frame_examples,
+            preset_signature=f"dual_fisheye | family={cfg.camera_family or 'unknown'} | resume",
+            gpu_extraction=False,
+            elapsed_sec=elapsed,
+        )
+
+    @staticmethod
+    def _cleanup_fisheye_output(out: Path, extracted_dir: Path) -> None:
+        """Clean up intermediate files after a successful fisheye run.
+
+        - Removes the extracted/ directory (demuxed streams already cleaned,
+          frames staged to images/, masks staged to masks/).
+        - Moves colmap_debug.log into metadata/.
+        """
+        import shutil
+        # Remove extracted/ — contents have been staged to images/ and masks/
+        if extracted_dir.exists():
+            shutil.rmtree(extracted_dir, ignore_errors=True)
+
+        # Move debug files into metadata/
+        metadata_dir = out / "metadata"
+        metadata_dir.mkdir(exist_ok=True)
+        for name in ("colmap_debug.log",):
+            src = out / name
+            if src.exists():
+                dst = metadata_dir / name
+                try:
+                    src.rename(dst)
+                except OSError:
+                    pass  # cross-device or permissions — leave in place
