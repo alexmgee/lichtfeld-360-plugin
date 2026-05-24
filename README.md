@@ -91,7 +91,13 @@ Then restart LichtFeld Studio.
 
 Masking is optional. The plugin works without it, but masking significantly improves training quality by removing the camera operator, tripod, shadow, and other unwanted objects from the dataset.
 
-The masking system uses Meta's SAM 3 (Segment Anything Model 3) with text-prompted detection. It runs on the full equirectangular frames first, producing high-resolution ERP masks, then reprojects those masks into each pinhole view so that masked regions track correctly through the geometric reframing.
+The masking system uses Meta's SAM 3 (Segment Anything Model 3) with text-prompted detection. How masking works depends on the output mode:
+
+**ERP and Pinhole modes** — SAM 3 runs on the full equirectangular frames first, producing high-resolution ERP masks. These masks are then reprojected into each pinhole view during reframing, so the masked regions track correctly through the geometric transformation. The final output includes both the source ERP masks and the per-view pinhole masks.
+
+**Fisheye and Fisheye (Pinhole) modes** — Each dual fisheye lens is masked independently. SAM 3 runs on the raw fisheye frames from both the front and back lenses. A circular mask is also applied to exclude the dark border outside the fisheye image circle — the `Circle Margin` setting (visible when masking is enabled in fisheye modes) controls how aggressively this border is trimmed. For Fisheye (Pinhole) mode, the fisheye masks are reprojected into the pinhole crops during reframing, just like the ERP path.
+
+### SAM 3 Setup
 
 SAM 3 is a gated HuggingFace model. First-time setup is guided from inside the plugin:
 
