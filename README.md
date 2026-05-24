@@ -150,7 +150,11 @@ All 6 combinations of extractor and matcher are supported. The required ONNX mod
 
 ## Reframing Presets
 
-All built-in presets produce 90° field-of-view pinhole views. The preset controls the virtual camera rig layout:
+Each output mode uses a different reframing strategy to convert the source footage into pinhole views for COLMAP alignment.
+
+### Pinhole Mode
+
+The user-selectable preset controls the virtual camera rig. All presets produce 90° field-of-view pinhole views:
 
 | Preset | Views | Layout |
 |--------|------:|--------|
@@ -160,7 +164,13 @@ All built-in presets produce 90° field-of-view pinhole views. The preset contro
 | High | 20 | Fibonacci-spiral freeview layout from zenith to nadir |
 | Ultra | 24 | Fibonacci-spiral freeview layout from zenith to nadir |
 
-ERP mode uses a dedicated internal 8-view staggered scaffold preset (4 views at -35° pitch, 4 at +35°, upper ring offset by 45°) that is optimized for pose recovery rather than view coverage.
+### ERP Mode
+
+Uses a dedicated internal 8-view staggered scaffold preset (4 views at -35° pitch, 4 at +35°, upper ring offset by 45°). This layout is optimized for pose recovery rather than view coverage — the pinhole crops are temporary scaffolding that gets deleted after COLMAP extracts the rig poses.
+
+### Fisheye (Pinhole) Mode
+
+Each dual fisheye lens is reframed into 8 pinhole crops (16 views total per source frame), using the fisheye-specific calibration for each camera family. The front and back lens rigs are combined into a single COLMAP rig constraint with a baseline offset between the two optical centers.
 
 ## Output Structure
 
