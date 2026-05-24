@@ -93,7 +93,7 @@ Masking is optional. The plugin works without it, but masking significantly impr
 
 The masking system uses Meta's SAM 3 (Segment Anything Model 3) with text-prompted detection. How masking works depends on the output mode:
 
-**ERP and Pinhole modes** — SAM 3 runs on the full equirectangular frames first, producing high-resolution ERP masks. These masks are then reprojected into each pinhole view during reframing, so the masked regions track correctly through the geometric transformation. The final output includes both the source ERP masks and the per-view pinhole masks.
+**ERP and Pinhole modes** — The equirectangular frame is reframed into pinhole views at detection resolution, and SAM 3 runs on each pinhole view independently. All per-view detections are then back-projected into ERP space and OR-merged into a single high-resolution ERP mask — if any view detects the operator at a given ERP pixel, that pixel is masked, even in views where detection missed them. The merged ERP mask is then reprojected into each output pinhole view during the final reframing stage.
 
 **Fisheye and Fisheye (Pinhole) modes** — Each dual fisheye lens is masked independently. SAM 3 runs on the raw fisheye frames from both the front and back lenses. A circular mask is also applied to exclude the dark border outside the fisheye image circle — the `Circle Margin` setting (visible when masking is enabled in fisheye modes) controls how aggressively this border is trimmed. For Fisheye (Pinhole) mode, the fisheye masks are reprojected into the pinhole crops during reframing, just like the ERP path.
 
