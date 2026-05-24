@@ -14,7 +14,7 @@ The pipeline runs in six stages, each configurable from the plugin panel:
 
 2. **Extract** — Frames are pulled from the video at a configurable FPS. Four sharpness modes control how much analysis goes into selecting the best frame from each interval — from no analysis (fastest) to full Tenengrad/Laplacian scoring of every candidate frame (sharpest results).
 
-3. **Mask** — When SAM 3 is installed and masking is enabled, the plugin automatically detects and masks the camera operator (and any other objects specified by prompt keywords) from every extracted frame. Masks are generated at equirectangular resolution and then reprojected into each output view, so the masked regions follow the geometry correctly through reframing.
+3. **Mask** — When SAM 3 is installed and masking is enabled, the plugin automatically detects and masks the camera operator (and any other objects specified by prompt keywords) from every extracted frame. For ERP/Pinhole modes, detection runs on pinhole crops and results are back-projected and merged into a full-resolution ERP mask. For fisheye modes, detection runs directly on the raw fisheye frames.
 
 4. **Reframe** — Each equirectangular frame is reprojected into multiple pinhole perspective views arranged in a virtual camera rig. Built-in presets range from 6 views (cubemap) to 24 views (ultra-dense Fibonacci spiral). These pinhole crops give COLMAP clean perspective images to work with, which is critical because COLMAP cannot align equirectangular images directly.
 
@@ -27,7 +27,7 @@ The pipeline runs in six stages, each configurable from the plugin panel:
 | Format | Source | Notes |
 |--------|--------|-------|
 | ERP video (.mp4) | Any pre-stitched equirectangular video | Standard 2:1 aspect ratio |
-| .OSV container | DJI Osmo Action 5 Pro | Dual fisheye, camera family auto-detected |
+| .OSV container | DJI Osmo 360 | Dual fisheye, camera family auto-detected |
 | .INSV container | Insta360 cameras | Dual fisheye, camera family auto-detected |
 | Front + back .mp4 | Pre-split fisheye lens pair | Two-file mode for graded or externally processed footage |
 
@@ -35,11 +35,11 @@ The pipeline runs in six stages, each configurable from the plugin panel:
 
 ### Pinhole
 
-Standard COLMAP pinhole dataset. Each source frame produces multiple perspective crops (6–24 depending on preset). The output is a conventional COLMAP sparse reconstruction with per-view images, masks, and a rig config. This is the most compatible output format and works with any training framework that accepts COLMAP datasets.
+Standard COLMAP pinhole dataset. Each source frame produces multiple perspective crops (6–24 depending on preset). The output is a conventional COLMAP sparse reconstruction with per-view images, masks, and a rig config.
 
 ### ERP (Equirectangular)
 
-Designed for training with 3DGUT (3D Gaussian Unbiased Training), which can consume equirectangular images directly. The plugin uses the pinhole crops only as temporary scaffolding: COLMAP aligns them to recover the camera trajectory, then the plugin extracts the rig-origin pose for each station, applies pitch correction and auto-orientation (aligning camera up to +Y), converts coordinates from COLMAP's OpenCV convention to LichtFeld's OpenGL convention, and writes a transforms.json referencing the original full-resolution ERP frames with `"camera_model": "EQUIRECTANGULAR"`. The scaffolding is deleted after export by default — a "Keep pinhole scaffolding" checkbox retains it for inspection.
+Designed for training with 3DGUT, which can consume equirectangular images directly. The plugin uses the pinhole crops only as temporary scaffolding: COLMAP aligns them to recover the camera trajectory, then the plugin extracts the rig-origin pose for each station, applies pitch correction and auto-orientation (aligning camera up to +Y), converts coordinates from COLMAP's OpenCV convention to LichtFeld's OpenGL convention, and writes a transforms.json referencing the original full-resolution ERP frames with `"camera_model": "EQUIRECTANGULAR"`. The scaffolding is deleted after export by default — a "Keep pinhole scaffolding" checkbox retains it for inspection.
 
 ### Fisheye
 
@@ -79,7 +79,7 @@ Then restart LichtFeld Studio.
 
    **Frame Extraction** — `FPS` sets the extraction rate. `Sharpness` controls frame selection quality (None / Basic / Better / Best). The blur metric can be switched between Tenengrad and Laplacian.
 
-   **Masking** — Enable masking and enter prompt keywords (e.g. `person, tripod`). SAM 3 detects and masks matching objects in every frame. Masks are generated at full ERP resolution, then reprojected into each pinhole view.
+   **Masking** — Enable masking and enter prompt keywords (e.g. `person, tripod`). SAM 3 detects and masks matching objects in every frame.
 
    **Reframe & Alignment** — `Preset` selects the virtual camera rig layout (Pinhole mode). `Features` chooses the extractor (SIFT, ALIKED N16 rot, ALIKED N32). `Matcher Type` chooses the matcher (Bruteforce or LightGlue). `Matcher` selects pair strategy (Sequential with configurable overlap, or Exhaustive). `Mapper` selects Incremental (supports rig constraints) or Global/GLOMAP (faster, no rig support).
 
@@ -165,10 +165,10 @@ The user-selectable preset controls the virtual camera rig. All presets produce 
 | Preset | Views | Layout |
 |--------|------:|--------|
 | Cubemap | 6 | 4 horizon faces plus top and bottom |
-| Low | 12 | Fibonacci-spiral freeview layout from zenith to nadir |
+| Low | 12 | Golden-angle spiral from zenith to nadir |
 | Medium | 16 | 8+8 two-ring layout at ±35° with staggered upper ring |
-| High | 20 | Fibonacci-spiral freeview layout from zenith to nadir |
-| Ultra | 24 | Fibonacci-spiral freeview layout from zenith to nadir |
+| High | 20 | Golden-angle spiral from zenith to nadir |
+| Ultra | 24 | Golden-angle spiral from zenith to nadir |
 
 ### ERP Mode
 
