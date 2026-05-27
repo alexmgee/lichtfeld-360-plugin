@@ -1235,29 +1235,9 @@ except Exception as exc:
             if hasattr(self, '_rig_ids') and self._rig_ids:
                 pipeline_opts.constant_rigs = self._rig_ids
 
-            # Apply hybrid BA configuration — local and global independently
-            lba = pipeline_opts.get_local_bundle_adjustment()
-            gba = pipeline_opts.get_global_bundle_adjustment()
-
-            # Local BA
-            lba.backend = local_ba_opts.backend
-            lba.ceres.use_gpu = local_ba_opts.ceres.use_gpu
-            lba.ceres.auto_select_solver_type = local_ba_opts.ceres.auto_select_solver_type
-            lba.ceres.min_num_images_gpu_solver = local_ba_opts.ceres.min_num_images_gpu_solver
-            if local_ba_opts.ceres.use_gpu:
-                lba.ceres.solver_options.sparse_linear_algebra_library_type = (
-                    local_ba_opts.ceres.solver_options.sparse_linear_algebra_library_type
-                )
-
-            # Global BA
-            gba.backend = global_ba_opts.backend
-            if global_ba_opts.backend == pycolmap.BundleAdjustmentBackend.CERES:
-                gba.ceres.use_gpu = global_ba_opts.ceres.use_gpu
-                gba.ceres.auto_select_solver_type = global_ba_opts.ceres.auto_select_solver_type
-                if global_ba_opts.ceres.use_gpu:
-                    gba.ceres.solver_options.sparse_linear_algebra_library_type = (
-                        global_ba_opts.ceres.solver_options.sparse_linear_algebra_library_type
-                    )
+            # get_local/global_bundle_adjustment() return copies — setting fields on
+            # them has no effect. ba_use_gpu is the correct direct attribute.
+            _try_set_attr(pipeline_opts, "ba_use_gpu", local_ba_opts.ceres.use_gpu)
 
             _log(
                 "Step 4: Incremental BA — refine_sensor_from_rig=False, "

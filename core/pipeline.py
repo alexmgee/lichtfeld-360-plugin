@@ -1368,6 +1368,7 @@ class PipelineJob:
                     colmap_sparse_dir=sparse_dir,
                     images_root=images_dir,
                     output_dir=out,
+                    masks_dir=out / "masks",
                     log_fn=logger.info,
                 )
                 dataset_path = str(transforms_path)
@@ -1653,6 +1654,7 @@ class PipelineJob:
                 colmap_sparse_dir=sparse_dir,
                 images_root=images_dir,
                 output_dir=out,
+                masks_dir=masks_dir,
                 log_fn=logger.info,
             )
             dataset_path = str(transforms_path)

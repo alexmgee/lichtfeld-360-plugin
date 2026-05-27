@@ -185,6 +185,7 @@ def write_fisheye_transforms(
     images_root: str | Path,
     output_dir: str | Path,
     *,
+    masks_dir: str | Path | None = None,
     transforms_filename: str = "transforms.json",
     ply_filename: str = "pointcloud.ply",
     reconstruction_obj=None,
@@ -336,6 +337,11 @@ def write_fisheye_transforms(
             "transform_matrix": c2w.tolist(),
             **intr,  # w, h, fl_x, fl_y, cx, cy, k1, k2, k3, k4
         }
+        if masks_dir is not None:
+            rel_no_prefix = rel_image_path.removeprefix("images/")
+            mask_rel = Path(rel_no_prefix).with_suffix(".png")
+            if (Path(masks_dir) / mask_rel).exists():
+                entry["mask_path"] = f"masks/{mask_rel.as_posix()}"
         frames.append(entry)
 
     # Sort by file_path so front/ frames precede back/ deterministically and
