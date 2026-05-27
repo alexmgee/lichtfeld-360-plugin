@@ -116,7 +116,7 @@
       <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
         <span class="prop-label">Output Mode</span>
         <select data-value="output_mode_idx">
-          <option value="0" selected>Pinhole</option>
+          <option value="0" selected>ERP (Pinhole)</option>
           <option value="1">ERP</option>
           <option value="2">Fisheye</option>
           <option value="3">Fisheye (Pinhole)</option>
