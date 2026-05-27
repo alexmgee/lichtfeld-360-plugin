@@ -1446,7 +1446,7 @@ def extract_dual_fisheye(
     except Exception as exc:
         return PairedExtractorResult(
             success=False, output_dir=output_dir,
-            error=f"Demux failed: {exc}",
+            error=str(exc),
         )
 
     if not front_video or not rear_video:

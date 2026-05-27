@@ -1785,15 +1785,27 @@ class Plugin360Panel(lf.ui.Panel):
                 self._refresh_masking_availability(auto_enable=True)
                 self._install_button_text = "SAM 3 installed"
             else:
-                self._sam3_setup_report = make_sam3_install_failure_report(
-                    last_progress or "SAM 3 install appears incomplete.",
-                    setup_state=state,
-                )
-                self._hf_verify_text = self._sam3_setup_report.message
-                self._hf_verify_ok = False
-                self._refresh_masking_availability()
+                if state.has_sam3:
+                    # Runtime installed OK; only the weights download failed.
+                    # Keep stage accurate ("needs_weights") so button shows
+                    # "Download Weights" and users can retry cleanly.
+                    self._sam3_setup_report = check_sam3_setup(setup_state=state)
+                    self._sam3_notice_text = (
+                        last_progress or "SAM 3 weight download failed. Check your connection and try again."
+                    )
+                    self._hf_verify_text = self._sam3_setup_report.message
+                    self._hf_verify_ok = False
+                    self._refresh_masking_availability()
+                else:
+                    self._sam3_setup_report = make_sam3_install_failure_report(
+                        last_progress or "SAM 3 install appears incomplete.",
+                        setup_state=state,
+                    )
+                    self._hf_verify_text = self._sam3_setup_report.message
+                    self._hf_verify_ok = False
+                    self._refresh_masking_availability()
+                    self._enable_masking = False
                 self._install_button_text = "Retry Install"
-                self._enable_masking = False
             self._sam3_check_button_text = "Re-check Setup"
             if self._handle:
                 self._handle.dirty_all()
@@ -1964,6 +1976,10 @@ class Plugin360Panel(lf.ui.Panel):
         feat_cap = _FEATURE_MAX_DEFAULTS.get(cur_feat_type)
         if feat_cap is not None and self._sift_max_features > feat_cap:
             self._sift_max_features = feat_cap
+        # Preset index must reflect actual capped values — without this call,
+        # an extractor cap can leave _sift_preset_idx claiming "Normal" while
+        # the actual feat value no longer matches that preset row.
+        self._recompute_sift_preset_from_values()
 
     def _show_sift_reset(self) -> bool:
         """Reset pill is visible only when sliders are exposed AND the user

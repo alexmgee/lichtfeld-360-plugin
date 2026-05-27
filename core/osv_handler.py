@@ -232,8 +232,11 @@ class OSVHandler:
         if not known_suffix and not known_encoder:
             format_name = fmt.get("format_name", "")
             raise ValueError(
-                f"Not a recognized dual-fisheye container: encoder='{encoder}', "
-                f"format='{format_name}', suffix='{suffix}'"
+                "not a recognized dual-fisheye container. "
+                "Fisheye (Pinhole) mode requires the original .insv or .osv file "
+                "from your camera, not a re-exported or re-encoded .mp4. "
+                "If your camera saved this as .mp4, try renaming the file to .insv "
+                "and loading it again."
             )
 
         # Parse all streams.

@@ -847,13 +847,13 @@ def install_premium_tier(on_output=None) -> bool:
         return False
 
     # Eagerly download SAM 3 weights
-    try:
+    if on_output:
+        on_output("Downloading SAM 3 weights (~3.5 GB)...")
+    downloaded = download_model_weights()
+    if not downloaded:
         if on_output:
-            on_output("Downloading SAM 3 weights (~3.5 GB)...")
-        download_model_weights()
-        if on_output:
-            on_output("SAM 3 weights downloaded.")
-    except Exception as exc:
-        logger.warning("SAM 3 weight download failed: %s", exc)
-
+            on_output("SAM 3 weight download failed. Check your connection and try again.")
+        return False
+    if on_output:
+        on_output("SAM 3 weights downloaded.")
     return True
