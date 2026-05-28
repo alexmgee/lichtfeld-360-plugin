@@ -391,6 +391,7 @@ class Plugin360Panel(lf.ui.Panel):
         self._back_video_path: str = ""
         self._keep_streams: bool = False
         self._keep_pinhole_scaffolding: bool = False
+        self._keep_fisheye_frames: bool = False
         self._fisheye_circle_margin: float = 6.0
 
         # COLMAP 4.1 controls
@@ -599,6 +600,8 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind("keep_streams", lambda: self._keep_streams, self._set_keep_streams)
         model.bind("keep_pinhole_scaffolding", lambda: self._keep_pinhole_scaffolding, self._set_keep_pinhole_scaffolding)
         model.bind_func("show_keep_pinhole_scaffolding", lambda: self._output_mode_idx == 1)
+        model.bind("keep_fisheye_frames", lambda: self._keep_fisheye_frames, self._set_keep_fisheye_frames)
+        model.bind_func("show_keep_fisheye_frames", lambda: self._output_mode_idx == FISHEYE_PINHOLE_OUTPUT_MODE_IDX)
         model.bind_event("select_front_video", self._on_select_front_video)
         model.bind_event("select_back_video", self._on_select_back_video)
         model.bind_event("clear_front_video", self._on_clear_front_video)
@@ -2189,6 +2192,12 @@ class Plugin360Panel(lf.ui.Panel):
         else:
             self._keep_pinhole_scaffolding = str(val).lower() in ("true", "1", "yes", "on")
 
+    def _set_keep_fisheye_frames(self, val):
+        if isinstance(val, bool):
+            self._keep_fisheye_frames = val
+        else:
+            self._keep_fisheye_frames = str(val).lower() in ("true", "1", "yes", "on")
+
     def _set_front_video_path_noop(self, val):
         # Path is set by _on_select_front_video, not by user typing.
         # This setter exists so model.bind() has a setter callback.
@@ -2597,6 +2606,7 @@ class Plugin360Panel(lf.ui.Panel):
             back_video_path=self._back_video_path,
             keep_streams=self._keep_streams,
             keep_pinhole_scaffolding=self._keep_pinhole_scaffolding,
+            keep_fisheye_frames=self._keep_fisheye_frames,
         )
 
         self._is_processing = True
@@ -2910,7 +2920,7 @@ class Plugin360Panel(lf.ui.Panel):
                     # returns the parent directory (LFS expects the dataset
                     # directory, not the file). Pinhole output points at the
                     # COLMAP reconstruction directory directly.
-                    if result.output_mode in ("erp", "fisheye"):
+                    if result.output_mode in ("erp", "fisheye", "fisheye_pinhole"):
                         dataset_base_path, import_output_path = self._resolve_erp_import_target(
                             result.dataset_path
                         )

@@ -380,6 +380,9 @@ def write_rig_propagated_transforms(
     back_intrinsics: dict | None = None,
     transforms_filename: str = "transforms.json",
     ply_filename: str = "pointcloud.ply",
+    file_path_prefix: str = "images",
+    masks_root: str | Path | None = None,
+    mask_path_prefix: str = "masks",
     log_fn: Callable[..., object] = logger.info,
 ) -> Path:
     """Write transforms.json by propagating a reference-view COLMAP reconstruction
@@ -402,6 +405,10 @@ def write_rig_propagated_transforms(
             If None, computed from ``view_config.crop_size`` at 90° FOV.
         transforms_filename: Output transforms filename.
         ply_filename: Output pointcloud filename.
+        file_path_prefix: Prefix to write before each flat image filename.
+        masks_root: Optional directory containing flat mask PNGs matching the
+            propagated flat image names.
+        mask_path_prefix: Prefix to write before each flat mask filename.
         log_fn: Logging callback.
 
     Returns:
@@ -412,6 +419,7 @@ def write_rig_propagated_transforms(
 
     sparse_dir = Path(colmap_sparse_dir)
     images_root = Path(images_root)
+    masks_root_path = Path(masks_root) if masks_root is not None else None
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -552,7 +560,7 @@ def write_rig_propagated_transforms(
 
             # Flat naming: images/{view_name}_{frame_id}.jpg
             flat_name = f"{view.name}_{bare_name}"
-            rel_path = f"images/{flat_name}"
+            rel_path = f"{file_path_prefix}/{flat_name}"
             abs_path = images_root / flat_name
             if not abs_path.exists():
                 # Pre-flatten layout: try subfolder path
@@ -562,11 +570,16 @@ def write_rig_propagated_transforms(
                     continue
 
             intr = back_intrinsics if is_back else front_intrinsics
-            frames.append({
+            entry = {
                 "file_path": rel_path,
                 "transform_matrix": c2w_lfs.tolist(),
                 **intr,
-            })
+            }
+            if masks_root_path is not None:
+                mask_name = Path(flat_name).with_suffix(".png")
+                if (masks_root_path / mask_name).exists():
+                    entry["mask_path"] = f"{mask_path_prefix}/{mask_name.as_posix()}"
+            frames.append(entry)
 
     if missing_count:
         log_fn("WARNING: %d view images missing on disk (skipped)", missing_count)
