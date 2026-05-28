@@ -115,6 +115,7 @@ class PipelineConfig:
     back_video_path: str = ""
     keep_streams: bool = False  # retain demuxed front.mp4/back.mp4 alongside output
     keep_pinhole_scaffolding: bool = False  # retain pinhole crops after ERP export
+    keep_fisheye_frames: bool = False       # retain extracted/front/ and extracted/back/
 
     # Fisheye masking
     fisheye_circle_margin: float = 6.0  # Circle mask margin in percent
@@ -870,6 +871,11 @@ class PipelineJob:
         # Resume mode: skip extraction/masking/reframing, jump to COLMAP
         # ===================================================================
         if cfg.source_mode == "resume":
+            # After a successful full run, images live at colmap/images/ (reorganized).
+            # Fall back to out/images/ for outputs from a failed/pre-reorganization run.
+            _colmap_images = out / "colmap" / "images"
+            if _colmap_images.is_dir():
+                images_dir = _colmap_images
             return self._run_fisheye_resume(cfg, t0, out, images_dir)
 
         # ===================================================================
@@ -1341,19 +1347,55 @@ class PipelineJob:
             if output_masks_dir:
                 _flatten_view_folders(output_masks_dir)
 
+            # Reorganize COLMAP artifacts into colmap/ so sparse/ is not at the
+            # dataset root. Without this, LFS ColmapLoader wins over BlenderLoader
+            # and resolves sparse model image names (subfolder format) against the
+            # flat-named files on disk — causing "Image not found" at import.
+            self._update("output", 94.0, "Organizing colmap/ directory...")
+            import shutil as _shutil2
+            colmap_dir = out / "colmap"
+            colmap_dir.mkdir(exist_ok=True)
+            for _subdir in ("images", "sparse"):
+                _src = out / _subdir
+                if _src.exists():
+                    _dst = colmap_dir / _subdir
+                    if _dst.exists():
+                        _shutil2.rmtree(str(_dst))
+                    _shutil2.move(str(_src), str(_dst))
+            if output_masks_dir and output_masks_dir.exists():
+                _dst_masks = colmap_dir / "masks"
+                if _dst_masks.exists():
+                    _shutil2.rmtree(str(_dst_masks))
+                _shutil2.move(str(output_masks_dir), str(_dst_masks))
+            for _db in ("database.db", "database.db-shm", "database.db-wal"):
+                _src_db = out / _db
+                if _src_db.exists():
+                    _shutil2.move(str(_src_db), str(colmap_dir / _db))
+
+            sparse_dir = colmap_dir / "sparse" / "0"
+            if not sparse_dir.is_dir():
+                sparse_dir = colmap_dir / "sparse"
+
             # Propagate reference-view poses to all 16 views via rig geometry
             self._update("output", 95.0, "Propagating poses to all views...")
             from .transforms_writer import write_rig_propagated_transforms
             try:
+                _masks_root = colmap_dir / "masks"
                 transforms_path = write_rig_propagated_transforms(
                     colmap_sparse_dir=sparse_dir,
-                    images_root=images_dir,
+                    images_root=colmap_dir / "images",
                     output_dir=out,
                     view_config=view_config,
                     baseline_m=calib.baseline_m,
+                    file_path_prefix="colmap/images",
+                    masks_root=_masks_root if _masks_root.is_dir() else None,
+                    mask_path_prefix="colmap/masks",
                     log_fn=logger.info,
                 )
                 dataset_path = str(transforms_path)
+                _shutil2.rmtree(str(colmap_dir / "sparse"), ignore_errors=True)
+                for _db in ("database.db", "database.db-shm", "database.db-wal"):
+                    (colmap_dir / _db).unlink(missing_ok=True)
             except Exception as exc:
                 logger.exception("Pose propagation failed")
                 raise RuntimeError(
@@ -1381,7 +1423,7 @@ class PipelineJob:
         self._update("complete", 100.0, "Fisheye reconstruction + transforms.json ready")
 
         # Clean up intermediate files and organize metadata
-        self._cleanup_fisheye_output(out, extracted_dir)
+        self._cleanup_fisheye_output(out, extracted_dir, keep_fisheye_frames=cfg.keep_fisheye_frames)
 
         elapsed = time.time() - t0
         return PipelineResult(
@@ -1464,12 +1506,19 @@ class PipelineJob:
         print(f"[pipeline] Detected {num_pairs} existing frames ({layout} layout)")
         self._update("colmap", 0.0, f"Resuming from {num_pairs} existing frames...")
 
-        # Clean stale COLMAP artifacts
+        # Clean stale COLMAP artifacts from root (old layout) and colmap/ (reorganized)
         for stale in ("sparse", "colmap_input", "colmap_masks",
                        "colmap_mini_rig.json", "database.db",
                        "database.db-shm", "database.db-wal",
                        "transforms.json", "pointcloud.ply"):
             p = out / stale
+            if p.is_dir():
+                shutil.rmtree(str(p), ignore_errors=True)
+            elif p.is_file():
+                p.unlink(missing_ok=True)
+        colmap_sub = out / "colmap"
+        for stale in ("sparse", "database.db", "database.db-shm", "database.db-wal"):
+            p = colmap_sub / stale
             if p.is_dir():
                 shutil.rmtree(str(p), ignore_errors=True)
             elif p.is_file():
@@ -1579,27 +1628,54 @@ class PipelineJob:
                 shutil.rmtree(str(colmap_masks_dir), ignore_errors=True)
             rig_path.unlink(missing_ok=True)
 
-            # Write transforms
-            sparse_dir = out / "sparse" / "0"
-            if not sparse_dir.is_dir():
-                sparse_dir = out / "sparse"
-
+            # Flatten if images are still in subfolder layout
             if layout == "subfolder":
                 _flatten_view_folders(images_dir)
                 if masks_dir.is_dir():
                     _flatten_view_folders(masks_dir)
 
+            # Reorganize COLMAP artifacts into colmap/ (mirrors _run_fisheye_native)
+            colmap_dir = out / "colmap"
+            colmap_dir.mkdir(exist_ok=True)
+            for _subdir in ("images", "sparse"):
+                _src = out / _subdir
+                if _src.exists():
+                    _dst = colmap_dir / _subdir
+                    if _dst.exists():
+                        shutil.rmtree(str(_dst))
+                    shutil.move(str(_src), str(_dst))
+            if masks_dir.is_dir() and masks_dir.parent == out:
+                _dst_masks = colmap_dir / "masks"
+                if _dst_masks.exists():
+                    shutil.rmtree(str(_dst_masks))
+                shutil.move(str(masks_dir), str(_dst_masks))
+            for _db in ("database.db", "database.db-shm", "database.db-wal"):
+                _src_db = out / _db
+                if _src_db.exists():
+                    shutil.move(str(_src_db), str(colmap_dir / _db))
+
+            sparse_dir = colmap_dir / "sparse" / "0"
+            if not sparse_dir.is_dir():
+                sparse_dir = colmap_dir / "sparse"
+
             self._update("output", 92.0, "Propagating poses to all views...")
             from .transforms_writer import write_rig_propagated_transforms
+            _masks_root = colmap_dir / "masks"
             transforms_path = write_rig_propagated_transforms(
                 colmap_sparse_dir=sparse_dir,
-                images_root=images_dir,
+                images_root=colmap_dir / "images",
                 output_dir=out,
                 view_config=view_config,
                 baseline_m=calib.baseline_m,
+                file_path_prefix="colmap/images",
+                masks_root=_masks_root if _masks_root.is_dir() else None,
+                mask_path_prefix="colmap/masks",
                 log_fn=logger.info,
             )
             dataset_path = str(transforms_path)
+            shutil.rmtree(str(colmap_dir / "sparse"), ignore_errors=True)
+            for _db in ("database.db", "database.db-shm", "database.db-wal"):
+                (colmap_dir / _db).unlink(missing_ok=True)
 
         else:
             # Fisheye native resume — run COLMAP directly on images/
@@ -1683,7 +1759,9 @@ class PipelineJob:
         )
 
     @staticmethod
-    def _cleanup_fisheye_output(out: Path, extracted_dir: Path) -> None:
+    def _cleanup_fisheye_output(
+        out: Path, extracted_dir: Path, keep_fisheye_frames: bool = False
+    ) -> None:
         """Clean up intermediate files after a successful fisheye run.
 
         - Removes the extracted/ directory (demuxed streams already cleaned,
@@ -1691,9 +1769,9 @@ class PipelineJob:
         - Moves colmap_debug.log into metadata/.
         """
         import shutil
-        # Remove extracted/ — contents have been staged to images/ and masks/
         if extracted_dir.exists():
-            shutil.rmtree(extracted_dir, ignore_errors=True)
+            if not keep_fisheye_frames:
+                shutil.rmtree(extracted_dir, ignore_errors=True)
 
         # Move debug files into metadata/
         metadata_dir = out / "metadata"
