@@ -135,12 +135,12 @@
           </div>
         </span>
       </div>
-      <div class="setting-row" data-if="show_keep_fisheye_frames">
+      <div class="setting-row" data-if="show_keep_extracted_data">
         <span class="prop-label"></span>
         <span class="status-text status-muted">
           <div class="loop-closure-group">
-            <input type="checkbox" data-checked="keep_fisheye_frames" id="keep_fisheye_frames_cb"/>
-            <label class="checkbox-label" for="keep_fisheye_frames_cb">Keep raw fisheye frames</label>
+            <input type="checkbox" data-checked="keep_extracted_data" id="keep_extracted_data_cb"/>
+            <label class="checkbox-label" for="keep_extracted_data_cb">Keep extracted data</label>
           </div>
         </span>
       </div>

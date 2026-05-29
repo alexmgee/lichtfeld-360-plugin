@@ -95,6 +95,23 @@ def colmap_pose_to_c2w_opengl(R_w2c: np.ndarray, t_w2c: np.ndarray) -> np.ndarra
     return c2w
 
 
+def _fisheye_rotation_matrix(yaw_deg: float, pitch_deg: float) -> np.ndarray:
+    """Rotation matrix for fisheye virtual camera yaw/pitch."""
+    yaw = np.radians(yaw_deg)
+    pitch = np.radians(pitch_deg)
+    ry = np.array([
+        [np.cos(yaw), 0, np.sin(yaw)],
+        [0, 1, 0],
+        [-np.sin(yaw), 0, np.cos(yaw)],
+    ], dtype=np.float64)
+    rx = np.array([
+        [1, 0, 0],
+        [0, np.cos(pitch), -np.sin(pitch)],
+        [0, np.sin(pitch), np.cos(pitch)],
+    ], dtype=np.float64)
+    return ry @ rx
+
+
 def write_transforms_json(
     output_path: str | Path,
     camera_model: str,
@@ -383,6 +400,7 @@ def write_rig_propagated_transforms(
     file_path_prefix: str = "images",
     masks_root: str | Path | None = None,
     mask_path_prefix: str = "masks",
+    propagated_sparse_output_dir: str | Path | None = None,
     log_fn: Callable[..., object] = logger.info,
 ) -> Path:
     """Write transforms.json by propagating a reference-view COLMAP reconstruction
@@ -409,13 +427,15 @@ def write_rig_propagated_transforms(
         masks_root: Optional directory containing flat mask PNGs matching the
             propagated flat image names.
         mask_path_prefix: Prefix to write before each flat mask filename.
+        propagated_sparse_output_dir: Optional COLMAP sparse model directory to
+            write with all propagated flat-name image entries. When omitted,
+            only transforms.json and pointcloud.ply are written.
         log_fn: Logging callback.
 
     Returns:
         Path to the written transforms.json.
     """
     import pycolmap
-    from .fisheye_reframer import _rotation_matrix
 
     sparse_dir = Path(colmap_sparse_dir)
     images_root = Path(images_root)
@@ -438,8 +458,18 @@ def write_rig_propagated_transforms(
     views = view_config.views
     ref_view = views[0]   # front_ctr_hi (rig reference)
     lo_view = views[7]    # front_ctr_lo (second reference)
-    ref_prefix = ref_view.name + "/"
-    lo_prefix = lo_view.name + "/"
+
+    def _match_reference_view_name(image_name: str) -> tuple[str | None, str | None]:
+        normalized = image_name.replace("\\", "/")
+        basename = Path(normalized).name
+        for view in (ref_view, lo_view):
+            folder_prefix = view.name + "/"
+            flat_prefix = view.name + "_"
+            if normalized.startswith(folder_prefix):
+                return view.name, normalized[len(folder_prefix):]
+            if basename.startswith(flat_prefix):
+                return view.name, basename[len(flat_prefix):]
+        return None, None
 
     # Step 2: Find reference camera intrinsics from the reconstruction.
     # With PER_FOLDER, each subfolder gets its own camera. Find the one
@@ -447,7 +477,8 @@ def write_rig_propagated_transforms(
     ref_cam_id = None
     for img_id in reg_image_ids:
         image = recon.image(img_id)
-        if image.name.startswith(ref_prefix):
+        view_name, _bare = _match_reference_view_name(image.name)
+        if view_name == ref_view.name:
             ref_cam_id = image.camera_id
             break
     if ref_cam_id is None:
@@ -480,11 +511,11 @@ def write_rig_propagated_transforms(
 
     # Step 4: Precompute cam_from_rig for all 16 views
     R_back = np.array([[-1, 0, 0], [0, 1, 0], [0, 0, -1]], dtype=np.float64)
-    R_ref = _rotation_matrix(ref_view.yaw_deg, ref_view.pitch_deg)
+    R_ref = _fisheye_rotation_matrix(ref_view.yaw_deg, ref_view.pitch_deg)
 
     view_transforms = []  # (R_rel, d_rig, is_back) per view
     for view in views:
-        R_view = _rotation_matrix(view.yaw_deg, view.pitch_deg)
+        R_view = _fisheye_rotation_matrix(view.yaw_deg, view.pitch_deg)
         if view.source_lens == "back":
             R_view = R_view @ R_back
         R_rel = R_view @ R_ref.T
@@ -497,22 +528,20 @@ def write_rig_propagated_transforms(
         view_transforms.append((R_rel, d_rig, view.source_lens == "back"))
 
     # Precompute lo→ref derivation rotation (for frames where only lo registered)
-    R_lo_from_ref = _rotation_matrix(lo_view.yaw_deg, lo_view.pitch_deg) @ R_ref.T
+    R_lo_from_ref = _fisheye_rotation_matrix(lo_view.yaw_deg, lo_view.pitch_deg) @ R_ref.T
 
     # Step 5: Build per-frame pose map from both reference views.
     # Prefer front_ctr_hi; derive ref pose from front_ctr_lo when needed.
     frame_poses: dict[str, tuple] = {}  # bare_name → (R_w2c, t_w2c, source)
     for img_id in reg_image_ids:
         image = recon.image(img_id)
-        name = image.name
-        if name.startswith(ref_prefix):
-            bare = name[len(ref_prefix):]
+        view_name, bare = _match_reference_view_name(image.name)
+        if view_name == ref_view.name:
             source = "ref"
-        elif name.startswith(lo_prefix):
-            bare = name[len(lo_prefix):]
+        elif view_name == lo_view.name:
             source = "lo"
         else:
-            log_fn("WARNING: unexpected image name %r in reconstruction", name)
+            log_fn("WARNING: unexpected image name %r in reconstruction", image.name)
             continue
         # Prefer ref; only use lo if ref isn't registered for this frame
         if bare not in frame_poses or source == "ref":
@@ -535,6 +564,7 @@ def write_rig_propagated_transforms(
 
     # Step 6: Propagate each frame's ref pose to all 16 views
     frames = []
+    sparse_entries = []
     missing_count = 0
 
     for bare_name, (R_w2c, t_w2c, _source) in sorted(frame_poses.items()):
@@ -570,6 +600,13 @@ def write_rig_propagated_transforms(
                     continue
 
             intr = back_intrinsics if is_back else front_intrinsics
+            sparse_entries.append({
+                "name": flat_name,
+                "view_name": view.name,
+                "intrinsics": intr,
+                "R_w2c": R_v.copy(),
+                "t_w2c": t_v.copy(),
+            })
             entry = {
                 "file_path": rel_path,
                 "transform_matrix": c2w_lfs.tolist(),
@@ -612,4 +649,109 @@ def write_rig_propagated_transforms(
     log_fn("Wrote propagated transforms.json with %d frames: %s",
            len(frames), transforms_path)
 
+    if propagated_sparse_output_dir is not None:
+        _write_propagated_sparse_model(
+            recon,
+            sparse_entries,
+            Path(propagated_sparse_output_dir),
+            log_fn=log_fn,
+        )
+
     return transforms_path
+
+
+def _flat_colmap_image_name(image_name: str) -> str:
+    """Convert COLMAP view-folder image names to final flat image names."""
+    rel = Path(image_name.replace("\\", "/"))
+    parent = rel.parent.as_posix().replace("/", "_")
+    if not parent or parent == ".":
+        return rel.name
+    return f"{parent}_{rel.name}"
+
+
+def _next_id(*maps) -> int:
+    max_id = 0
+    for mapping in maps:
+        if mapping:
+            max_id = max(max_id, max(int(k) for k in mapping.keys()))
+    return max_id + 1
+
+
+def _write_propagated_sparse_model(
+    recon,
+    sparse_entries: list[dict],
+    output_sparse_dir: Path,
+    *,
+    log_fn: Callable[..., object] = logger.info,
+) -> None:
+    """Write COLMAP sparse/0 with all propagated pinhole images registered."""
+    import shutil
+    import pycolmap
+
+    changed_names = 0
+    for _image_id, image in recon.images.items():
+        flat_name = _flat_colmap_image_name(image.name)
+        if flat_name != image.name:
+            image.name = flat_name
+            changed_names += 1
+
+    existing_names = {image.name for image in recon.images.values()}
+    next_camera_id = _next_id(recon.cameras, recon.rigs)
+    next_image_id = _next_id(recon.images, recon.frames)
+    camera_ids_by_view: dict[str, int] = {}
+    added_images = 0
+
+    for entry in sparse_entries:
+        name = entry["name"]
+        if name in existing_names:
+            continue
+
+        view_name = entry["view_name"]
+        intr = entry["intrinsics"]
+        camera_id = camera_ids_by_view.get(view_name)
+        if camera_id is None:
+            camera_id = next_camera_id
+            next_camera_id += 1
+            camera = pycolmap.Camera.create_from_model_name(
+                camera_id,
+                "PINHOLE",
+                float(intr["fl_x"]),
+                int(intr["w"]),
+                int(intr["h"]),
+            )
+            camera.params = np.array(
+                [
+                    float(intr["fl_x"]),
+                    float(intr["fl_y"]),
+                    float(intr["cx"]),
+                    float(intr["cy"]),
+                ],
+                dtype=np.float64,
+            )
+            recon.add_camera_with_trivial_rig(camera)
+            camera_ids_by_view[view_name] = camera_id
+
+        image = pycolmap.Image(
+            name=name,
+            camera_id=camera_id,
+            image_id=next_image_id,
+        )
+        next_image_id += 1
+        cam_from_world = pycolmap.Rigid3d(
+            pycolmap.Rotation3d(entry["R_w2c"]),
+            entry["t_w2c"],
+        )
+        recon.add_image_with_trivial_frame(image, cam_from_world)
+        existing_names.add(name)
+        added_images += 1
+
+    if output_sparse_dir.exists():
+        shutil.rmtree(str(output_sparse_dir))
+    output_sparse_dir.mkdir(parents=True, exist_ok=True)
+    recon.write_binary(str(output_sparse_dir))
+    log_fn(
+        "Wrote propagated COLMAP sparse model to %s (%d names flattened, %d images added)",
+        output_sparse_dir,
+        changed_names,
+        added_images,
+    )
