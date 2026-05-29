@@ -155,6 +155,7 @@ class FisheyeReframer:
     def _build_remap_tables(
         self,
         lens_calib: FisheyeCalibration,
+        source_size: Tuple[int, int],
         yaw_deg: float,
         pitch_deg: float,
         fov_deg: float,
@@ -173,9 +174,19 @@ class FisheyeReframer:
         ], dtype=np.float64)
 
         R = _rotation_matrix(yaw_deg, pitch_deg)
+        src_w, src_h = source_size
+        calib_w, calib_h = lens_calib.image_size
+        K = lens_calib.camera_matrix.copy()
+        if (src_w, src_h) != (calib_w, calib_h):
+            sx = src_w / float(calib_w)
+            sy = src_h / float(calib_h)
+            K[0, 0] *= sx
+            K[0, 2] *= sx
+            K[1, 1] *= sy
+            K[1, 2] *= sy
 
         map1, map2 = cv2.fisheye.initUndistortRectifyMap(
-            K=lens_calib.camera_matrix,
+            K=K,
             D=lens_calib.dist_coeffs,
             R=R,
             P=new_K,
@@ -197,14 +208,15 @@ class FisheyeReframer:
         Otherwise returns just the crop.
         """
         lens_calib = self._get_lens_calib(view.source_lens)
+        source_size = (fisheye_image.shape[1], fisheye_image.shape[0])
 
         cache_key = (
             view.source_lens, view.yaw_deg, view.pitch_deg,
-            view.fov_deg, crop_size,
+            view.fov_deg, crop_size, source_size,
         )
         if cache_key not in self._map_cache:
             self._map_cache[cache_key] = self._build_remap_tables(
-                lens_calib, view.yaw_deg, view.pitch_deg,
+                lens_calib, source_size, view.yaw_deg, view.pitch_deg,
                 view.fov_deg, crop_size,
             )
 
