@@ -12,6 +12,7 @@ backend the user has chosen and installed.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Protocol
 
 import cv2
@@ -459,27 +460,49 @@ class Sam3Backend:
         primary_box_mode: str = "confidence",
         constrain_to_primary_box: bool = False,
         primary_box_padding: float = 0.35,
+        timing: dict[str, float] | None = None,
     ) -> np.ndarray:
         """Detect targets via text prompts, segment. Returns 0/1 uint8 mask."""
         from PIL import Image as PILImage
 
-        h, w = image.shape[:2]
-        pil_img = PILImage.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        def _accum(key: str, dt: float) -> None:
+            if timing is not None:
+                timing[key] = timing.get(key, 0.0) + dt
 
+        h, w = image.shape[:2]
+        t0 = time.perf_counter()
+        pil_img = PILImage.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        _accum("t_bgr_pil", time.perf_counter() - t0)
+
+        if timing is not None and HAS_TORCH and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
         state = self._processor.set_image(pil_img)
+        if timing is not None and HAS_TORCH and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        _accum("t_set_image", time.perf_counter() - t0)
 
         combined = np.zeros((h, w), dtype=np.uint8)
         for prompt_text in targets:
             try:
                 self._processor.reset_all_prompts(state)
+                if timing is not None and HAS_TORCH and torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                t0 = time.perf_counter()
                 output = self._processor.set_text_prompt(
                     state=state, prompt=prompt_text
                 )
+                if timing is not None and HAS_TORCH and torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                _accum("t_set_text_prompt", time.perf_counter() - t0)
                 masks = output.get("masks")
                 if masks is None:
                     continue
+                t0 = time.perf_counter()
                 for mask in masks:
                     if hasattr(mask, "cpu"):
+                        if timing is not None and HAS_TORCH and torch.cuda.is_available():
+                            torch.cuda.synchronize()
                         arr = mask.cpu().numpy()
                     else:
                         arr = np.array(mask)
@@ -491,6 +514,7 @@ class Sam3Backend:
                             binary, (w, h), interpolation=cv2.INTER_NEAREST
                         )
                     combined = np.maximum(combined, binary)
+                _accum("t_cpu_resize_merge", time.perf_counter() - t0)
             except Exception as exc:
                 logger.warning("SAM 3 prompt '%s' failed: %s", prompt_text, exc)
 

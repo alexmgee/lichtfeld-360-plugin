@@ -33,6 +33,10 @@ The pipeline runs in six stages, each configurable from the plugin panel:
 
 ## Output Modes
 
+### ERP
+
+Native equirectangular reconstruction using COLMAP's `EQUIRECTANGULAR` camera model. Feeds ERP frames directly without pinhole scaffolding — faster than ERP (Scaffold), but generally lower accuracy.
+
 ### Pinhole
 
 Standard COLMAP pinhole dataset. Each source frame produces multiple perspective crops (6–24 depending on preset). The output is a conventional COLMAP sparse reconstruction with per-view images, masks, and a rig config.

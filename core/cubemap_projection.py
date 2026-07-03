@@ -24,21 +24,69 @@ class CubemapProjection:
         self.overlap_degrees = overlap_degrees
         half_fov = (90.0 + overlap_degrees) / 2.0
         self._grid_extent = np.tan(np.radians(half_fov))
+        self._e2c_cache_key: tuple[int, int, int, float] | None = None
+        self._e2c_maps: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
+        self._c2e_cache_key: tuple[int, int, int, float] | None = None
+        self._c2e_lut: list[tuple[np.ndarray, np.ndarray | None, np.ndarray | None]] | None = None
 
-    def equirect2cubemap(self, equirect: np.ndarray) -> dict[str, np.ndarray]:
-        """Split ERP image into 6 cubemap faces."""
-        h, w = equirect.shape[:2]
+    def _projection_key(self, w: int, h: int) -> tuple[int, int, int, float]:
         fs = self.face_size or min(1024, w // 4)
+        return (w, h, fs, self.overlap_degrees)
+
+    def _ensure_e2c_maps(self, w: int, h: int) -> None:
+        key = self._projection_key(w, h)
+        if self._e2c_cache_key == key and self._e2c_maps is not None:
+            return
+        fs = key[2]
         extent = self._grid_extent
         grid = np.linspace(-extent, extent, fs)
         u, v = np.meshgrid(grid, grid)
-        faces = {}
+        maps: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         for name in self.FACE_DIRS:
             x, y, z = self._face_to_xyz(name, u, v)
             lon = np.arctan2(x, -z)
             lat = np.arctan2(y, np.sqrt(x**2 + z**2))
             map_x = ((lon / np.pi + 1) / 2 * w).astype(np.float32)
             map_y = ((0.5 - lat / np.pi) * h).astype(np.float32)
+            maps[name] = (map_x, map_y)
+        self._e2c_maps = maps
+        self._e2c_cache_key = key
+
+    def _ensure_c2e_lut(self, w: int, h: int) -> None:
+        key = self._projection_key(w, h)
+        if self._c2e_cache_key == key and self._c2e_lut is not None:
+            return
+        fs = key[2]
+        u_eq = np.linspace(0, 1, w)
+        v_eq = np.linspace(0, 1, h)
+        uu, vv = np.meshgrid(u_eq, v_eq)
+        lon = (uu - 0.5) * 2 * np.pi
+        lat = (0.5 - vv) * np.pi
+        x = np.cos(lat) * np.sin(lon)
+        y = np.sin(lat)
+        z = -np.cos(lat) * np.cos(lon)
+        abs_x, abs_y, abs_z = np.abs(x), np.abs(y), np.abs(z)
+        lut: list[tuple[np.ndarray, np.ndarray | None, np.ndarray | None]] = []
+        for name in self.FACE_DIRS:
+            region = self._get_face_region(name, x, y, z, abs_x, abs_y, abs_z)
+            if not np.any(region):
+                lut.append((region, None, None))
+                continue
+            fu, fv = self._xyz_to_face(name, x[region], y[region], z[region])
+            px = np.clip(((fu + 1) / 2 * (fs - 1)).astype(int), 0, fs - 1)
+            py = np.clip(((fv + 1) / 2 * (fs - 1)).astype(int), 0, fs - 1)
+            lut.append((region, px, py))
+        self._c2e_lut = lut
+        self._c2e_cache_key = key
+
+    def equirect2cubemap(self, equirect: np.ndarray) -> dict[str, np.ndarray]:
+        """Split ERP image into 6 cubemap faces."""
+        h, w = equirect.shape[:2]
+        self._ensure_e2c_maps(w, h)
+        assert self._e2c_maps is not None
+        faces: dict[str, np.ndarray] = {}
+        for name in self.FACE_DIRS:
+            map_x, map_y = self._e2c_maps[name]
             faces[name] = cv2.remap(
                 equirect, map_x, map_y,
                 interpolation=cv2.INTER_LINEAR,
@@ -55,27 +103,15 @@ class CubemapProjection:
         Mask values: 0/1 uint8 throughout.
         """
         w, h = output_size
-        fs = self.face_size or min(1024, w // 4)
-        u_eq = np.linspace(0, 1, w)
-        v_eq = np.linspace(0, 1, h)
-        uu, vv = np.meshgrid(u_eq, v_eq)
-        lon = (uu - 0.5) * 2 * np.pi
-        lat = (0.5 - vv) * np.pi
-        x = np.cos(lat) * np.sin(lon)
-        y = np.sin(lat)
-        z = -np.cos(lat) * np.cos(lon)
+        self._ensure_c2e_lut(w, h)
+        assert self._c2e_lut is not None
         output = np.zeros((h, w), dtype=np.uint8)
-        abs_x, abs_y, abs_z = np.abs(x), np.abs(y), np.abs(z)
-        for name in self.FACE_DIRS:
+        for name, (region, px, py) in zip(self.FACE_DIRS, self._c2e_lut, strict=True):
             face_mask = face_masks.get(name)
             if face_mask is None:
                 continue
-            region = self._get_face_region(name, x, y, z, abs_x, abs_y, abs_z)
-            if not np.any(region):
+            if not np.any(region) or px is None or py is None:
                 continue
-            fu, fv = self._xyz_to_face(name, x[region], y[region], z[region])
-            px = np.clip(((fu + 1) / 2 * (fs - 1)).astype(int), 0, fs - 1)
-            py = np.clip(((fv + 1) / 2 * (fs - 1)).astype(int), 0, fs - 1)
             output[region] = face_mask[py, px]
         return output
 

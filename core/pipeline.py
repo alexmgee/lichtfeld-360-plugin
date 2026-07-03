@@ -94,7 +94,7 @@ class PipelineConfig:
     sift_max_features: Optional[int] = None
     sift_max_image_size: Optional[int] = None
 
-    # Output mode: "pinhole" = COLMAP dataset, "erp" = transforms.json,
+    # Output mode: "pinhole" = COLMAP dataset, "erp_scaffold" = transforms.json,
     #              "fisheye" = OPENCV_FISHEYE COLMAP dataset (phase 1) /
     #              fisheye-native transforms.json (phase 2+)
     output_mode: str = "pinhole"
@@ -110,11 +110,13 @@ class PipelineConfig:
     # directly on existing images/ in the output directory.
     input_type: str = "erp"
     camera_family: Optional[str] = None
+    dual_fisheye_calibration_path: str = ""
     source_mode: str = "container"
     front_video_path: str = ""
     back_video_path: str = ""
     keep_streams: bool = False  # retain demuxed front.mp4/back.mp4 alongside output
     keep_pinhole_scaffolding: bool = False  # retain pinhole crops after ERP export
+    keep_native_sparse: bool = True  # retain COLMAP sparse/ + database.db after native ERP export (native sparse is a valid EQUIRECTANGULAR dataset, unlike scaffold's)
     keep_extracted_data: bool = False  # retain raw frames, pinhole crops, masks, and scaffold data
 
     # Fisheye masking
@@ -158,6 +160,7 @@ class PipelineResult:
     video_backend_error: str = ""
     mask_diagnostics_path: str = ""
     gpu_extraction: bool = False
+    masking_timers: dict = field(default_factory=dict)
     elapsed_sec: float = 0.0
     error: str = ""
 
@@ -357,6 +360,9 @@ class PipelineJob:
         if cfg.input_type == "dual_fisheye":
             return self._run_fisheye_native(cfg, t0)
 
+        if cfg.output_mode == "erp_native":
+            return self._run_erp_native(cfg, t0)
+
         out = Path(cfg.output_dir)
         out.mkdir(parents=True, exist_ok=True)
 
@@ -492,6 +498,7 @@ class PipelineJob:
                 masks_dir=sam3_result.mask_dir,
                 diagnostics_path=getattr(sam3_result, "diagnostics_path", ""),
                 backend_name=getattr(sam3_result, "backend_name", "Sam3Backend"),
+                masking_timers=getattr(sam3_result, "timers", {}),
             )
 
             if self._check_cancel():
@@ -762,7 +769,7 @@ class PipelineJob:
         # ===================================================================
         # Stage 6: Write Output (85-95%)
         # ===================================================================
-        if cfg.output_mode == "erp":
+        if cfg.output_mode == "erp_scaffold":
             from .scaffold import (
                 export_erp_scaffold, cleanup_pinhole_crops, cleanup_colmap_artifacts,
             )
@@ -843,6 +850,293 @@ class PipelineJob:
             ),
             video_backend_error=mask_result.video_backend_error if mask_result else "",
             mask_diagnostics_path=mask_result.diagnostics_path if mask_result else "",
+            gpu_extraction=extract_result.gpu_accelerated,
+            masking_timers=getattr(mask_result, "masking_timers", {}) if mask_result else {},
+            elapsed_sec=elapsed,
+        )
+
+    # ------------------------------------------------------------------
+    # Native ERP path (equirectangular COLMAP, no reframing/rig)
+    # ------------------------------------------------------------------
+
+    def _run_erp_native(self, cfg: PipelineConfig, t0: float) -> PipelineResult:
+        """ERP-native pipeline: extract → optional ERP masks → flat stage → COLMAP."""
+        import shutil
+
+        from .scaffold import cleanup_colmap_artifacts
+        from .transforms_writer import write_erp_native_transforms
+
+        out = Path(cfg.output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        extracted_dir = out / "extracted"
+        frames_dir = extracted_dir / "frames"
+        images_dir = out / "images"
+        masks_output_dir = out / "masks"
+
+        # ===================================================================
+        # Stage 1: Sharpest Frame Extraction (0-30%)
+        # ===================================================================
+        if cfg.extraction_sharpness == "none":
+            self._update("extraction", 0.0, "Extracting frames...")
+        else:
+            self._update("extraction", 0.0, "Extracting sharpest frames...")
+
+        extractor = SharpestExtractor()
+        extract_config = SharpestConfig(
+            interval=cfg.interval,
+            extraction_sharpness=cfg.extraction_sharpness,
+            blur_metric=cfg.blur_metric,
+            scene_threshold=cfg.scene_threshold,
+            scale_width=cfg.blur_scale_width,
+            quality=cfg.quality,
+            start_sec=cfg.start_sec,
+            end_sec=cfg.end_sec,
+        )
+
+        def _extract_progress(cur: int, total: int, msg: str) -> None:
+            pct = (cur / max(total, 1)) * 30
+            self._update("extraction", pct, msg)
+
+        extract_result = extractor.extract(
+            cfg.video_path,
+            str(frames_dir),
+            extract_config,
+            progress_callback=_extract_progress,
+            cancel_check=self._check_cancel,
+        )
+
+        if not extract_result.success:
+            raise RuntimeError(
+                f"Frame extraction failed: {extract_result.error}"
+            )
+
+        num_source_frames = extract_result.frames_extracted
+
+        erp_width = 0
+        erp_height = 0
+        if extract_result.frame_paths:
+            import cv2
+            _first = cv2.imread(extract_result.frame_paths[0])
+            if _first is not None:
+                erp_height, erp_width = _first.shape[:2]
+                del _first
+
+        if self._check_cancel():
+            raise RuntimeError("Cancelled")
+
+        # ===================================================================
+        # Stage 2: ERP masking (30-50%, optional)
+        # ===================================================================
+        mask_result: Optional[MaskResult] = None
+        erp_masks_dir = extracted_dir / "masks"
+
+        if cfg.enable_masking:
+            if cfg.masking_method == "sam3_cubemap":
+                if not is_sam3_masking_ready():
+                    raise RuntimeError(
+                        "SAM 3 masking is not available. "
+                        "Install SAM 3 from the Masking section first."
+                    )
+                from .sam3_masker import Sam3CubemapMasker, Sam3MaskerConfig
+
+                self._update("masking", 30.0, "Initializing SAM 3 for ERP masking...")
+                sam3_cfg = Sam3MaskerConfig(
+                    prompts=cfg.mask_prompts,
+                    confidence_threshold=0.3,
+                    output_size=cfg.output_size,
+                    enable_diagnostics=cfg.enable_diagnostics,
+                )
+                sam3_masker = Sam3CubemapMasker(sam3_cfg)
+                sam3_masker.initialize()
+
+                try:
+                    def _sam3_progress(cur: int, total: int, msg: str) -> None:
+                        pct = 30 + (cur / max(total, 1)) * 20
+                        self._update("masking", pct, msg)
+
+                    # view_config is required by Sam3CubemapMasker but only used
+                    # for per-view side output; native path reads erp_mask_dir only.
+                    view_config = _build_runtime_view_config(cfg)
+                    sam3_result = sam3_masker.process_frames(
+                        frames_dir=str(frames_dir),
+                        output_dir=str(out),
+                        view_config=view_config,
+                        erp_mask_dir=str(erp_masks_dir),
+                        progress_callback=_sam3_progress,
+                        write_per_view=False,
+                    )
+                finally:
+                    sam3_masker.cleanup()
+
+                if not sam3_result.success:
+                    error = getattr(sam3_result, "error", "") or "unknown error"
+                    raise RuntimeError(f"SAM 3 ERP masking failed: {error}")
+
+                mask_result = MaskResult(
+                    success=sam3_result.success,
+                    total_frames=sam3_result.total_frames,
+                    masked_frames=sam3_result.masked_frames,
+                    masks_dir=sam3_result.erp_mask_dir or str(erp_masks_dir),
+                    diagnostics_path=getattr(sam3_result, "diagnostics_path", ""),
+                    backend_name=getattr(sam3_result, "backend_name", "Sam3Backend"),
+                    masking_timers=getattr(sam3_result, "timers", {}),
+                )
+            elif is_masking_available():
+                self._update("masking", 30.0, "Initializing masking backend...")
+                view_config = _build_runtime_view_config(cfg)
+                mask_cfg = MaskConfig(
+                    targets=cfg.mask_prompts,
+                    output_size=cfg.output_size,
+                    backend_preference="yolo_sam1",
+                    views=view_config.get_all_views(),
+                    enable_diagnostics=cfg.enable_diagnostics,
+                )
+                masker = Masker(mask_cfg)
+                masker.initialize()
+
+                try:
+                    def _mask_progress(cur: int, total: int, msg: str) -> None:
+                        pct = 30 + (cur / max(total, 1)) * 20
+                        self._update("masking", pct, msg)
+
+                    mask_result = masker.process_frames(
+                        str(frames_dir),
+                        str(erp_masks_dir),
+                        progress_callback=_mask_progress,
+                    )
+                finally:
+                    masker.cleanup()
+
+            if self._check_cancel():
+                raise RuntimeError("Cancelled")
+
+        # ===================================================================
+        # Stage 3: Stage flat ERP frames (+ masks) (50-55%)
+        # ===================================================================
+        self._update("staging", 50.0, "Staging ERP frames for COLMAP...")
+        if images_dir.exists():
+            shutil.rmtree(images_dir, ignore_errors=True)
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        frame_files = sorted(
+            f for f in frames_dir.iterdir()
+            if f.suffix.lower() in (".jpg", ".jpeg", ".png")
+        )
+        for frame_file in frame_files:
+            shutil.move(str(frame_file), str(images_dir / frame_file.name))
+
+        num_output_images = len(frame_files)
+        effective_colmap_mask: str | None = None
+
+        if cfg.enable_masking and erp_masks_dir.is_dir():
+            if masks_output_dir.exists():
+                shutil.rmtree(masks_output_dir, ignore_errors=True)
+            masks_output_dir.mkdir(parents=True, exist_ok=True)
+            for mask_file in sorted(erp_masks_dir.glob("*.png")):
+                shutil.move(str(mask_file), str(masks_output_dir / mask_file.name))
+            effective_colmap_mask = str(masks_output_dir)
+
+        if self._check_cancel():
+            raise RuntimeError("Cancelled")
+
+        # ===================================================================
+        # Stage 4: COLMAP (55-85%)
+        # ===================================================================
+        self._update("colmap", 55.0, "Running COLMAP (EQUIRECTANGULAR)...")
+
+        colmap_config = ColmapConfig(
+            preset=cfg.colmap_preset,
+            camera_model="EQUIRECTANGULAR",
+            camera_mode="SINGLE",
+            camera_params=None,
+            matcher=cfg.colmap_matcher or "sequential",
+            match_budget_tier=cfg.colmap_match_budget_tier,
+            max_num_matches_override=cfg.colmap_max_num_matches,
+            refine_focal_length=False,
+            refine_principal_point=False,
+            refine_extra_params=False,
+            sift_max_num_features_override=cfg.sift_max_features,
+            sift_max_image_size_override=cfg.sift_max_image_size,
+            feature_type=cfg.colmap_feature_type,
+            matcher_type=cfg.colmap_matcher_type,
+            mapper="incremental",
+            ba_solver=cfg.colmap_ba_solver,
+            vocab_tree_path=cfg.vocab_tree_path or None,
+            loop_detection=cfg.loop_detection,
+            sequential_overlap=cfg.colmap_sequential_overlap,
+        )
+
+        def _colmap_progress(stage: str, pct: float, msg: str) -> None:
+            self._update("colmap", 55 + pct * 30, msg)
+
+        runner = ColmapRunner(
+            images_dir=str(images_dir),
+            output_dir=str(out),
+            rig_config_path=None,
+            mask_path=effective_colmap_mask,
+            config=colmap_config,
+            on_progress=_colmap_progress,
+            cancel_check=self._check_cancel,
+        )
+
+        colmap_result = runner.run()
+
+        if not colmap_result.success:
+            raise RuntimeError(f"COLMAP failed: {colmap_result.error}")
+
+        # ===================================================================
+        # Stage 5: Write transforms.json + pointcloud.ply (85-95%)
+        # ===================================================================
+        self._update("output", 85.0, "Writing native ERP transforms.json...")
+
+        sparse_dir = out / "sparse" / "0"
+        if not sparse_dir.is_dir():
+            sparse_dir = out / "sparse"
+
+        transforms_path = write_erp_native_transforms(
+            colmap_sparse_dir=sparse_dir,
+            output_dir=out,
+            masks_dir=masks_output_dir if masks_output_dir.is_dir() else None,
+            erp_width=erp_width,
+            erp_height=erp_height,
+            log_fn=logger.info,
+        )
+
+        # ===================================================================
+        # Stage 6: Finalize (95-100%)
+        # ===================================================================
+        if not cfg.keep_native_sparse:
+            cleanup_colmap_artifacts(out, log_fn=logger.info)
+
+        self._update("complete", 100.0, "Native ERP export complete")
+        dataset_path = str(transforms_path)
+        elapsed = time.time() - t0
+
+        return PipelineResult(
+            success=True,
+            dataset_path=dataset_path,
+            output_mode=cfg.output_mode,
+            num_source_frames=num_source_frames,
+            num_output_images=num_output_images,
+            num_aligned_cameras=colmap_result.num_registered_images,
+            num_registered_frames=colmap_result.num_registered_frames,
+            num_complete_frames=colmap_result.num_complete_frames,
+            num_partial_frames=colmap_result.num_partial_frames,
+            views_per_frame=colmap_result.views_per_frame,
+            expected_images_by_view=colmap_result.expected_images_by_view,
+            registered_images_by_view=colmap_result.registered_images_by_view,
+            partial_frame_examples=colmap_result.partial_frame_examples,
+            dropped_frame_examples=colmap_result.dropped_frame_examples,
+            preset_signature="native EQUIRECTANGULAR",
+            mask_backend_name=mask_result.backend_name if mask_result else "",
+            video_backend_name=mask_result.video_backend_name if mask_result else "",
+            used_fallback_video_backend=(
+                mask_result.used_fallback_video_backend if mask_result else False
+            ),
+            video_backend_error=mask_result.video_backend_error if mask_result else "",
+            mask_diagnostics_path=mask_result.diagnostics_path if mask_result else "",
+            gpu_extraction=extract_result.gpu_accelerated,
+            masking_timers=getattr(mask_result, "masking_timers", {}) if mask_result else {},
             elapsed_sec=elapsed,
         )
 
@@ -1066,10 +1360,28 @@ class PipelineJob:
             self._update("staging", 50.0, "Reframing fisheye → pinhole crops...")
 
             import cv2
-            from .fisheye_calibration import default_osmo360_calibration
+            from .dual_fisheye_calibration_provider import (
+                resolve_dual_fisheye_calibration,
+            )
             from .fisheye_reframer import FisheyeReframer, FISHEYE_PINHOLE_PRESET
 
-            calib = default_osmo360_calibration()
+            calibration_resolution = resolve_dual_fisheye_calibration(
+                cfg.camera_family,
+                override_path=cfg.dual_fisheye_calibration_path,
+                output_mode=cfg.output_mode,
+            )
+            calib = calibration_resolution.calibration
+            logger.info(
+                "Using dual-fisheye calibration: source=%s path=%s confidence=%s",
+                calibration_resolution.source,
+                calibration_resolution.source_path or "",
+                calibration_resolution.source_confidence,
+            )
+            if calibration_resolution.warning:
+                logger.warning(calibration_resolution.warning)
+            self._write_dual_fisheye_calibration_metadata(
+                out, cfg, calibration_resolution,
+            )
             reframer = FisheyeReframer(calib)
             view_config = FISHEYE_PINHOLE_PRESET
 
@@ -1481,9 +1793,11 @@ class PipelineJob:
         import cv2
 
         from .fisheye_reframer import (
-            FisheyeReframer, FISHEYE_PINHOLE_PRESET, _rotation_matrix,
+            FISHEYE_PINHOLE_PRESET, _rotation_matrix,
         )
-        from .fisheye_calibration import default_osmo360_calibration
+        from .dual_fisheye_calibration_provider import (
+            resolve_dual_fisheye_calibration,
+        )
         from .colmap_runner import ColmapRunner, ColmapConfig
         from .rig_config import rotation_matrix_to_quaternion
         import json as _json
@@ -1492,7 +1806,26 @@ class PipelineJob:
         print(f"[pipeline] Output: {out}")
 
         view_config = FISHEYE_PINHOLE_PRESET
-        calib = default_osmo360_calibration()
+        if cfg.output_mode == "fisheye_pinhole":
+            calibration_resolution = resolve_dual_fisheye_calibration(
+                cfg.camera_family,
+                override_path=cfg.dual_fisheye_calibration_path,
+                output_mode=cfg.output_mode,
+            )
+            calib = calibration_resolution.calibration
+            logger.info(
+                "Using dual-fisheye calibration: source=%s path=%s confidence=%s",
+                calibration_resolution.source,
+                calibration_resolution.source_path or "",
+                calibration_resolution.source_confidence,
+            )
+            if calibration_resolution.warning:
+                logger.warning(calibration_resolution.warning)
+            self._write_dual_fisheye_calibration_metadata(
+                out, cfg, calibration_resolution,
+            )
+        else:
+            calib = None
         masks_dir = out / "masks"
         if cfg.output_mode == "fisheye_pinhole" and not masks_dir.is_dir():
             colmap_masks_dir = out / "colmap" / "masks"
@@ -1815,6 +2148,65 @@ class PipelineJob:
             preset_signature=f"dual_fisheye | family={cfg.camera_family or 'unknown'} | resume",
             gpu_extraction=False,
             elapsed_sec=elapsed,
+        )
+
+    @staticmethod
+    def _write_dual_fisheye_calibration_metadata(
+        out: Path,
+        cfg: PipelineConfig,
+        calibration_resolution,
+    ) -> None:
+        """Record calibration provenance for reproducible fisheye runs."""
+        import hashlib
+        import json
+
+        calibration = calibration_resolution.calibration
+        source_path = calibration_resolution.source_path or ""
+        source_sha256 = ""
+        if source_path:
+            try:
+                h = hashlib.sha256()
+                with Path(source_path).open("rb") as f:
+                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                        h.update(chunk)
+                source_sha256 = h.hexdigest()
+            except OSError:
+                source_sha256 = ""
+
+        metadata = {
+            "camera_family": cfg.camera_family,
+            "output_mode": cfg.output_mode,
+            "source": calibration_resolution.source,
+            "source_path": source_path,
+            "source_sha256": source_sha256,
+            "source_confidence": calibration_resolution.source_confidence,
+            "warning": calibration_resolution.warning,
+            "camera_model": calibration.camera_model,
+            "front": {
+                "image_size": list(calibration.front.image_size),
+                "rms_error": calibration.front.rms_error,
+                "num_images_used": calibration.front.num_images_used,
+                "fov_degrees": calibration.front.fov_degrees,
+            },
+            "back": {
+                "image_size": list(calibration.back.image_size),
+                "rms_error": calibration.back.rms_error,
+                "num_images_used": calibration.back.num_images_used,
+                "fov_degrees": calibration.back.fov_degrees,
+            },
+            "rig": {
+                "front_rotation_deg": calibration.front_rotation_deg,
+                "back_rotation_deg": calibration.back_rotation_deg,
+                "baseline_m": calibration.baseline_m,
+                "baseline_axis": list(calibration.baseline_axis),
+            },
+        }
+
+        metadata_dir = out / "metadata"
+        metadata_dir.mkdir(exist_ok=True)
+        (metadata_dir / "dual_fisheye_calibration.json").write_text(
+            json.dumps(metadata, indent=2),
+            encoding="utf-8",
         )
 
     @staticmethod

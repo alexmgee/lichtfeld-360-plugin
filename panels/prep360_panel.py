@@ -210,10 +210,12 @@ SIFT_PRESETS = ["normal", "high", "custom"]
 SIFT_PRESET_LABELS = ["Normal", "High", "Custom"]
 SIFT_NORMAL_IDX, SIFT_HIGH_IDX, SIFT_CUSTOM_IDX = 0, 1, 2
 SIFT_PRESET_MATRIX: dict[tuple[str, str], tuple[int, int, int]] = {
-    ("pinhole", "normal"): (2048, 1600, 32768),
-    ("pinhole", "high"):   (4096, 2400, 65536),
-    ("erp",     "normal"): (2048, 1600, 32768),
-    ("erp",     "high"):   (8192, 3840, 65536),
+    ("erp_native", "normal"): (8192, 3840, 32768),
+    ("erp_native", "high"):   (16384, 5760, 65536),
+    ("pinhole", "normal"): (2048, 1664, 32768),
+    ("pinhole", "high"):   (4096, 2432, 65536),
+    ("erp_scaffold", "normal"): (2048, 1664, 32768),
+    ("erp_scaffold", "high"):   (8192, 3840, 65536),
     ("fisheye", "normal"):         (8192, 3840, 32768),
     ("fisheye", "high"):           (16384, 3840, 65536),
     ("fisheye_pinhole", "normal"): (8192, 1920, 32768),
@@ -229,10 +231,17 @@ _FEATURE_MAX_DEFAULTS = {
     "aliked_n32": 2048,
 }
 
-OUTPUT_MODES = ["pinhole", "erp", "fisheye", "fisheye_pinhole"]
-OUTPUT_MODE_LABELS = ["Pinhole", "ERP", "Fisheye", "Fisheye (Pinhole)"]
-FISHEYE_OUTPUT_MODE_IDX = 2  # index of "fisheye" in OUTPUT_MODES
-FISHEYE_PINHOLE_OUTPUT_MODE_IDX = 3  # index of "fisheye_pinhole"
+OUTPUT_MODES = [
+    "erp_native", "pinhole", "erp_scaffold", "fisheye", "fisheye_pinhole",
+]
+OUTPUT_MODE_LABELS = [
+    "ERP", "ERP (Pinhole)", "ERP (Scaffold)", "Fisheye", "Fisheye (Pinhole)",
+]
+ERP_NATIVE_OUTPUT_MODE_IDX = 0
+PINHOLE_OUTPUT_MODE_IDX = 1
+ERP_SCAFFOLD_OUTPUT_MODE_IDX = 2
+FISHEYE_OUTPUT_MODE_IDX = 3  # index of "fisheye" in OUTPUT_MODES
+FISHEYE_PINHOLE_OUTPUT_MODE_IDX = 4  # index of "fisheye_pinhole"
 _FISHEYE_MODES = {FISHEYE_OUTPUT_MODE_IDX, FISHEYE_PINHOLE_OUTPUT_MODE_IDX}
 
 # Source modes for dual fisheye input (fisheye output mode only)
@@ -258,7 +267,7 @@ SCRUB_FIELD_SPECS = {
         min_value=1024.0, max_value=32768.0, step=1024.0, fmt="%d", data_type=int,
     ),
     "sift_max_image_size_str": ScrubFieldSpec(
-        min_value=1024.0, max_value=4096.0, step=128.0, fmt="%d", data_type=int,
+        min_value=1024.0, max_value=8192.0, step=128.0, fmt="%d", data_type=int,
     ),
     "sequential_overlap_str": ScrubFieldSpec(
         min_value=2.0, max_value=20.0, step=1.0, fmt="%d", data_type=int,
@@ -378,7 +387,7 @@ class Plugin360Panel(lf.ui.Panel):
         self._sift_max_image_size: int = SIFT_PRESET_MATRIX[("pinhole", "normal")][1]
 
         # Output
-        self._output_mode_idx: int = 0  # default: Pinhole
+        self._output_mode_idx: int = PINHOLE_OUTPUT_MODE_IDX  # default: ERP (Pinhole)
         self._output_path: str = ""
 
         # Dual fisheye state (only relevant when output_mode == "fisheye")
@@ -389,8 +398,10 @@ class Plugin360Panel(lf.ui.Panel):
         self._camera_family_detected: Optional[str] = None  # set by detect_input_type()
         self._front_video_path: str = ""
         self._back_video_path: str = ""
+        self._dual_fisheye_calibration_path: str = ""
         self._keep_streams: bool = False
         self._keep_pinhole_scaffolding: bool = False
+        self._keep_native_sparse: bool = True  # native sparse is valid; retain by default (checkbox lets user opt out)
         self._keep_extracted_data: bool = False
         self._fisheye_circle_margin: float = 6.0
 
@@ -516,8 +527,8 @@ class Plugin360Panel(lf.ui.Panel):
         # User-selectable preset dropdown only applies to Pinhole mode.
         # ERP mode forces the 8-view scaffold preset; Fisheye mode forces
         # OPENCV_FISHEYE PER_FOLDER (no view rig).
-        model.bind_func("show_preset_select", lambda: self._output_mode_idx == 0)
-        model.bind_func("show_erp_scaffold_preset", lambda: self._output_mode_idx == 1)
+        model.bind_func("show_preset_select", lambda: self._output_mode_idx == PINHOLE_OUTPUT_MODE_IDX)
+        model.bind_func("show_erp_scaffold_preset", lambda: self._output_mode_idx == ERP_SCAFFOLD_OUTPUT_MODE_IDX)
         model.bind_func("erp_scaffold_preset_text", self._get_erp_scaffold_preset_text)
         model.bind_func("show_fisheye_preset", lambda: self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX)  # native fisheye only
         model.bind_func("fisheye_preset_text", self._get_fisheye_preset_text)
@@ -564,8 +575,22 @@ class Plugin360Panel(lf.ui.Panel):
 
         # -- Output --
         model.bind("output_mode_idx", lambda: str(self._output_mode_idx), self._set_output_mode)
-        model.bind_func("show_output_mode_note", lambda: self._output_mode_idx in (1, FISHEYE_OUTPUT_MODE_IDX, FISHEYE_PINHOLE_OUTPUT_MODE_IDX))
-        model.bind_func("show_crop_size", lambda: self._output_mode_idx not in {FISHEYE_OUTPUT_MODE_IDX})
+        model.bind_func(
+            "show_output_mode_note",
+            lambda: self._output_mode_idx in (
+                ERP_NATIVE_OUTPUT_MODE_IDX,
+                ERP_SCAFFOLD_OUTPUT_MODE_IDX,
+                FISHEYE_OUTPUT_MODE_IDX,
+                FISHEYE_PINHOLE_OUTPUT_MODE_IDX,
+            ),
+        )
+        model.bind_func(
+            "show_crop_size",
+            lambda: self._output_mode_idx not in {
+                ERP_NATIVE_OUTPUT_MODE_IDX,
+                FISHEYE_OUTPUT_MODE_IDX,
+            },
+        )
 
         # ── Fisheye-specific bindings ──
         # Split mode is determined by direct user choice (the "Front + Back"
@@ -597,11 +622,18 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("front_video_path_text", lambda: self._front_video_path or "(not set)")
         model.bind_func("back_video_path_text", lambda: self._back_video_path or "(not set)")
         model.bind_func("camera_family_detected_text", self._get_camera_family_detected_text)
+        model.bind_func("show_dual_fisheye_calibration_path", self._show_dual_fisheye_calibration_path)
+        model.bind_func("dual_fisheye_calibration_path_text", lambda: self._dual_fisheye_calibration_path or "(not set)")
+        model.bind_func("dual_fisheye_calibration_note", self._get_dual_fisheye_calibration_note)
         model.bind("keep_streams", lambda: self._keep_streams, self._set_keep_streams)
         model.bind("keep_pinhole_scaffolding", lambda: self._keep_pinhole_scaffolding, self._set_keep_pinhole_scaffolding)
-        model.bind_func("show_keep_pinhole_scaffolding", lambda: self._output_mode_idx == 1)
+        model.bind_func("show_keep_pinhole_scaffolding", lambda: self._output_mode_idx == ERP_SCAFFOLD_OUTPUT_MODE_IDX)
+        model.bind("keep_native_sparse", lambda: self._keep_native_sparse, self._set_keep_native_sparse)
+        model.bind_func("show_keep_native_sparse", lambda: self._output_mode_idx == ERP_NATIVE_OUTPUT_MODE_IDX)
         model.bind("keep_extracted_data", lambda: self._keep_extracted_data, self._set_keep_extracted_data)
         model.bind_func("show_keep_extracted_data", lambda: self._output_mode_idx == FISHEYE_PINHOLE_OUTPUT_MODE_IDX)
+        model.bind_event("select_dual_fisheye_calibration", self._on_select_dual_fisheye_calibration)
+        model.bind_event("clear_dual_fisheye_calibration", self._on_clear_dual_fisheye_calibration)
         model.bind_event("select_front_video", self._on_select_front_video)
         model.bind_event("select_back_video", self._on_select_back_video)
         model.bind_event("clear_front_video", self._on_clear_front_video)
@@ -812,6 +844,30 @@ class Plugin360Panel(lf.ui.Panel):
         family_to_label = dict(zip(CAMERA_FAMILIES, CAMERA_FAMILY_LABELS))
         label = family_to_label.get(self._camera_family_detected, self._camera_family_detected)
         return f"Camera family detected: {label}"
+
+    def _current_dual_fisheye_family(self) -> Optional[str]:
+        if self._camera_family_detected is not None and self._source_mode_idx == 0:
+            return self._camera_family_detected
+        if 0 <= self._camera_family_idx < len(CAMERA_FAMILIES):
+            return CAMERA_FAMILIES[self._camera_family_idx]
+        return None
+
+    def _show_dual_fisheye_calibration_path(self) -> bool:
+        return (
+            self._output_mode_idx == FISHEYE_PINHOLE_OUTPUT_MODE_IDX
+            and self._current_dual_fisheye_family() == "insta360"
+        )
+
+    def _get_dual_fisheye_calibration_note(self) -> str:
+        if self._dual_fisheye_calibration_path:
+            return (
+                "Advanced override selected. This replaces the built-in generic "
+                "Insta360 estimate for Fisheye (Pinhole) reframing."
+            )
+        return (
+            "Optional advanced override. Leave empty to use the built-in generic "
+            "Insta360 estimate; choose JSON only if you have measured calibration."
+        )
 
     @staticmethod
     def _format_sam3_status(status: str) -> str:
@@ -1041,13 +1097,13 @@ class Plugin360Panel(lf.ui.Panel):
         vc = self._get_current_view_config()
         views = vc.total_views()
         if not self._video_info:
-            if output_mode == "erp":
+            if output_mode == "erp_scaffold":
                 return f"{views} scaffold views per frame"
             return f"{views} views per frame"
         interval = 1.0 / max(0.1, self._extract_fps)
         frames = VideoAnalyzer.estimate_frame_count(self._video_info, interval)
         total = views * frames
-        if output_mode == "erp":
+        if output_mode == "erp_scaffold":
             return f"{views} scaffold views × {frames} frames = {total:,} pinhole images"
         return f"{views} views \u00d7 {frames} frames = {total:,} images"
 
@@ -1107,7 +1163,7 @@ class Plugin360Panel(lf.ui.Panel):
         interval = 1.0 / max(0.1, self._extract_fps)
         frames = VideoAnalyzer.estimate_frame_count(self._video_info, interval) if self._video_info else 0
         total = views * frames
-        if output_mode == "erp":
+        if output_mode == "erp_scaffold":
             return (
                 f"ERP | {frames:,} ERP frames | "
                 f"{views}-view COLMAP scaffold | {self._output_size}px crops"
@@ -2151,7 +2207,12 @@ class Plugin360Panel(lf.ui.Panel):
             pass
 
     def _get_output_mode_note(self) -> str:
-        if self._output_mode_idx == 1:
+        if self._output_mode_idx == ERP_NATIVE_OUTPUT_MODE_IDX:
+            return (
+                "Native equirectangular — feeds ERP frames straight to COLMAP; "
+                "faster, no scaffolding; lower accuracy than ERP (Scaffold)."
+            )
+        if self._output_mode_idx == ERP_SCAFFOLD_OUTPUT_MODE_IDX:
             return (
                 "Outputs original equirectangular frames with COLMAP-derived poses "
                 "for 3DGUT training. This mode forces the dedicated 8-view "
@@ -2198,6 +2259,12 @@ class Plugin360Panel(lf.ui.Panel):
         else:
             self._keep_streams = str(val).lower() in ("true", "1", "yes", "on")
 
+    def _set_keep_native_sparse(self, val):
+        if isinstance(val, bool):
+            self._keep_native_sparse = val
+        else:
+            self._keep_native_sparse = str(val).lower() in ("true", "1", "yes", "on")
+
     def _set_keep_pinhole_scaffolding(self, val):
         if isinstance(val, bool):
             self._keep_pinhole_scaffolding = val
@@ -2217,6 +2284,32 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _set_back_video_path_noop(self, val):
         del val
+
+    @staticmethod
+    def _open_calibration_file_dialog(title: str = "Select Calibration JSON") -> str:
+        if os.name == "nt":
+            return _open_file_via_win32(
+                title=title,
+                filters=[
+                    ("Calibration JSON", "*.json"),
+                    ("All files", "*.*"),
+                ],
+            )
+        return ""
+
+    def _on_select_dual_fisheye_calibration(self, handle, event, args):
+        del handle, event, args
+        path = self._open_calibration_file_dialog()
+        if path:
+            self._dual_fisheye_calibration_path = path
+            if self._handle:
+                self._handle.dirty_all()
+
+    def _on_clear_dual_fisheye_calibration(self, handle, event, args):
+        del handle, event, args
+        self._dual_fisheye_calibration_path = ""
+        if self._handle:
+            self._handle.dirty_all()
 
     # ── Section toggle ────────────────────────────────────────
 
@@ -2616,8 +2709,10 @@ class Plugin360Panel(lf.ui.Panel):
             ),
             front_video_path=self._front_video_path,
             back_video_path=self._back_video_path,
+            dual_fisheye_calibration_path=self._dual_fisheye_calibration_path,
             keep_streams=self._keep_streams,
             keep_pinhole_scaffolding=self._keep_pinhole_scaffolding,
+            keep_native_sparse=self._keep_native_sparse,
             keep_extracted_data=self._keep_extracted_data,
         )
 
@@ -2628,7 +2723,9 @@ class Plugin360Panel(lf.ui.Panel):
         self._processing_log_lines = []
         self._completion_summary = ""
         self._completion_report = ""
-        if output_mode == "erp":
+        if output_mode == "erp_native":
+            self._append_processing_log("Preset: native EQUIRECTANGULAR (no reframe)")
+        elif output_mode == "erp_scaffold":
             self._append_processing_log("Preset: ERP 8-view staggered (forced)")
         elif output_mode == "fisheye":
             family = (
@@ -2651,6 +2748,22 @@ class Plugin360Panel(lf.ui.Panel):
                 )
         else:
             self._append_processing_log(f"Preset: {PRESET_LABELS[self._preset_idx]}")
+        if output_mode == "fisheye_pinhole":
+            family = (
+                self._camera_family_detected
+                or (CAMERA_FAMILIES[self._camera_family_idx]
+                    if 0 <= self._camera_family_idx < len(CAMERA_FAMILIES)
+                    else "unknown")
+            )
+            if family == "insta360":
+                if self._dual_fisheye_calibration_path:
+                    self._append_processing_log(
+                        f"Calibration: {self._dual_fisheye_calibration_path}"
+                    )
+                else:
+                    self._append_processing_log(
+                        "Calibration: built-in generic Insta360 estimate (unverified)"
+                    )
         self._append_processing_log(
             f"Output mode: {OUTPUT_MODE_LABELS[self._output_mode_idx]}"
         )
@@ -2909,6 +3022,8 @@ class Plugin360Panel(lf.ui.Panel):
                         "video_backend": result.video_backend_name,
                         "used_fallback_video_backend": result.used_fallback_video_backend,
                         "video_backend_error": result.video_backend_error,
+                        "gpu_extraction": result.gpu_extraction,
+                        "masking_timers": result.masking_timers,
                     },
                 }
                 timing_path.write_text(json.dumps(timing_output, indent=2))
@@ -2935,7 +3050,7 @@ class Plugin360Panel(lf.ui.Panel):
                         dataset_base_path, import_output_path = self._resolve_transforms_directory_import_target(
                             result.dataset_path
                         )
-                    elif result.output_mode in ("erp", "fisheye"):
+                    elif result.output_mode in ("erp_native", "erp_scaffold", "fisheye"):
                         dataset_base_path, import_output_path = self._resolve_erp_import_target(
                             result.dataset_path
                         )

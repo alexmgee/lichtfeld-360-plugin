@@ -106,6 +106,19 @@
         <span class="status-text status-muted">{{camera_family_detected_text}}</span>
       </div>
 
+      <div class="setting-row" data-if="show_dual_fisheye_calibration_path">
+        <span class="prop-label">Calibration</span>
+        <div class="path-browse-row">
+          <div class="path-box path-box--small">{{dual_fisheye_calibration_path_text}}</div>
+          <button class="btn btn--secondary btn--compact" data-event-click="select_dual_fisheye_calibration">Choose</button>
+          <button class="btn btn--secondary btn--compact" data-event-click="clear_dual_fisheye_calibration">Clear</button>
+        </div>
+      </div>
+      <div class="setting-row" data-if="show_dual_fisheye_calibration_path">
+        <span class="prop-label"></span>
+        <span class="status-text status-muted">{{dual_fisheye_calibration_note}}</span>
+      </div>
+
       <div class="setting-row">
         <span class="prop-label">Output Path</span>
         <div class="path-browse-row">
@@ -116,10 +129,11 @@
       <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
         <span class="prop-label">Output Mode</span>
         <select data-value="output_mode_idx">
-          <option value="0" selected>ERP (Pinhole)</option>
-          <option value="1">ERP</option>
-          <option value="2">Fisheye</option>
-          <option value="3">Fisheye (Pinhole)</option>
+          <option value="0">ERP</option>
+          <option value="1" selected>ERP (Pinhole)</option>
+          <option value="2">ERP (Scaffold)</option>
+          <option value="3">Fisheye</option>
+          <option value="4">Fisheye (Pinhole)</option>
         </select>
       </div>
       <div class="setting-row" data-if="show_output_mode_note">
@@ -132,6 +146,15 @@
           <div class="loop-closure-group">
             <input type="checkbox" data-checked="keep_pinhole_scaffolding" id="keep_scaffold_cb"/>
             <label class="checkbox-label" for="keep_scaffold_cb">Keep pinhole scaffolding</label>
+          </div>
+        </span>
+      </div>
+      <div class="setting-row" data-if="show_keep_native_sparse">
+        <span class="prop-label"></span>
+        <span class="status-text status-muted">
+          <div class="loop-closure-group">
+            <input type="checkbox" data-checked="keep_native_sparse" id="keep_native_sparse_cb"/>
+            <label class="checkbox-label" for="keep_native_sparse_cb">Keep COLMAP sparse</label>
           </div>
         </span>
       </div>
@@ -482,7 +505,7 @@
       <div class="setting-row setting-row--aligned" data-if="show_sift_advanced">
         <span class="setting-row__label-col">Max Image Size</span>
         <div class="setting-row__control-col setting-row__control-col--slider">
-          <input type="range" class="setting-slider" data-value="sift_max_image_size_str" min="1024" max="4096" step="128" />
+          <input type="range" class="setting-slider" data-value="sift_max_image_size_str" min="1024" max="8192" step="128" />
           <span class="slider-value">{{sift_max_image_size_str}}</span>
         </div>
       </div>

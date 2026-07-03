@@ -738,6 +738,7 @@ class MaskResult:
     video_backend_name: str = ""
     used_fallback_video_backend: bool = False
     video_backend_error: str = ""
+    masking_timers: dict = field(default_factory=dict)
 
 
 def _json_float(value: object, digits: int | None = None) -> float | None:

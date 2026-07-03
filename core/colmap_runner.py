@@ -240,7 +240,7 @@ def _configure_ba(solver: str, camera_model: str):
     """
     import pycolmap
 
-    CASPAR = pycolmap.BundleAdjustmentBackend(1)  # not named in pybind11
+    CASPAR = pycolmap.BundleAdjustmentBackend(1)  # alias; CASPAR is also a named member
     CERES = pycolmap.BundleAdjustmentBackend.CERES
     CASPAR_MODELS = {"PINHOLE", "SIMPLE_RADIAL"}
     SLA = type(pycolmap.IncrementalPipelineOptions()

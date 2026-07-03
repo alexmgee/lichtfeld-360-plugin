@@ -47,6 +47,7 @@ _EXPORTS = {
     "SharpestResult": (".sharpest_extractor", "SharpestResult"),
     "colmap_pose_to_c2w_opengl": (".transforms_writer", "colmap_pose_to_c2w_opengl"),
     "write_transforms_json": (".transforms_writer", "write_transforms_json"),
+    "write_erp_native_transforms": (".transforms_writer", "write_erp_native_transforms"),
     "export_erp_scaffold": (".scaffold", "export_erp_scaffold"),
     "cleanup_pinhole_crops": (".scaffold", "cleanup_pinhole_crops"),
     "cleanup_colmap_artifacts": (".scaffold", "cleanup_colmap_artifacts"),

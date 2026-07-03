@@ -319,7 +319,7 @@ def resolve_view_preset_name(preset_name: str, output_mode: str = "pinhole") -> 
     Pinhole output keeps the user's selected preset, falling back to the
     default if an unknown preset name is provided.
     """
-    if output_mode == "erp":
+    if output_mode == "erp_scaffold":
         return ERP_SCAFFOLD_PRESET
     if preset_name in VIEW_PRESETS:
         return preset_name

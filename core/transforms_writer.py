@@ -388,6 +388,132 @@ def write_fisheye_transforms(
     return transforms_path
 
 
+def write_erp_native_transforms(
+    colmap_sparse_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    masks_dir: str | Path | None = None,
+    erp_width: int = 0,
+    erp_height: int = 0,
+    transforms_filename: str = "transforms.json",
+    ply_filename: str = "pointcloud.ply",
+    reconstruction_obj=None,
+    log_fn: Callable[..., object] = logger.info,
+) -> Path:
+    """Write a native ERP transforms.json from an EQUIRECTANGULAR COLMAP model.
+
+    Per-image poses use ``image.cam_from_world()`` converted via
+    ``_c2w_opencv_to_lfs`` — no scaffold pitch correction or auto-orient.
+    """
+    import pycolmap
+
+    sparse_dir = Path(colmap_sparse_dir)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if reconstruction_obj is not None:
+        recon = reconstruction_obj
+    else:
+        log_fn("Loading COLMAP reconstruction from %s", sparse_dir)
+        recon = pycolmap.Reconstruction(str(sparse_dir))
+
+    reg_image_ids = sorted(recon.reg_image_ids())
+    if not reg_image_ids:
+        raise RuntimeError(
+            "COLMAP reconstruction contains no registered images — "
+            "cannot write native ERP transforms"
+        )
+
+    log_fn(
+        "Building native ERP transforms.json from %d registered images",
+        len(reg_image_ids),
+    )
+
+    camera_dims: dict[int, tuple[int, int]] = {}
+    for cam_id, cam in recon.cameras.items():
+        model_name = cam.model_name
+        if model_name != "EQUIRECTANGULAR":
+            raise RuntimeError(
+                f"Camera {cam_id} has model {model_name!r}; "
+                "write_erp_native_transforms expects EQUIRECTANGULAR"
+            )
+        params = list(cam.params)
+        w = int(params[0]) if len(params) >= 1 else int(cam.width)
+        h = int(params[1]) if len(params) >= 2 else int(cam.height)
+        camera_dims[cam_id] = (w, h)
+
+    frames: list[dict] = []
+    for img_id in reg_image_ids:
+        image = recon.image(img_id)
+        cam_from_world = image.cam_from_world()
+        R_w2c = np.asarray(cam_from_world.rotation.matrix(), dtype=np.float64)
+        t_w2c = np.asarray(cam_from_world.translation, dtype=np.float64)
+
+        R_c2w = R_w2c.T
+        t_c2w = -R_w2c.T @ t_w2c
+        c2w_opencv = np.eye(4, dtype=np.float64)
+        c2w_opencv[:3, :3] = R_c2w
+        c2w_opencv[:3, 3] = t_c2w
+        c2w = _c2w_opencv_to_lfs(c2w_opencv)
+
+        w, h = camera_dims.get(image.camera_id, (erp_width, erp_height))
+        if w <= 0 or h <= 0:
+            raise RuntimeError(
+                "ERP frame dimensions could not be determined from the "
+                "EQUIRECTANGULAR camera or extraction metadata"
+            )
+
+        rel_image_path = image.name.replace("\\", "/")
+        if not rel_image_path.startswith("images/"):
+            rel_image_path = f"images/{rel_image_path}"
+
+        fl_x = w / 2.0
+        fl_y = w / 2.0
+        cx = w / 2.0
+        cy = h / 2.0
+
+        entry: dict = {
+            "file_path": rel_image_path,
+            "transform_matrix": c2w.tolist(),
+            "w": w,
+            "h": h,
+            "fl_x": fl_x,
+            "fl_y": fl_y,
+            "cx": cx,
+            "cy": cy,
+        }
+
+        if masks_dir is not None:
+            stem = Path(rel_image_path.removeprefix("images/")).stem
+            mask_file = Path(masks_dir) / f"{stem}.png"
+            if mask_file.exists():
+                entry["mask_path"] = f"masks/{stem}.png"
+
+        frames.append(entry)
+
+    frames.sort(key=lambda e: e["file_path"])
+
+    ply_path = out_dir / ply_filename
+    point_count = _write_sparse_pointcloud(recon, ply_path)
+    log_fn("Wrote sparse pointcloud (%d points): %s", point_count, ply_path)
+
+    transforms_path = out_dir / transforms_filename
+    transforms_data = {
+        "camera_model": "EQUIRECTANGULAR",
+        "applied_transform": _APPLIED_TRANSFORM,
+        "ply_file_path": ply_filename,
+        "frames": frames,
+    }
+    with transforms_path.open("w", encoding="utf-8") as fp:
+        json.dump(transforms_data, fp, indent=4)
+    log_fn(
+        "Wrote native ERP transforms.json with %d frames (%dx%d): %s",
+        len(frames), w, h, transforms_path,
+    )
+
+    return transforms_path
+
+
 def write_rig_propagated_transforms(
     colmap_sparse_dir: str | Path,
     images_root: str | Path,

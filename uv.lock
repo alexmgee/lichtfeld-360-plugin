@@ -531,7 +531,7 @@ dependencies = [
     { name = "opencv-contrib-python", version = "4.13.0.90", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'win32'" },
     { name = "opencv-contrib-python", version = "4.13.0.90", source = { url = "https://github.com/cudawarped/opencv-python-cuda-wheels/releases/download/4.13.0.90/opencv_contrib_python-4.13.0.90-cp37-abi3-win_amd64.whl" }, marker = "sys_platform == 'win32'" },
     { name = "pycolmap", version = "4.0.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'win32'" },
-    { name = "pycolmap", version = "4.1.0.dev2", source = { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0-dev2/pycolmap-4.1.0.dev2%2Bcuda-cp312-cp312-win_amd64.whl" }, marker = "sys_platform == 'win32'" },
+    { name = "pycolmap", version = "4.1.0", source = { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0/pycolmap-4.1.0%2Bcuda.cudss-cp312-cp312-win_amd64.whl" }, marker = "sys_platform == 'win32'" },
     { name = "sam2" },
     { name = "segment-anything" },
     { name = "static-ffmpeg" },
@@ -560,7 +560,7 @@ requires-dist = [
     { name = "opencv-contrib-python", marker = "sys_platform != 'win32'", specifier = "==4.13.0.90" },
     { name = "opencv-contrib-python", marker = "sys_platform == 'win32'", url = "https://github.com/cudawarped/opencv-python-cuda-wheels/releases/download/4.13.0.90/opencv_contrib_python-4.13.0.90-cp37-abi3-win_amd64.whl" },
     { name = "pycolmap", marker = "python_full_version != '3.12.*' or sys_platform != 'win32'" },
-    { name = "pycolmap", marker = "python_full_version == '3.12.*' and sys_platform == 'win32'", url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0-dev2/pycolmap-4.1.0.dev2%2Bcuda-cp312-cp312-win_amd64.whl" },
+    { name = "pycolmap", marker = "python_full_version == '3.12.*' and sys_platform == 'win32'", url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0/pycolmap-4.1.0%2Bcuda.cudss-cp312-cp312-win_amd64.whl" },
     { name = "sam2", specifier = "==1.1.0" },
     { name = "sam3", marker = "extra == 'sam3-masking'", specifier = ">=0.1.3" },
     { name = "segment-anything", specifier = ">=1.0" },
@@ -1052,8 +1052,8 @@ wheels = [
 
 [[package]]
 name = "pycolmap"
-version = "4.1.0.dev2"
-source = { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0-dev2/pycolmap-4.1.0.dev2%2Bcuda-cp312-cp312-win_amd64.whl" }
+version = "4.1.0"
+source = { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0/pycolmap-4.1.0%2Bcuda.cudss-cp312-cp312-win_amd64.whl" }
 resolution-markers = [
     "sys_platform == 'win32'",
 ]
@@ -1061,7 +1061,7 @@ dependencies = [
     { name = "numpy", marker = "sys_platform == 'win32'" },
 ]
 wheels = [
-    { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0-dev2/pycolmap-4.1.0.dev2%2Bcuda-cp312-cp312-win_amd64.whl", hash = "sha256:88358b5b882cc945514de2c02bc9855cdfc3038dc6a014ef3aca75dd258fbab0" },
+    { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0/pycolmap-4.1.0%2Bcuda.cudss-cp312-cp312-win_amd64.whl", hash = "sha256:f2f3966454da1aac53b71065b7f38aa237ca5104607e371bec3ed706e3468080" },
 ]
 
 [package.metadata]

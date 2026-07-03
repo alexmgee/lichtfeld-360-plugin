@@ -39,7 +39,7 @@ opencv-contrib-python = [
   { url = "https://github.com/cudawarped/opencv-python-cuda-wheels/releases/download/4.13.0.90/opencv_contrib_python-4.13.0.90-cp37-abi3-win_amd64.whl", marker = "sys_platform == 'win32'" },
 ]
 pycolmap = [
-  { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0-dev2/pycolmap-4.1.0.dev2%2Bcuda-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
+  { url = "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.1.0/pycolmap-4.1.0%2Bcuda.cudss-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
 ]
 torch = [
   { index = "pytorch-cu128", marker = "sys_platform == 'win32'" },
