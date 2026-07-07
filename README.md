@@ -20,7 +20,7 @@ The pipeline runs in six stages, each configurable from the plugin panel:
 
 5. **Align** — All pinhole views are fed to COLMAP 4.1 for structure-from-motion reconstruction. The plugin configures COLMAP with rig constraints that lock the geometric relationship between virtual cameras from the same panorama, since they share an exact optical center. This produces a single consistent reconstruction across the full sequence. Feature extraction uses SIFT or ALIKED (N16/N32) with Bruteforce or LightGlue matching. Sequential or exhaustive pair selection is available, with a configurable overlap window for sequential mode.
 
-6. **Output** — The final dataset is written in one of four modes (see below) and can be imported directly into LichtFeld Studio for Gaussian Splatting training.
+6. **Output** — The final dataset is written in one of five output modes (see below) and can be imported directly into LichtFeld Studio for Gaussian Splatting training.
 
 ## Supported Input
 
@@ -37,21 +37,31 @@ The pipeline runs in six stages, each configurable from the plugin panel:
 
 Native equirectangular reconstruction using COLMAP's `EQUIRECTANGULAR` camera model. Feeds ERP frames directly without pinhole scaffolding — faster than ERP (Scaffold), but generally lower accuracy.
 
-### Pinhole
+### ERP (Pinhole)
 
 Standard COLMAP pinhole dataset. Each source frame produces multiple perspective crops (6–24 depending on preset). The output is a conventional COLMAP sparse reconstruction with per-view images, masks, and a rig config.
 
-### ERP (Equirectangular)
+### ERP (Scaffold)
 
 Designed for training with 3DGUT, which can consume equirectangular images directly. The plugin uses the pinhole crops only as temporary scaffolding: COLMAP aligns them to recover the camera trajectory, then the plugin extracts the rig-origin pose for each station, applies pitch correction and auto-orientation (aligning camera up to +Y), converts coordinates from COLMAP's OpenCV convention to LichtFeld's OpenGL convention, and writes a transforms.json referencing the original full-resolution ERP frames with `"camera_model": "EQUIRECTANGULAR"`. The scaffolding is deleted after export by default — a "Keep pinhole scaffolding" checkbox retains it for inspection.
 
 ### Fisheye
 
-Native fisheye output using COLMAP's OPENCV_FISHEYE camera model. The front and back lens streams are aligned directly without reframing to pinhole. Each lens is calibrated independently by bundle adjustment. This preserves the full fisheye field of view but requires a training framework that supports fisheye projection.
+Reconstructs the dual fisheye pair **natively** using COLMAP's `OPENCV_FISHEYE` camera model — the front and back lens streams are aligned directly without reframing, and each lens is calibrated independently by bundle adjustment. Working on the raw lenses registers substantially more of the sequence than reframing to pinhole first.
+
+A **Training output** selector then controls which dataset is written from that single native reconstruction:
+
+| Training output | Writes | For |
+|-----------------|--------|-----|
+| **Native (fisheye)** | The fisheye dataset (`OPENCV_FISHEYE`) | 3DGUT / fisheye-capable trainers |
+| **Pinhole** | Pinhole crops **derived from the native poses** — no second COLMAP run | Standard 3DGS |
+| **Both** | Both datasets, side by side | Either trainer |
+
+The **Pinhole** option renders pinhole crops from the raw fisheye using the COLMAP-refined intrinsics and propagates each crop's pose from its lens's *measured* pose. Because the crops inherit the native reconstruction's registration (rather than being re-aligned as a rig of assumed geometry), the resulting pinhole dataset covers far more frames than the legacy Fisheye (Pinhole) mode below.
 
 ### Fisheye (Pinhole)
 
-Reframes each dual fisheye lens into 8 pinhole crops (16 total per source frame) and aligns via COLMAP with pinhole camera models and rig constraints. This combines the wide coverage of dual fisheye input with the compatibility and robustness of pinhole alignment. Generally faster and more reliable than native fisheye mode, especially for challenging scenes.
+The original direct-pinhole path: reframes each dual fisheye lens into 8 pinhole crops (16 total per source frame) and reconstructs them directly in COLMAP with pinhole camera models and rig constraints. Kept for compatibility, but for a pinhole dataset from fisheye input the **Fisheye** mode's **Pinhole** training output is now recommended — reconstructing the reframed crops directly registers noticeably fewer frames than the native path.
 
 ## Installation
 
@@ -78,7 +88,7 @@ Then restart LichtFeld Studio.
    - **Select 360° Video** for a single file (ERP, .osv, or .insv)
    - **Select Front + Back Lens Videos** for pre-split fisheye .mp4 pairs
    - **Re-run COLMAP on Existing Output** to re-align previously extracted frames with different COLMAP settings
-3. Choose an **Output Path** and **Output Mode**
+3. Choose an **Output Path** and **Output Mode**. For the **Fisheye** mode, a **Training output** selector (Native / Pinhole / Both) chooses which dataset(s) to write from the native reconstruction.
 4. Configure each pipeline stage using the collapsible sections:
 
    **Frame Extraction** — `FPS` sets the extraction rate. `Sharpness` controls frame selection quality (None / Basic / Better / Best). The blur metric can be switched between Tenengrad and Laplacian.
@@ -222,13 +232,25 @@ All pinhole scaffolding is removed after pose extraction. Enable "Keep pinhole s
 
 ### Fisheye
 
+The **Training output** selector determines the layout. Each dataset lands in its own subfolder and is self-contained — its own COLMAP `sparse/0`, `transforms.json`, images, masks, and point cloud. **Native** writes `native/` only; **Pinhole** writes `pinhole/` only; **Both** writes both.
+
 ```text
 output_dir/
-├── front/               front lens fisheye frames
-├── back/                back lens fisheye frames
-├── sparse/0/            COLMAP reconstruction (OPENCV_FISHEYE)
-└── transforms.json
+├── native/                        (Native or Both)
+│   ├── images/ front/ back/       fisheye lens frames
+│   ├── masks/ front/ back/        (when masking enabled)
+│   ├── sparse/0/                  COLMAP reconstruction (OPENCV_FISHEYE)
+│   ├── pointcloud.ply
+│   └── transforms.json
+└── pinhole/                       (Pinhole or Both)
+    ├── images/                    flat pinhole crops (view_frame.jpg)
+    ├── masks/
+    ├── sparse/0/                  COLMAP model (PINHOLE; poses derived from native)
+    ├── pointcloud.ply
+    └── transforms.json
 ```
+
+Point LichtFeld Studio at the specific subfolder you want to train (`native/` or `pinhole/`).
 
 ## Dependencies
 
