@@ -23,3 +23,5 @@ tests/
 DIAGNOSTICS.md
 HANDOVER.md
 AGENTS.md
+scratch_*/
+scratch_*.py

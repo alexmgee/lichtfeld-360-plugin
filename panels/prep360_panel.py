@@ -244,6 +244,11 @@ FISHEYE_OUTPUT_MODE_IDX = 3  # index of "fisheye" in OUTPUT_MODES
 FISHEYE_PINHOLE_OUTPUT_MODE_IDX = 4  # index of "fisheye_pinhole"
 _FISHEYE_MODES = {FISHEYE_OUTPUT_MODE_IDX, FISHEYE_PINHOLE_OUTPUT_MODE_IDX}
 
+FISHEYE_TRAINING_OUTPUTS = ["native", "pinhole", "both"]
+FISHEYE_TRAINING_OUTPUT_LABELS = [
+    "Native (fisheye)", "Pinhole", "Both",
+]
+
 # Source modes for dual fisheye input (fisheye output mode only)
 SOURCE_MODES = ["container", "split", "resume"]
 SOURCE_MODE_LABELS = ["Single file", "Two files (split)"]
@@ -403,6 +408,7 @@ class Plugin360Panel(lf.ui.Panel):
         self._keep_pinhole_scaffolding: bool = False
         self._keep_native_sparse: bool = True  # native sparse is valid; retain by default (checkbox lets user opt out)
         self._keep_extracted_data: bool = False
+        self._fisheye_training_output_idx: int = 0  # native by default
         self._fisheye_circle_margin: float = 6.0
 
         # COLMAP 4.1 controls
@@ -575,6 +581,15 @@ class Plugin360Panel(lf.ui.Panel):
 
         # -- Output --
         model.bind("output_mode_idx", lambda: str(self._output_mode_idx), self._set_output_mode)
+        model.bind(
+            "fisheye_training_output_idx",
+            lambda: str(self._fisheye_training_output_idx),
+            self._set_fisheye_training_output,
+        )
+        model.bind_func(
+            "show_fisheye_training_output",
+            lambda: self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX,
+        )
         model.bind_func(
             "show_output_mode_note",
             lambda: self._output_mode_idx in (
@@ -773,6 +788,7 @@ class Plugin360Panel(lf.ui.Panel):
             ),
             self._preset_idx,
             self._output_mode_idx,
+            self._fisheye_training_output_idx,
             self._output_size_idx,
             self._jpeg_quality,
             self._colmap_matcher_idx,
@@ -820,6 +836,16 @@ class Plugin360Panel(lf.ui.Panel):
         if 0 <= self._output_mode_idx < len(OUTPUT_MODES):
             return OUTPUT_MODES[self._output_mode_idx]
         return "pinhole"
+
+    def _get_fisheye_training_output(self) -> str:
+        if 0 <= self._fisheye_training_output_idx < len(FISHEYE_TRAINING_OUTPUTS):
+            return FISHEYE_TRAINING_OUTPUTS[self._fisheye_training_output_idx]
+        return "native"
+
+    def _get_fisheye_training_output_label(self) -> str:
+        if 0 <= self._fisheye_training_output_idx < len(FISHEYE_TRAINING_OUTPUT_LABELS):
+            return FISHEYE_TRAINING_OUTPUT_LABELS[self._fisheye_training_output_idx]
+        return FISHEYE_TRAINING_OUTPUT_LABELS[0]
 
     def _get_current_view_config(self):
         preset_name = resolve_view_preset_name(
@@ -1071,6 +1097,11 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _get_coverage_text(self) -> str:
         if self._get_output_mode() == "fisheye":
+            training_output = self._get_fisheye_training_output()
+            if training_output == "pinhole":
+                return "8 pinhole crops per registered fisheye lens"
+            if training_output == "both":
+                return "Native fisheye plus 8 pinhole crops per registered lens"
             return "2 fisheye images per pair (front + back, native resolution)"
         if self._get_output_mode() == "fisheye_pinhole":
             return "8+8 pinhole crops per pair (Default preset, 90° FOV, rig-constrained)"
@@ -1083,10 +1114,19 @@ class Plugin360Panel(lf.ui.Panel):
     def _get_total_output_text(self) -> str:
         output_mode = self._get_output_mode()
         if output_mode == "fisheye":
+            training_output = self._get_fisheye_training_output()
             if not self._video_info:
+                if training_output == "pinhole":
+                    return "16 pinhole crops per complete pair"
+                if training_output == "both":
+                    return "2 native fisheye images + 16 pinhole crops per complete pair"
                 return "2 fisheye images per pair (front + back)"
             _interval_fish = 1.0 / max(0.1, self._extract_fps)
             _pairs_fish = VideoAnalyzer.estimate_frame_count(self._video_info, _interval_fish)
+            if training_output == "pinhole":
+                return f"~{_pairs_fish} pairs x 16 = {16 * _pairs_fish:,} pinhole crops"
+            if training_output == "both":
+                return f"~{_pairs_fish} pairs x 18 = {18 * _pairs_fish:,} total images"
             return f"~{_pairs_fish} pairs x 2 = {2 * _pairs_fish:,} fisheye images"
         if output_mode == "fisheye_pinhole":
             if not self._video_info:
@@ -1121,6 +1161,7 @@ class Plugin360Panel(lf.ui.Panel):
                 if self._front_video_path and self._back_video_path:
                     return (
                         f"Fisheye (split) | {family_label} | "
+                        f"{self._get_fisheye_training_output_label()} | "
                         "OPENCV_FISHEYE \u00d7 2 cameras"
                     )
                 return "Fisheye (split) \u2014 front + back not yet selected"
@@ -1132,7 +1173,9 @@ class Plugin360Panel(lf.ui.Panel):
                 if self._video_info else 0
             )
             return (
-                f"Fisheye | {family_label} | OPENCV_FISHEYE \u00d7 2 cameras | "
+                f"Fisheye | {family_label} | "
+                f"{self._get_fisheye_training_output_label()} | "
+                "OPENCV_FISHEYE \u00d7 2 cameras | "
                 f"~{pairs:,} pairs"
             )
 
@@ -2206,6 +2249,16 @@ class Plugin360Panel(lf.ui.Panel):
         except (ValueError, TypeError):
             pass
 
+    def _set_fisheye_training_output(self, val):
+        try:
+            idx = int(val)
+            if 0 <= idx < len(FISHEYE_TRAINING_OUTPUTS):
+                self._fisheye_training_output_idx = idx
+                if self._handle:
+                    self._handle.dirty_all()
+        except (ValueError, TypeError):
+            pass
+
     def _get_output_mode_note(self) -> str:
         if self._output_mode_idx == ERP_NATIVE_OUTPUT_MODE_IDX:
             return (
@@ -2689,6 +2742,11 @@ class Plugin360Panel(lf.ui.Panel):
             loop_detection=self._loop_closure_enabled,
             colmap_sequential_overlap=self._sequential_overlap,
             output_mode=output_mode,
+            fisheye_training_output=(
+                self._get_fisheye_training_output()
+                if output_mode == "fisheye"
+                else "native"
+            ),
             # Dual fisheye fields
             input_type=("dual_fisheye" if output_mode in ("fisheye", "fisheye_pinhole") else "erp"),
             camera_family=(
@@ -2740,6 +2798,9 @@ class Plugin360Panel(lf.ui.Panel):
             )
             self._append_processing_log(
                 "Preset: OPENCV_FISHEYE x PER_FOLDER (no rig)"
+            )
+            self._append_processing_log(
+                f"Training output: {self._get_fisheye_training_output_label()}"
             )
             self._append_processing_log(f"Camera family: {family_label}")
             if self._source_mode_idx == 1:

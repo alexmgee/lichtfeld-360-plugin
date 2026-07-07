@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -98,6 +98,9 @@ class PipelineConfig:
     #              "fisheye" = OPENCV_FISHEYE COLMAP dataset (phase 1) /
     #              fisheye-native transforms.json (phase 2+)
     output_mode: str = "pinhole"
+    # For output_mode == "fisheye": "native", "pinhole", or "both".
+    # Default selects native fisheye output unless the user opts into pinhole crops.
+    fisheye_training_output: str = "native"
 
     # Dual fisheye input (phase 1)
     # input_type: "erp" (default) or "dual_fisheye"
@@ -353,12 +356,110 @@ class PipelineJob:
             except Exception:
                 logger.exception("on_complete callback raised")
 
+    def _run_dual_fisheye_with_training_output(
+        self, cfg: PipelineConfig, t0: float,
+    ) -> PipelineResult:
+        training_output = (cfg.fisheye_training_output or "native").lower()
+        if cfg.output_mode != "fisheye":
+            return self._run_fisheye_native(cfg, t0)
+        if training_output not in {"native", "pinhole", "both"}:
+            training_output = "native"
+
+        out = Path(cfg.output_dir)
+        native_out = out / "native"
+        native_cfg = replace(cfg, output_dir=str(native_out))
+        result = self._run_fisheye_native(native_cfg, t0)
+        if training_output == "native":
+            return result
+
+        images_dir = native_out / "images"
+        masks_dir = native_out / "masks"
+        sparse_dir = native_out / "sparse" / "0"
+        if not sparse_dir.is_dir():
+            sparse_dir = native_out / "sparse"
+
+        pinhole_out = out / "pinhole"
+        self._update(
+            "output", 96.0,
+            "Exporting native-derived pinhole crops...",
+        )
+
+        from .fisheye_reframer import FISHEYE_PINHOLE_PRESET
+        from .transforms_writer import write_native_propagated_transforms
+
+        try:
+            pinhole_transforms = write_native_propagated_transforms(
+                colmap_sparse_dir=sparse_dir,
+                images_root=images_dir,
+                output_dir=pinhole_out,
+                view_config=FISHEYE_PINHOLE_PRESET,
+                masks_root=masks_dir if masks_dir.is_dir() else None,
+                propagated_sparse_output_dir=pinhole_out / "sparse" / "0",
+                log_fn=logger.info,
+            )
+        except Exception as exc:
+            logger.exception("Native-derived pinhole export failed")
+            raise RuntimeError(
+                f"Native reconstruction succeeded but pinhole export failed: {exc}"
+            ) from exc
+
+        import json as _json
+
+        pinhole_data = _json.loads(Path(pinhole_transforms).read_text())
+        pinhole_frames = pinhole_data.get("frames", [])
+        view_counts: dict[str, int] = {}
+        for frame in pinhole_frames:
+            basename = Path(frame.get("file_path", "")).name
+            for view in FISHEYE_PINHOLE_PRESET.views:
+                if basename.startswith(f"{view.name}_"):
+                    view_counts[view.name] = view_counts.get(view.name, 0) + 1
+                    break
+
+        if training_output == "pinhole":
+            import shutil
+
+            out_resolved = out.resolve()
+            native_resolved = native_out.resolve()
+            if (
+                native_out.name != "native"
+                or native_resolved == out_resolved
+                or native_resolved.parent != out_resolved
+            ):
+                raise RuntimeError(
+                    f"Refusing to remove unsafe native output path: {native_out}"
+                )
+            shutil.rmtree(str(native_out))
+            result.dataset_path = str(pinhole_transforms)
+            result.num_output_images = len(pinhole_frames)
+            result.views_per_frame = FISHEYE_PINHOLE_PRESET.total_views()
+            result.expected_images_by_view = {
+                view.name: result.num_source_frames
+                for view in FISHEYE_PINHOLE_PRESET.views
+            }
+            result.registered_images_by_view = {
+                view.name: view_counts.get(view.name, 0)
+                for view in FISHEYE_PINHOLE_PRESET.views
+            }
+        else:
+            result.num_output_images += len(pinhole_frames)
+
+        result.elapsed_sec = time.time() - t0
+        result.preset_signature = (
+            f"{result.preset_signature} | training_output={training_output}"
+        )
+        logger.info(
+            "Native-derived pinhole export complete: %d frames at %s",
+            len(pinhole_frames), pinhole_transforms,
+        )
+        self._update("complete", 100.0, "Fisheye output ready")
+        return result
+
     def _run_stages(self, cfg: PipelineConfig, t0: float) -> PipelineResult:
         # Phase 1 dispatch shim — dual fisheye path is a separate leaf method
         # (Style 2 leaf-functions refactor for the ERP paths is deferred to
         # a follow-up; see spec §4.2.)
         if cfg.input_type == "dual_fisheye":
-            return self._run_fisheye_native(cfg, t0)
+            return self._run_dual_fisheye_with_training_output(cfg, t0)
 
         if cfg.output_mode == "erp_native":
             return self._run_erp_native(cfg, t0)

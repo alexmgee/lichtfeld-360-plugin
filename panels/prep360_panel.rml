@@ -140,6 +140,14 @@
         <span class="prop-label"></span>
         <span class="status-text status-muted">{{output_mode_note}}</span>
       </div>
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium" data-if="show_fisheye_training_output">
+        <span class="prop-label">Training output</span>
+        <select data-value="fisheye_training_output_idx">
+          <option value="0" selected>Native (fisheye)</option>
+          <option value="1">Pinhole</option>
+          <option value="2">Both</option>
+        </select>
+      </div>
       <div class="setting-row" data-if="show_keep_pinhole_scaffolding">
         <span class="prop-label"></span>
         <span class="status-text status-muted">

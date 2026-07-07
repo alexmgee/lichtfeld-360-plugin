@@ -514,6 +514,278 @@ def write_erp_native_transforms(
     return transforms_path
 
 
+def write_native_propagated_transforms(
+    colmap_sparse_dir: str | Path,
+    images_root: str | Path,
+    output_dir: str | Path,
+    view_config=None,
+    *,
+    masks_root: str | Path | None = None,
+    transforms_filename: str = "transforms.json",
+    ply_filename: str = "pointcloud.ply",
+    file_path_prefix: str = "images",
+    mask_path_prefix: str = "masks",
+    propagated_sparse_output_dir: str | Path | None = None,
+    reconstruction_obj=None,
+    log_fn: Callable[..., object] = logger.info,
+) -> Path:
+    """Export pinhole crops propagated from a native dual-fisheye solve.
+
+    Source poses come from the registered native lens image itself:
+
+        R_rel = fisheye_reframer._rotation_matrix(view.yaw, view.pitch)
+        R_v   = R_rel @ R_w2c_lens
+        t_v   = R_rel @ t_w2c_lens
+
+    There is no reference crop term, no assumed back-lens flip, and no rig
+    baseline offset. Only registered ``(frame, lens)`` native images emit
+    crops, so native partial registration is preserved.
+    """
+    import cv2
+    import pycolmap
+
+    from .fisheye_calibration import DualFisheyeCalibration, FisheyeCalibration
+    from .fisheye_reframer import (
+        FISHEYE_PINHOLE_PRESET,
+        FisheyeReframer,
+        _rotation_matrix as _renderer_rotation_matrix,
+    )
+
+    sparse_dir = Path(colmap_sparse_dir)
+    images_root = Path(images_root)
+    out_dir = Path(output_dir)
+    output_images_dir = out_dir / file_path_prefix
+    output_masks_dir = out_dir / mask_path_prefix
+    masks_root_path = Path(masks_root) if masks_root is not None else None
+
+    if view_config is None:
+        view_config = FISHEYE_PINHOLE_PRESET
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_images_dir.mkdir(parents=True, exist_ok=True)
+    if masks_root_path is not None:
+        output_masks_dir.mkdir(parents=True, exist_ok=True)
+
+    if reconstruction_obj is not None:
+        recon = reconstruction_obj
+    else:
+        log_fn("Loading native dual-fisheye reconstruction from %s", sparse_dir)
+        recon = pycolmap.Reconstruction(str(sparse_dir))
+
+    reg_image_ids = sorted(recon.reg_image_ids())
+    if not reg_image_ids:
+        raise RuntimeError(
+            "Native reconstruction contains no registered images — "
+            "cannot export propagated pinhole crops"
+        )
+
+    lens_camera_ids: dict[str, set[int]] = {"front": set(), "back": set()}
+    registered_images: list[tuple[int, object, str, str]] = []
+    for img_id in reg_image_ids:
+        image = recon.image(img_id)
+        rel_name = image.name.replace("\\", "/")
+        parts = rel_name.split("/", 1)
+        if len(parts) != 2 or parts[0] not in lens_camera_ids:
+            log_fn("WARNING: skipping unexpected native image name %r", image.name)
+            continue
+        lens, frame_name = parts
+        lens_camera_ids[lens].add(int(image.camera_id))
+        registered_images.append((img_id, image, lens, frame_name))
+
+    if not registered_images:
+        raise RuntimeError("No front/back native images found in reconstruction")
+
+    for lens, camera_ids in lens_camera_ids.items():
+        if not camera_ids:
+            raise RuntimeError(f"No registered {lens!r} images found")
+        if len(camera_ids) != 1:
+            raise RuntimeError(
+                f"Expected one camera for {lens!r}, found {sorted(camera_ids)}"
+            )
+
+    lens_calibs: dict[str, FisheyeCalibration] = {}
+    for lens, camera_ids in lens_camera_ids.items():
+        camera_id = next(iter(camera_ids))
+        cam = recon.cameras[camera_id]
+        model_name = cam.model_name
+        params = [float(x) for x in cam.params]
+        if model_name != "OPENCV_FISHEYE" or len(params) != 8:
+            raise RuntimeError(
+                f"{lens} camera {camera_id} is {model_name!r} with "
+                f"{len(params)} params; expected OPENCV_FISHEYE with 8 params"
+            )
+        fx, fy, cx, cy, k1, k2, k3, k4 = params
+        lens_calibs[lens] = FisheyeCalibration(
+            camera_matrix=np.array(
+                [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+                dtype=np.float64,
+            ),
+            dist_coeffs=np.array([[k1], [k2], [k3], [k4]], dtype=np.float64),
+            image_size=(int(cam.width), int(cam.height)),
+            rms_error=-1.0,
+            num_images_used=0,
+            fov_degrees=190.0,
+        )
+        log_fn(
+            "Native %s camera %d: OPENCV_FISHEYE %dx%d params=%s",
+            lens, camera_id, int(cam.width), int(cam.height), params,
+        )
+
+    calibration = DualFisheyeCalibration(
+        front=lens_calibs["front"],
+        back=lens_calibs["back"],
+        camera_model="Native dual fisheye COLMAP refined",
+        baseline_m=0.0,
+    )
+    reframer = FisheyeReframer(calibration)
+
+    views_by_lens = {
+        "front": list(view_config.views_for_lens("front")),
+        "back": list(view_config.views_for_lens("back")),
+    }
+    if not views_by_lens["front"] or not views_by_lens["back"]:
+        raise RuntimeError("View config must contain front and back views")
+
+    def _pinhole_intrinsics(view) -> dict:
+        crop = int(view_config.crop_size)
+        fl = crop / (2.0 * np.tan(np.radians(view.fov_deg / 2.0)))
+        return {
+            "w": crop,
+            "h": crop,
+            "fl_x": float(fl),
+            "fl_y": float(fl),
+            "cx": crop / 2.0,
+            "cy": crop / 2.0,
+        }
+
+    frames: list[dict] = []
+    sparse_entries: list[dict] = []
+    rendered_masks = 0
+    missing_masks = 0
+
+    for _img_id, image, lens, frame_name in sorted(
+        registered_images, key=lambda item: (item[2], item[3])
+    ):
+        source_path = images_root / lens / frame_name
+        source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source is None:
+            raise RuntimeError(f"Could not read native image: {source_path}")
+
+        native_mask = None
+        if masks_root_path is not None:
+            mask_path = masks_root_path / lens / Path(frame_name).with_suffix(".png")
+            native_mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+            if native_mask is None:
+                missing_masks += 1
+
+        cam_from_world = image.cam_from_world()
+        R_w2c = np.asarray(cam_from_world.rotation.matrix(), dtype=np.float64)
+        t_w2c = np.asarray(cam_from_world.translation, dtype=np.float64)
+
+        for view in views_by_lens[lens]:
+            if native_mask is not None:
+                crop, mask_crop = reframer.extract_view(
+                    source, view, int(view_config.crop_size), native_mask,
+                )
+            else:
+                crop = reframer.extract_view(
+                    source, view, int(view_config.crop_size),
+                )
+                mask_crop = None
+
+            flat_name = f"{view.name}_{frame_name}"
+            crop_path = output_images_dir / flat_name
+            if not cv2.imwrite(
+                str(crop_path),
+                crop,
+                [cv2.IMWRITE_JPEG_QUALITY, int(view_config.quality)],
+            ):
+                raise RuntimeError(f"Could not write crop: {crop_path}")
+
+            R_rel = _renderer_rotation_matrix(view.yaw_deg, view.pitch_deg)
+            R_v = R_rel @ R_w2c
+            t_v = R_rel @ t_w2c
+
+            R_c2w = R_v.T
+            t_c2w = -R_v.T @ t_v
+            c2w_opencv = np.eye(4, dtype=np.float64)
+            c2w_opencv[:3, :3] = R_c2w
+            c2w_opencv[:3, 3] = t_c2w
+            c2w_lfs = _c2w_opencv_to_lfs(c2w_opencv)
+
+            intr = _pinhole_intrinsics(view)
+            sparse_entries.append({
+                "name": flat_name,
+                "view_name": view.name,
+                "intrinsics": intr,
+                "R_w2c": R_v.copy(),
+                "t_w2c": t_v.copy(),
+            })
+            entry = {
+                "file_path": f"{file_path_prefix}/{flat_name}",
+                "transform_matrix": c2w_lfs.tolist(),
+                **intr,
+            }
+
+            if mask_crop is not None:
+                mask_name = Path(flat_name).with_suffix(".png").name
+                mask_out = output_masks_dir / mask_name
+                if not cv2.imwrite(str(mask_out), mask_crop):
+                    raise RuntimeError(f"Could not write mask crop: {mask_out}")
+                entry["mask_path"] = f"{mask_path_prefix}/{mask_name}"
+                rendered_masks += 1
+
+            frames.append(entry)
+
+    if not frames:
+        raise RuntimeError("No native propagated pinhole frames were written")
+
+    ply_path = out_dir / ply_filename
+    point_count = _write_sparse_pointcloud(recon, ply_path)
+    log_fn("Wrote sparse pointcloud (%d points): %s", point_count, ply_path)
+
+    top_intr = _pinhole_intrinsics(view_config.views[0])
+    transforms_path = out_dir / transforms_filename
+    transforms_data = {
+        "camera_model": "PINHOLE",
+        **top_intr,
+        "applied_transform": _APPLIED_TRANSFORM,
+        "ply_file_path": ply_filename,
+        "frames": sorted(frames, key=lambda e: e["file_path"]),
+    }
+    with transforms_path.open("w", encoding="utf-8") as fp:
+        json.dump(transforms_data, fp, indent=4)
+
+    lens_counts = {
+        lens: sum(1 for _i, _image, image_lens, _frame in registered_images
+                  if image_lens == lens)
+        for lens in ("front", "back")
+    }
+    log_fn(
+        "Wrote native propagated pinhole export: %d crops from %d native images "
+        "(front=%d, back=%d), %d masks, %s",
+        len(frames), len(registered_images),
+        lens_counts["front"], lens_counts["back"],
+        rendered_masks, transforms_path,
+    )
+    if missing_masks:
+        log_fn("WARNING: %d native masks were missing", missing_masks)
+
+    sparse_output_dir = (
+        Path(propagated_sparse_output_dir)
+        if propagated_sparse_output_dir is not None
+        else out_dir / "sparse" / "0"
+    )
+    _write_native_pinhole_sparse_model(
+        recon,
+        sparse_entries,
+        sparse_output_dir,
+        log_fn=log_fn,
+    )
+
+    return transforms_path
+
+
 def write_rig_propagated_transforms(
     colmap_sparse_dir: str | Path,
     images_root: str | Path,
@@ -801,6 +1073,91 @@ def _next_id(*maps) -> int:
         if mapping:
             max_id = max(max_id, max(int(k) for k in mapping.keys()))
     return max_id + 1
+
+
+def _write_native_pinhole_sparse_model(
+    native_recon,
+    sparse_entries: list[dict],
+    output_sparse_dir: Path,
+    *,
+    log_fn: Callable[..., object] = logger.info,
+) -> None:
+    """Write a clean pinhole-only sparse model from native propagated poses."""
+    import shutil
+    import pycolmap
+
+    clean_recon = pycolmap.Reconstruction()
+    camera_ids_by_view: dict[str, int] = {}
+    image_names: set[str] = set()
+    next_camera_id = 1
+    next_image_id = 1
+
+    for entry in sorted(sparse_entries, key=lambda e: e["name"]):
+        name = entry["name"]
+        if name in image_names:
+            raise RuntimeError(f"Duplicate propagated image name: {name}")
+
+        view_name = entry["view_name"]
+        intr = entry["intrinsics"]
+        camera_id = camera_ids_by_view.get(view_name)
+        if camera_id is None:
+            camera_id = next_camera_id
+            next_camera_id += 1
+            camera = pycolmap.Camera.create_from_model_name(
+                camera_id,
+                "PINHOLE",
+                float(intr["fl_x"]),
+                int(intr["w"]),
+                int(intr["h"]),
+            )
+            camera.params = np.array(
+                [
+                    float(intr["fl_x"]),
+                    float(intr["fl_y"]),
+                    float(intr["cx"]),
+                    float(intr["cy"]),
+                ],
+                dtype=np.float64,
+            )
+            clean_recon.add_camera_with_trivial_rig(camera)
+            camera_ids_by_view[view_name] = camera_id
+
+        image = pycolmap.Image(
+            name=name,
+            camera_id=camera_id,
+            image_id=next_image_id,
+        )
+        next_image_id += 1
+        cam_from_world = pycolmap.Rigid3d(
+            pycolmap.Rotation3d(entry["R_w2c"]),
+            entry["t_w2c"],
+        )
+        clean_recon.add_image_with_trivial_frame(image, cam_from_world)
+        image_names.add(name)
+
+    point_count = 0
+    for point3D_id, point in native_recon.points3D.items():
+        clean_recon.add_point3D_with_id(
+            int(point3D_id),
+            pycolmap.Point3D(
+                xyz=np.asarray(point.xyz, dtype=np.float64),
+                color=np.asarray(point.color, dtype=np.uint8),
+            ),
+        )
+        point_count += 1
+
+    if output_sparse_dir.exists():
+        shutil.rmtree(str(output_sparse_dir))
+    output_sparse_dir.mkdir(parents=True, exist_ok=True)
+    clean_recon.write_binary(str(output_sparse_dir))
+    log_fn(
+        "Wrote native pinhole-only COLMAP sparse model to %s "
+        "(%d PINHOLE cameras, %d images, %d points)",
+        output_sparse_dir,
+        len(camera_ids_by_view),
+        len(image_names),
+        point_count,
+    )
 
 
 def _write_propagated_sparse_model(
