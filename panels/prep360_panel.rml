@@ -433,6 +433,13 @@
           <option value="1">LightGlue</option>
         </select>
       </div>
+      <div class="setting-row">
+        <span class="prop-label"></span>
+        <div class="loop-closure-group">
+          <input type="checkbox" data-checked="guided_matching_enabled" id="guided_matching_cb"/>
+          <label class="checkbox-label" for="guided_matching_cb">Guided matching</label>
+        </div>
+      </div>
       <div class="setting-row setting-row--dropdown" style="z-index: 32;">
         <span class="prop-label">Mapper</span>
         <select data-value="mapper_idx">
@@ -515,6 +522,13 @@
         <div class="setting-row__control-col setting-row__control-col--slider">
           <input type="range" class="setting-slider" data-value="sift_max_image_size_str" min="1024" max="8192" step="128" />
           <span class="slider-value">{{sift_max_image_size_str}}</span>
+        </div>
+      </div>
+      <div class="setting-row" data-if="show_sift_advanced">
+        <span class="prop-label"></span>
+        <div class="loop-closure-group">
+          <input type="checkbox" data-checked="sift_affine_dsp_enabled" id="sift_affine_dsp_cb"/>
+          <label class="checkbox-label" for="sift_affine_dsp_cb">Affine + DSP (CPU-heavy)</label>
         </div>
       </div>
 

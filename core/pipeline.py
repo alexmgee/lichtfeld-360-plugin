@@ -80,7 +80,6 @@ class PipelineConfig:
     jpeg_quality: int = 95
 
     # COLMAP
-    colmap_preset: str = "normal"
     colmap_matcher: str = "sequential"  # "sequential", "exhaustive", "vocab_tree"
     colmap_match_budget_tier: str = "default"
     colmap_max_num_matches: Optional[int] = None
@@ -88,8 +87,8 @@ class PipelineConfig:
     # SIFT controls (UI-exposed via the COLMAP Preset dropdown + Advanced disclosure).
     # sift_preset: "normal" | "high" | "custom" — informational; the actual SIFT
     # values used during reconstruction come from sift_max_features / sift_max_image_size.
-    # When None, the underlying ColmapConfig falls back to its preset-based defaults
-    # (so old call sites without these fields keep working unchanged).
+    # When None, the underlying ColmapConfig falls back to COLMAP's own defaults
+    # (8192 features, no image-size cap).
     sift_preset: str = "normal"
     sift_max_features: Optional[int] = None
     sift_max_image_size: Optional[int] = None
@@ -136,6 +135,8 @@ class PipelineConfig:
     vocab_tree_path: str = ""                # path to vocab tree file (auto-resolved if empty)
     loop_detection: bool = False             # sequential matcher loop closure via vocab tree
     colmap_sequential_overlap: int = 10      # sequential matching overlap (2-20)
+    colmap_guided_matching: bool = False     # epipolar-guided re-matching
+    colmap_sift_affine_dsp: bool = False     # SIFT affine shape + DSP (CPU-heavy)
 
 
 @dataclass
@@ -820,7 +821,6 @@ class PipelineJob:
         )
 
         colmap_config = ColmapConfig(
-            preset=cfg.colmap_preset,
             camera_params=camera_params,
             default_focal_length_factor=default_focal_length_factor,
             matcher=cfg.colmap_matcher,
@@ -837,6 +837,9 @@ class PipelineJob:
             vocab_tree_path=cfg.vocab_tree_path or None,
             loop_detection=False,  # rig-constrained: sequential pairs sufficient
             sequential_overlap=cfg.colmap_sequential_overlap,
+            guided_matching=cfg.colmap_guided_matching,
+            sift_estimate_affine_shape=cfg.colmap_sift_affine_dsp,
+            sift_domain_size_pooling=cfg.colmap_sift_affine_dsp,
         )
 
         def _colmap_progress(stage: str, pct: float, msg: str) -> None:
@@ -1146,7 +1149,6 @@ class PipelineJob:
         self._update("colmap", 55.0, "Running COLMAP (EQUIRECTANGULAR)...")
 
         colmap_config = ColmapConfig(
-            preset=cfg.colmap_preset,
             camera_model="EQUIRECTANGULAR",
             camera_mode="SINGLE",
             camera_params=None,
@@ -1165,6 +1167,9 @@ class PipelineJob:
             vocab_tree_path=cfg.vocab_tree_path or None,
             loop_detection=cfg.loop_detection,
             sequential_overlap=cfg.colmap_sequential_overlap,
+            guided_matching=cfg.colmap_guided_matching,
+            sift_estimate_affine_shape=cfg.colmap_sift_affine_dsp,
+            sift_domain_size_pooling=cfg.colmap_sift_affine_dsp,
         )
 
         def _colmap_progress(stage: str, pct: float, msg: str) -> None:
@@ -1653,7 +1658,6 @@ class PipelineJob:
             self._update("colmap", 67.0,
                          f"Running COLMAP ({ref_view.name} + {lo_view.name})...")
             colmap_config = ColmapConfig(
-                preset=cfg.colmap_preset,
                 camera_model="PINHOLE",
                 camera_mode="PER_FOLDER",
                 camera_params=camera_params,
@@ -1671,6 +1675,9 @@ class PipelineJob:
                 ba_solver=cfg.colmap_ba_solver,
                 loop_detection=cfg.loop_detection,
                 sequential_overlap=cfg.colmap_sequential_overlap,
+                guided_matching=cfg.colmap_guided_matching,
+                sift_estimate_affine_shape=cfg.colmap_sift_affine_dsp,
+                sift_domain_size_pooling=cfg.colmap_sift_affine_dsp,
             )
         else:
             self._update("colmap", 55.0, "Running COLMAP (OPENCV_FISHEYE, PER_FOLDER)...")
@@ -1687,7 +1694,6 @@ class PipelineJob:
             FISHEYE_DEFAULT_FOCAL_FACTOR = 0.30
 
             colmap_config = ColmapConfig(
-                preset=cfg.colmap_preset,
                 camera_model="OPENCV_FISHEYE",
                 camera_params=camera_params,
                 default_focal_length_factor=None if has_prior else FISHEYE_DEFAULT_FOCAL_FACTOR,
@@ -1697,6 +1703,9 @@ class PipelineJob:
                 refine_focal_length=True,
                 refine_principal_point=has_prior,
                 refine_extra_params=has_prior,
+                # The dual-fisheye rig (use_rig=True) carries an assumed 25mm/180°
+                # transform — let BA measure it. No-op on rig-less runs.
+                refine_sensor_from_rig=True,
                 sift_max_num_features_override=cfg.sift_max_features,
                 sift_max_image_size_override=cfg.sift_max_image_size,
                 feature_type=cfg.colmap_feature_type,
@@ -1706,6 +1715,9 @@ class PipelineJob:
                 vocab_tree_path=cfg.vocab_tree_path or None,
                 loop_detection=cfg.loop_detection,
                 sequential_overlap=cfg.colmap_sequential_overlap,
+                guided_matching=cfg.colmap_guided_matching,
+                sift_estimate_affine_shape=cfg.colmap_sift_affine_dsp,
+                sift_domain_size_pooling=cfg.colmap_sift_affine_dsp,
             )
 
         def _colmap_progress(stage: str, pct: float, msg: str) -> None:
@@ -2051,7 +2063,6 @@ class PipelineJob:
             self._update("colmap", 10.0,
                          f"Running COLMAP ({ref_view.name} + {lo_view.name})...")
             colmap_config = ColmapConfig(
-                preset=cfg.colmap_preset,
                 camera_model="PINHOLE",
                 camera_mode="PER_FOLDER",
                 camera_params=camera_params,
@@ -2069,6 +2080,9 @@ class PipelineJob:
                 ba_solver=cfg.colmap_ba_solver,
                 loop_detection=cfg.loop_detection,
                 sequential_overlap=cfg.colmap_sequential_overlap,
+                guided_matching=cfg.colmap_guided_matching,
+                sift_estimate_affine_shape=cfg.colmap_sift_affine_dsp,
+                sift_domain_size_pooling=cfg.colmap_sift_affine_dsp,
             )
 
             def _colmap_progress(stage: str, pct: float, msg: str) -> None:
@@ -2165,7 +2179,6 @@ class PipelineJob:
             has_prior = camera_params is not None
 
             colmap_config = ColmapConfig(
-                preset=cfg.colmap_preset,
                 camera_model="OPENCV_FISHEYE",
                 camera_params=camera_params,
                 default_focal_length_factor=None if has_prior else 0.30,
@@ -2175,6 +2188,7 @@ class PipelineJob:
                 refine_focal_length=True,
                 refine_principal_point=has_prior,
                 refine_extra_params=has_prior,
+                refine_sensor_from_rig=True,  # mirrors the primary fisheye path
                 sift_max_num_features_override=cfg.sift_max_features,
                 sift_max_image_size_override=cfg.sift_max_image_size,
                 feature_type=cfg.colmap_feature_type,
@@ -2183,6 +2197,9 @@ class PipelineJob:
                 ba_solver=cfg.colmap_ba_solver,
                 loop_detection=cfg.loop_detection,
                 sequential_overlap=cfg.colmap_sequential_overlap,
+                guided_matching=cfg.colmap_guided_matching,
+                sift_estimate_affine_shape=cfg.colmap_sift_affine_dsp,
+                sift_domain_size_pooling=cfg.colmap_sift_affine_dsp,
             )
 
             def _colmap_progress(stage: str, pct: float, msg: str) -> None:

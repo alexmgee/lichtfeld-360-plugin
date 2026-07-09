@@ -418,6 +418,8 @@ class Plugin360Panel(lf.ui.Panel):
         self._ba_solver_idx: int = 0      # Auto (hybrid)
         self._loop_closure_enabled: bool = False
         self._sequential_overlap: int = 10
+        self._guided_matching_enabled: bool = False
+        self._sift_affine_dsp_enabled: bool = False
 
         # Processing state
         self._is_processing: bool = False
@@ -551,6 +553,10 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind("loop_closure_enabled", lambda: self._loop_closure_enabled, self._set_loop_closure)
         model.bind_func("show_loop_closure_tree", lambda: self._loop_closure_enabled)
         model.bind_func("vocab_tree_status", self._get_vocab_tree_status)
+
+        # Advanced quality toggles (default off)
+        model.bind("guided_matching_enabled", lambda: self._guided_matching_enabled, self._set_guided_matching)
+        model.bind("sift_affine_dsp_enabled", lambda: self._sift_affine_dsp_enabled, self._set_sift_affine_dsp)
 
         # COLMAP 4.1 controls
         model.bind("feature_type_idx", lambda: str(self._feature_type_idx), self._set_feature_type_idx)
@@ -805,6 +811,8 @@ class Plugin360Panel(lf.ui.Panel):
             self._ba_solver_idx,
             self._fisheye_circle_margin,
             self._loop_closure_enabled,
+            self._guided_matching_enabled,
+            self._sift_affine_dsp_enabled,
             self._output_path,
             self._is_processing,
             self._processing_stage,
@@ -2178,6 +2186,16 @@ class Plugin360Panel(lf.ui.Panel):
         if self._handle:
             self._handle.dirty_all()
 
+    def _set_guided_matching(self, val):
+        self._guided_matching_enabled = bool(val)
+        if self._handle:
+            self._handle.dirty_all()
+
+    def _set_sift_affine_dsp(self, val):
+        self._sift_affine_dsp_enabled = bool(val)
+        if self._handle:
+            self._handle.dirty_all()
+
     def _set_sequential_overlap(self, val):
         try:
             v = int(float(val))
@@ -2741,6 +2759,8 @@ class Plugin360Panel(lf.ui.Panel):
             vocab_tree_path="",  # auto-resolved from feature type by ColmapRunner
             loop_detection=self._loop_closure_enabled,
             colmap_sequential_overlap=self._sequential_overlap,
+            colmap_guided_matching=self._guided_matching_enabled,
+            colmap_sift_affine_dsp=self._sift_affine_dsp_enabled,
             output_mode=output_mode,
             fisheye_training_output=(
                 self._get_fisheye_training_output()

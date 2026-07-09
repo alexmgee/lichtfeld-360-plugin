@@ -270,13 +270,14 @@ def _configure_ba(solver: str, camera_model: str):
         _enable_ceres_gpu(global_ba)
 
     elif solver == "caspar":
-        # Caspar on both (original behavior), fall back to Ceres-GPU if unsupported
+        # Caspar on both, falling back to Ceres-GPU for unsupported models.
+        # Ceres GPU fields are set first so ba_use_gpu (derived from
+        # ceres.use_gpu downstream) stays True even when backend is CASPAR.
+        _enable_ceres_gpu(local_ba)
+        _enable_ceres_gpu(global_ba)
         if camera_model in CASPAR_MODELS:
             local_ba.backend = CASPAR
             global_ba.backend = CASPAR
-        else:
-            _enable_ceres_gpu(local_ba)
-            _enable_ceres_gpu(global_ba)
 
     else:  # "auto" — the hybrid strategy
         # Local BA: always Ceres-GPU (size-adaptive threshold handles small problems)
@@ -292,9 +293,41 @@ def _configure_ba(solver: str, camera_model: str):
     return local_ba, global_ba
 
 
+def _build_incremental_pipeline_options(
+    config: ColmapConfig,
+    rig_ids: set,
+    local_ba_opts,
+    global_ba_opts,
+):
+    """Build IncrementalPipelineOptions for step 4 (incremental mapping).
+
+    get_local/global_bundle_adjustment() return copies, so BA backend/GPU
+    choices only reach the mapper through the scalar mirror attributes
+    (ba_use_gpu, ba_local_backend, ba_global_backend).
+    """
+    import pycolmap
+
+    opts = pycolmap.IncrementalPipelineOptions()
+    if hasattr(opts, "multiple_models"):
+        _try_set_attr(opts, "multiple_models", False)
+    if hasattr(opts, "max_num_models"):
+        _try_set_attr(opts, "max_num_models", 1)
+    _try_set_attr(opts, "ba_refine_sensor_from_rig", config.refine_sensor_from_rig)
+    _try_set_attr(opts, "ba_refine_focal_length", config.refine_focal_length)
+    _try_set_attr(opts, "ba_refine_principal_point", config.refine_principal_point)
+    _try_set_attr(opts, "ba_refine_extra_params", config.refine_extra_params)
+    # constant_rigs pins the transform independent of ba_refine_sensor_from_rig,
+    # so it must be skipped when refinement is requested.
+    if rig_ids and not config.refine_sensor_from_rig:
+        opts.constant_rigs = rig_ids
+    _try_set_attr(opts, "ba_use_gpu", local_ba_opts.ceres.use_gpu)
+    _try_set_attr(opts, "ba_local_backend", local_ba_opts.backend)
+    _try_set_attr(opts, "ba_global_backend", global_ba_opts.backend)
+    return opts
+
+
 @dataclass
 class ColmapConfig:
-    preset: str = "normal"
     camera_model: str = "PINHOLE"
     camera_params: Optional[str] = None
     default_focal_length_factor: Optional[float] = None
@@ -304,14 +337,22 @@ class ColmapConfig:
     refine_focal_length: bool = True
     refine_principal_point: bool = False  # set True for OPENCV_FISHEYE w/ a prior
     refine_extra_params: bool = False     # set True for OPENCV_FISHEYE w/ a prior
+    # True lets BA measure sensor_from_rig transforms instead of pinning them.
+    # Used by the dual-fisheye rig, whose 25mm/180° transform is a prior, not
+    # a measurement. Reframed pinhole rigs stay pinned (exact by construction).
+    refine_sensor_from_rig: bool = False
     vocab_tree_path: Optional[str] = None  # Required when matcher == "vocab_tree"
     loop_detection: bool = False  # Sequential matcher loop detection (opt-in via UI checkbox)
     sequential_overlap: int = 10  # pairs each frame with N sequential neighbors
-    # Override knobs for the fisheye path (where 2048 features at 1600px is
-    # too sparse for 3840-wide raw fisheye). When None, fall back to the
-    # preset-based defaults below.
+    # SIFT caps. The panel always passes explicit values; when None, fall
+    # back to COLMAP's own defaults (8192 features, no size cap).
     sift_max_num_features_override: Optional[int] = None
     sift_max_image_size_override: Optional[int] = None
+    # SIFT quality options (both force CPU-side covariant detection — expensive)
+    sift_estimate_affine_shape: bool = False
+    sift_domain_size_pooling: bool = False
+    # Re-match verified pairs under epipolar guidance (extra pass on hard pairs)
+    guided_matching: bool = False
     # COLMAP 4.1 features
     feature_type: str = "sift"        # "sift", "aliked_n16rot", "aliked_n32"
     matcher_type: str = "bruteforce"  # "bruteforce", "lightglue"
@@ -323,13 +364,13 @@ class ColmapConfig:
     def sift_max_image_size(self) -> int:
         if self.sift_max_image_size_override is not None:
             return self.sift_max_image_size_override
-        return 1600 if self.preset == "normal" else 1200
+        return -1  # COLMAP default: no downscale cap
 
     @property
     def sift_max_num_features(self) -> int:
         if self.sift_max_num_features_override is not None:
             return self.sift_max_num_features_override
-        return 2048 if self.preset == "normal" else 1536
+        return 8192  # COLMAP default
 
     @property
     def sift_max_num_matches(self) -> int:
@@ -468,51 +509,6 @@ def _resolve_vocab_tree(
         if p.exists():
             return str(p)
     return None
-
-# Inline script executed by the subprocess via `python -c`.
-# Receives fn_name and kwargs as a JSON file, runs the pycolmap function,
-# writes status to a result file. Stderr goes to a separate file for progress.
-_WORKER_SCRIPT = r'''
-import json, os, sys, traceback
-
-lib_dir, kwargs_path, result_path = sys.argv[1], sys.argv[2], sys.argv[3]
-
-if os.name == "nt" and lib_dir:
-    try:
-        os.add_dll_directory(lib_dir)
-    except OSError:
-        pass
-
-try:
-    import pycolmap
-    pycolmap.logging.logtostderr = True
-    pycolmap.logging.verbose_level = 1
-
-    with open(kwargs_path, "r") as f:
-        spec = json.load(f)
-
-    fn_name = spec["fn_name"]
-    fn_kwargs = spec["fn_kwargs"]
-
-    fn = getattr(pycolmap, fn_name, None)
-    if fn is None:
-        with open(result_path, "w") as f:
-            json.dump({"status": "error", "detail": f"pycolmap.{fn_name} not found"}, f)
-        sys.exit(1)
-
-    fn(**fn_kwargs)
-    with open(result_path, "w") as f:
-        json.dump({"status": "ok"}, f)
-
-except Exception as exc:
-    sys.stderr.write(f"WORKER ERROR: {exc}\n")
-    sys.stderr.write(traceback.format_exc())
-    sys.stderr.flush()
-    with open(result_path, "w") as f:
-        json.dump({"status": "error", "detail": str(exc)}, f)
-    sys.exit(1)
-'''
-
 
 
 class ColmapRunner:
@@ -874,7 +870,7 @@ except Exception as exc:
                 except OSError:
                     pass
 
-        num_threads = min(8, os.cpu_count() or 4)
+        num_threads = -1  # COLMAP default: all cores
         sift_max_image_size = self._config.sift_max_image_size
         sift_max_num_features = self._config.sift_max_num_features
 
@@ -934,6 +930,10 @@ except Exception as exc:
             # Route max_num_features to the correct sub-options object
             if feat_type == "sift":
                 _try_set_attr(extraction_opts.sift, "max_num_features", sift_max_num_features)
+                _try_set_attr(extraction_opts.sift, "estimate_affine_shape",
+                              self._config.sift_estimate_affine_shape)
+                _try_set_attr(extraction_opts.sift, "domain_size_pooling",
+                              self._config.sift_domain_size_pooling)
             else:
                 _try_set_attr(extraction_opts.aliked, "max_num_features", sift_max_num_features)
                 # Set ONNX model paths for ALIKED extraction
@@ -948,6 +948,10 @@ except Exception as exc:
             _try_set_attr(extraction_opts, "num_threads", num_threads)
             _try_set_attr(extraction_opts, "max_image_size", sift_max_image_size)
             _try_set_attr(extraction_opts, "max_num_features", sift_max_num_features)
+            _try_set_attr(extraction_opts, "estimate_affine_shape",
+                          self._config.sift_estimate_affine_shape)
+            _try_set_attr(extraction_opts, "domain_size_pooling",
+                          self._config.sift_domain_size_pooling)
 
         extract_kwargs = dict(
             database_path=database_path,
@@ -1047,6 +1051,7 @@ except Exception as exc:
         _try_set_attr(matching_opts, "max_num_matches", self._config.sift_max_num_matches)
         _try_set_attr(matching_opts, "rig_verification", True)
         _try_set_attr(matching_opts, "skip_image_pairs_in_same_frame", True)
+        _try_set_attr(matching_opts, "guided_matching", self._config.guided_matching)
 
         # Set compound matcher type (e.g. SIFT_LIGHTGLUE, ALIKED_BRUTEFORCE)
         _mt_key = (self._config.feature_type, self._config.matcher_type)
@@ -1166,9 +1171,7 @@ except Exception as exc:
         self._ensure_not_cancelled()
         mapper_name = self._config.mapper
         local_ba_opts, global_ba_opts = _configure_ba(self._config.ba_solver, self._config.camera_model)
-        _log(f"Step 4: Mapping (mapper={mapper_name}, ba_solver={self._config.ba_solver}, "
-             f"local_ba={local_ba_opts.backend}, global_ba={global_ba_opts.backend}, "
-             f"local_gpu={local_ba_opts.ceres.use_gpu})")
+        _log(f"Step 4: Mapping (mapper={mapper_name}, ba_solver={self._config.ba_solver})")
 
         # Parse mapping progress from stderr (works for both incremental and global)
         _RE_REGISTERING = re.compile(r"Registering image #(\d+)")
@@ -1203,10 +1206,12 @@ except Exception as exc:
             global_opts.mapper.global_positioning.refine_sensor_from_rig = False
             global_opts.mapper.rotation_averaging.refine_sensor_from_rig = False
             _log(
-                "Step 4: GLOMAP BA — refine_sensor_from_rig=False (all stages), "
-                f"refine_focal_length={self._config.refine_focal_length}, "
-                f"refine_principal_point={self._config.refine_principal_point}, "
-                f"refine_extra_params={self._config.refine_extra_params}"
+                "Step 4: GLOMAP BA (effective) — "
+                f"backend={ba.backend}, ceres_use_gpu={ba.ceres.use_gpu}, "
+                "refine_sensor_from_rig=False (all stages), "
+                f"refine_focal_length={ba.refine_focal_length}, "
+                f"refine_principal_point={ba.refine_principal_point}, "
+                f"refine_extra_params={ba.refine_extra_params}"
             )
 
             mapping_kwargs = dict(
@@ -1223,27 +1228,19 @@ except Exception as exc:
             # ── Incremental mapping (default) ──
             self._progress("mapping", 0.0, f"Running incremental mapper ({total_images} images)...")
 
-            pipeline_opts = pycolmap.IncrementalPipelineOptions()
-            if hasattr(pipeline_opts, "multiple_models"):
-                _try_set_attr(pipeline_opts, "multiple_models", False)
-            if hasattr(pipeline_opts, "max_num_models"):
-                _try_set_attr(pipeline_opts, "max_num_models", 1)
-            _try_set_attr(pipeline_opts, "ba_refine_sensor_from_rig", False)
-            _try_set_attr(pipeline_opts, "ba_refine_focal_length", self._config.refine_focal_length)
-            _try_set_attr(pipeline_opts, "ba_refine_principal_point", self._config.refine_principal_point)
-            _try_set_attr(pipeline_opts, "ba_refine_extra_params", self._config.refine_extra_params)
-            if hasattr(self, '_rig_ids') and self._rig_ids:
-                pipeline_opts.constant_rigs = self._rig_ids
-
-            # get_local/global_bundle_adjustment() return copies — setting fields on
-            # them has no effect. ba_use_gpu is the correct direct attribute.
-            _try_set_attr(pipeline_opts, "ba_use_gpu", local_ba_opts.ceres.use_gpu)
+            pipeline_opts = _build_incremental_pipeline_options(
+                self._config, self._rig_ids, local_ba_opts, global_ba_opts,
+            )
 
             _log(
-                "Step 4: Incremental BA — refine_sensor_from_rig=False, "
-                f"refine_focal_length={self._config.refine_focal_length}, "
-                f"refine_principal_point={self._config.refine_principal_point}, "
-                f"refine_extra_params={self._config.refine_extra_params}, "
+                "Step 4: Incremental BA (effective) — "
+                f"local_backend={pipeline_opts.ba_local_backend}, "
+                f"global_backend={pipeline_opts.ba_global_backend}, "
+                f"use_gpu={pipeline_opts.ba_use_gpu}, "
+                f"refine_focal_length={pipeline_opts.ba_refine_focal_length}, "
+                f"refine_principal_point={pipeline_opts.ba_refine_principal_point}, "
+                f"refine_extra_params={pipeline_opts.ba_refine_extra_params}, "
+                f"refine_sensor_from_rig={pipeline_opts.ba_refine_sensor_from_rig}, "
                 f"constant_rigs={pipeline_opts.constant_rigs}"
             )
 

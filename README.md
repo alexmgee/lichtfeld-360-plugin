@@ -136,6 +136,8 @@ The plugin uses COLMAP 4.1 (via pycolmap with GPU-accelerated wheels on Windows)
 
 When switching extractors, the max features slider automatically adjusts to the appropriate default for the selected extractor.
 
+The Advanced disclosure also offers **Affine + DSP** (SIFT only, off by default): enables affine shape estimation and domain-size pooling, which improve matching under strong perspective and scale variation at a significant CPU cost — these covariant detectors bypass GPU SIFT extraction.
+
 ### Matching
 
 | Matcher Type | Description |
@@ -150,6 +152,7 @@ All 6 combinations of extractor and matcher are supported. The required ONNX mod
 - **Sequential** matches each image against its temporal neighbors. The **Overlap** slider (2–20) controls the neighborhood size. Faster for video sequences with smooth motion.
 - **Exhaustive** tests all possible image pairs. Slower but more robust for irregular capture patterns or scenes that need global loop closure.
 - **Loop Closure** can be enabled alongside sequential matching to add vocabulary-tree-based global pair candidates, helping close loops in sequences that revisit earlier viewpoints.
+- **Guided Matching** (off by default) re-matches geometrically verified pairs under their estimated epipolar geometry, recovering extra correspondences on difficult pairs at the cost of a second matching pass.
 
 ### Mapper
 
