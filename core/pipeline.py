@@ -28,6 +28,7 @@ from typing import Callable, Optional
 
 from .colmap_runner import ColmapConfig, ColmapResult, ColmapRunner
 from .colmap_runner import infer_shared_pinhole_camera_params
+from .input_detect import detect_input_type  # noqa: F401  (re-export)
 from .masker import Masker, MaskConfig, MaskResult, is_masking_available
 from .setup_checks import is_sam3_masking_ready
 from .overlap_mask import compute_overlap_masks
@@ -167,22 +168,6 @@ class PipelineResult:
     masking_timers: dict = field(default_factory=dict)
     elapsed_sec: float = 0.0
     error: str = ""
-
-
-def detect_input_type(video_path: str) -> tuple[str, Optional[str]]:
-    """Auto-detect (input_type, camera_family) from file extension.
-
-    Returns:
-        ("dual_fisheye", "dji_osmo360") for .osv (DJI Osmo 360)
-        ("dual_fisheye", "insta360") for .insv (file pair OR X4/X5 single-file)
-        ("erp", None) for .mp4 / .mov / other single-stream video
-    """
-    suffix = Path(video_path).suffix.lower()
-    if suffix == ".osv":
-        return "dual_fisheye", "dji_osmo360"
-    if suffix == ".insv":
-        return "dual_fisheye", "insta360"
-    return "erp", None
 
 
 def _build_runtime_view_config(cfg: PipelineConfig) -> ViewConfig:

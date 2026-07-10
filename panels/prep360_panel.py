@@ -2554,7 +2554,10 @@ class Plugin360Panel(lf.ui.Panel):
         # Auto-detect dual fisheye input from extension and flip Output Mode
         # to Fisheye proactively so the right UI appears before VideoAnalyzer
         # finishes (VideoAnalyzer also handles .osv/.insv via ffprobe).
-        from ..core.pipeline import detect_input_type
+        # Import from the stdlib-only module — never from core.pipeline,
+        # which pulls the full cv2/torch/pycolmap stack. A broken heavy
+        # dependency must not be able to break video selection (#6/#8).
+        from ..core.input_detect import detect_input_type
 
         input_type, family = detect_input_type(path)
         if input_type == "dual_fisheye":
@@ -2725,7 +2728,20 @@ class Plugin360Panel(lf.ui.Panel):
         masking_method = "sam3_cubemap"
         mask_backend = "sam3"
 
-        from ..core.pipeline import PipelineConfig, PipelineJob
+        # Heavy import (cv2 / torch / pycolmap load here). Guarded so a
+        # broken dependency surfaces its real error in the panel instead
+        # of dying silently in the data-model event handler (#6/#8).
+        try:
+            from ..core.pipeline import PipelineConfig, PipelineJob
+        except ImportError as exc:
+            self._error_message = (
+                f"A required dependency failed to load: {exc} — "
+                "try reinstalling the plugin, or report this message on GitHub."
+            )
+            logger.error("Pipeline import failed: %s", exc, exc_info=True)
+            if self._handle:
+                self._handle.dirty_all()
+            return
 
         config = PipelineConfig(
             video_path=self._video_path,

@@ -259,7 +259,7 @@ Point LichtFeld Studio at the specific subfolder you want to train (`native/` or
 
 Installed automatically unless noted:
 
-- **opencv-python-headless** — frame extraction, blur scoring, image processing
+- **opencv-contrib-python** — frame extraction, blur scoring, image processing (CPU wheel; an opt-in CUDA build for GPU-accelerated extraction is available via the `gpu-opencv` extra)
 - **numpy** — coordinate math, rotation matrices
 - **pycolmap** — COLMAP 4.1 Python bindings. On Windows, GPU-enabled wheels from [build_gpu_colmap](https://github.com/lyehe/build_gpu_colmap). On Linux, CPU build from PyPI.
 - **static-ffmpeg** — bundled ffmpeg for video decoding and fisheye stitching
