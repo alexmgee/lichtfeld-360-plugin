@@ -2,6 +2,18 @@
 
 All notable changes to the 360 Plugin are documented here.
 
+## [Unreleased]
+
+### Added
+- One-click opt-in GPU-accelerated frame extraction (NVDEC decode + CUDA
+  blur scoring) for machines with an NVIDIA GPU. The plugin vendors the
+  required runtime DLLs, so no system CUDA installation is needed. The CPU
+  baseline stays the default and the automatic fallback. Enabling
+  downloads about 1.2 GB and takes one restart to activate; if a plugin
+  update ever resets extraction to CPU, the panel offers one-click
+  re-enable. Ships as beta until certified on machines without CUDA
+  installed.
+
 ## [0.2.0] - 2026-07-10
 
 ### Fixed

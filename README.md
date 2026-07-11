@@ -259,13 +259,47 @@ Point LichtFeld Studio at the specific subfolder you want to train (`native/` or
 
 Installed automatically unless noted:
 
-- **opencv-contrib-python** — frame extraction, blur scoring, image processing (CPU wheel; an opt-in CUDA build for GPU-accelerated extraction is available via the `gpu-opencv` extra)
+- **opencv-contrib-python** — frame extraction, blur scoring, image processing (CPU wheel by default; an opt-in CUDA build for GPU-accelerated extraction is available from the panel, see [GPU Extraction](#gpu-extraction-optional))
 - **numpy** — coordinate math, rotation matrices
 - **pycolmap** — COLMAP 4.1 Python bindings. On Windows, GPU-enabled wheels from [build_gpu_colmap](https://github.com/lyehe/build_gpu_colmap). On Linux, CPU build from PyPI.
 - **static-ffmpeg** — bundled ffmpeg for video decoding and fisheye stitching
 - **SAM 3** — optional, gated HuggingFace model. Installed from inside the plugin after access verification.
 
 ONNX model files for ALIKED, LightGlue, and Bruteforce matching are bundled in `lib/`.
+
+### GPU Extraction (optional)
+
+On machines with an NVIDIA GPU, the Frame Extraction panel shows a
+one-click **Enable GPU Extraction** button. It decodes video on the GPU
+(NVDEC) and scores sharpness with CUDA, much faster than the CPU path on
+long or high-resolution clips.
+
+- Enabling downloads about 1.2 GB of GPU runtime and needs one restart to
+  take effect. About 2.9 GB of disk is used while it is active.
+- The CPU build is always the default. If a plugin update resets
+  extraction to CPU, the panel shows a one-click **Re-enable**.
+- Nothing installs without your click, and only machines with an NVIDIA
+  GPU ever see the button.
+
+This ships as beta until it is certified on machines without CUDA
+installed.
+
+#### How it works (maintainer note)
+
+The CPU wheel pinned in the lock is the safety floor. When GPU extraction
+is enabled, the plugin stages the CUDA OpenCV build and NVIDIA runtime
+DLLs, then swaps them in at the next load before anything imports OpenCV
+(a running LichtFeld Studio holds the module locked). The installed CUDA
+build is registered under the baseline pin's version so the host's
+dependency sync preserves it instead of reverting to CPU; the NVIDIA DLLs
+live in the plugin's own `lib/gpu/` and are never touched by the sync. If
+a sync ever removes the CUDA build, the panel detects it and offers
+re-enable, so the plugin never breaks.
+
+To restore the CPU build manually (rarely needed): with LichtFeld Studio
+closed, delete `.venv/Lib/site-packages/cv2`, the
+`opencv_contrib_python-*.dist-info` folder next to it, and the plugin's
+`lib/gpu/` folder. The next launch reinstalls the CPU build automatically.
 
 ## Credits
 
