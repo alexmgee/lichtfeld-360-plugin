@@ -365,6 +365,17 @@ class Plugin360Panel(lf.ui.Panel):
         self._hf_verify_ok: bool = False
         self._install_busy: bool = False
         self._install_button_text: str = "Repair Default Masking"
+
+        # GPU extraction opt-in (row under the Frame Extraction header).
+        # State comes from core.gpu_extraction_install; refreshed in the
+        # setup probe thread, mutated by the gpu_* event handlers.
+        self._gpu_state: str = "disabled"
+        self._gpu_hw_present: bool = False
+        self._gpu_probe_done: bool = False
+        self._gpu_busy: bool = False
+        self._gpu_progress_text: str = ""
+        self._gpu_notice_text: str = ""
+        self._gpu_error_detail: str = ""
         self._sam3_check_button_text: str = "Check Setup"
         self._sam3_edit_token: bool = False
         self._sam3_notice_text: str = ""
@@ -483,6 +494,17 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind("blur_metric_idx", lambda: str(self._blur_metric_idx), self._set_blur_metric)
         model.bind_func("est_frames_text", self._get_est_frames_text)
         model.bind_func("gpu_indicator_text", self._get_gpu_indicator_text)
+
+        # -- GPU extraction opt-in row --
+        model.bind_func("show_gpu_row", self._show_gpu_row)
+        model.bind_func("gpu_row_text", self._get_gpu_row_text)
+        model.bind_func("show_gpu_row_text", lambda: bool(self._get_gpu_row_text()))
+        model.bind_func("gpu_row_button_text", self._get_gpu_row_button_text)
+        model.bind_func("show_gpu_row_button", self._show_gpu_row_button)
+        model.bind_func("gpu_busy", lambda: self._gpu_busy)
+        model.bind_func("show_gpu_notice", lambda: bool(self._gpu_notice_text))
+        model.bind_func("gpu_notice_text", lambda: self._gpu_notice_text)
+        model.bind_func("show_gpu_copy_details", self._show_gpu_copy_details)
 
         # -- Masking --
         model.bind("enable_masking", lambda: self._enable_masking, self._set_enable_masking)
@@ -710,6 +732,9 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_event("forget_hf_token", self._on_forget_hf_token)
         model.bind_event("set_sam3_hf_help", self._on_set_sam3_hf_help)
         model.bind_event("clear_sam3_hf_help", self._on_clear_sam3_hf_help)
+        # GPU extraction opt-in events
+        model.bind_event("gpu_primary_action", self._on_gpu_primary_action)
+        model.bind_event("gpu_copy_details", self._on_gpu_copy_details)
         model.bind_func("show_video_tracking_install",
                          lambda: False)
 
@@ -779,6 +804,12 @@ class Plugin360Panel(lf.ui.Panel):
             self._hf_verify_text,
             self._install_busy,
             self._install_button_text,
+            self._gpu_state,
+            self._gpu_hw_present,
+            self._gpu_probe_done,
+            self._gpu_busy,
+            self._gpu_progress_text,
+            self._gpu_notice_text,
             self._sam3_check_button_text,
             self._sam3_notice_text,
             self._sam3_hf_help_key,
@@ -1100,8 +1131,8 @@ class Plugin360Panel(lf.ui.Panel):
     def _get_gpu_indicator_text(self) -> str:
         from ..core.sharpest_extractor import SharpestExtractor
         if SharpestExtractor._gpu_available():
-            return "GPU ready"
-        return "CPU only"
+            return "GPU"
+        return "CPU"
 
     def _get_coverage_text(self) -> str:
         if self._get_output_mode() == "fisheye":
@@ -1639,6 +1670,18 @@ class Plugin360Panel(lf.ui.Panel):
                     self._setup_probe_pending = (state, report, auto_enable)
             except Exception:
                 logger.exception("Initial SAM 3 setup probe failed")
+            try:
+                # GPU extraction opt-in state. detect_runtime_state() also
+                # persists active -> reverted when the installed cv2 is no
+                # longer the CUDA build (Task 3.2 wiring). Cheap + cv2-free.
+                from ..core import gpu_extraction_install as _gpu
+
+                self._gpu_state = _gpu.detect_runtime_state()
+                self._gpu_error_detail = _gpu.get_state().get("detail", "")
+                self._gpu_hw_present = _gpu.gpu_hardware_present()
+                self._gpu_probe_done = True
+            except Exception:
+                logger.exception("GPU extraction state probe failed")
             finally:
                 if self._handle:
                     self._handle.dirty_all()
@@ -1933,6 +1976,115 @@ class Plugin360Panel(lf.ui.Panel):
                 self._handle.dirty_all()
 
         threading.Thread(target=_install, daemon=True).start()
+
+    # ── GPU extraction opt-in ─────────────────────────────────
+
+    _GPU_DOWNLOAD_LABEL = "Enable GPU Extraction (~1.2 GB download)"
+
+    def _show_gpu_row(self) -> bool:
+        if not self._gpu_probe_done:
+            return False
+        if self._gpu_state == "active":
+            return False  # the "GPU" indicator conveys it; no row needed
+        if self._gpu_state == "disabled":
+            return self._gpu_hw_present  # offer only to NVIDIA machines
+        return True  # enable_staged / error / reverted
+
+    def _get_gpu_row_text(self) -> str:
+        if self._gpu_busy:
+            return self._gpu_progress_text
+        state = self._gpu_state
+        if state == "enable_staged":
+            return "Restart LichtFeld Studio to activate GPU extraction."
+        if state == "error":
+            detail = self._gpu_error_detail
+            if "WinError 5" in detail or "Access is denied" in detail:
+                return ("Another program is using the graphics files. "
+                        "Click Retry, then restart LichtFeld Studio.")
+            return "GPU setup failed: %s" % detail
+        if state == "reverted":
+            return "GPU extraction was turned off."
+        # disabled: the Enable button is the prompt (no explanatory text).
+        return ""
+
+    def _get_gpu_row_button_text(self) -> str:
+        return {
+            "disabled": self._GPU_DOWNLOAD_LABEL,
+            "enable_staged": "Cancel",
+            "error": "Retry",
+            "reverted": "Re-enable",
+        }.get(self._gpu_state, "")
+
+    def _show_gpu_row_button(self) -> bool:
+        return bool(self._get_gpu_row_button_text())
+
+    def _show_gpu_copy_details(self) -> bool:
+        return self._gpu_state == "error" and not self._gpu_busy
+
+    def _on_gpu_primary_action(self, handle, event, args):
+        del handle, event, args
+        if self._gpu_busy:
+            return
+        state = self._gpu_state
+        if state == "enable_staged":
+            # Cancel: delete staging, return to disabled. A mis-click never
+            # forces a restart.
+            from ..core import gpu_extraction_install as gpu
+
+            self._gpu_state = gpu.cancel_staged()
+            if self._handle:
+                self._handle.dirty_all()
+        elif state in ("disabled", "error", "reverted"):
+            # Enable / Retry / Re-enable: stage_enable is cache-cheap on a
+            # retry (no re-download). The button itself is the prompt.
+            self._start_gpu_enable()
+
+    def _start_gpu_enable(self) -> None:
+        if self._gpu_busy:
+            return
+        self._gpu_busy = True
+        self._gpu_notice_text = ""
+        self._gpu_progress_text = "Starting download..."
+        if self._handle:
+            self._handle.dirty_all()
+
+        def _work():
+            from ..core import gpu_extraction_install as gpu
+
+            last = ""
+
+            def _progress(msg):
+                nonlocal last
+                last = msg
+                self._gpu_progress_text = msg
+                if self._handle:
+                    self._handle.dirty_all()
+
+            ok = gpu.stage_enable(on_output=_progress)
+            state = gpu.get_state()
+            self._gpu_state = state["state"]
+            self._gpu_error_detail = state.get("detail", "")
+            if not ok:
+                # stage_enable leaves state untouched on failure; keep the
+                # failure line visible next to the Enable button.
+                self._gpu_notice_text = last or "GPU setup failed."
+            self._gpu_busy = False
+            if self._handle:
+                self._handle.dirty_all()
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_gpu_copy_details(self, handle, event, args):
+        del handle, event, args
+        detail = self._gpu_error_detail
+        if not detail:
+            return
+        try:
+            import subprocess
+
+            subprocess.run(["clip"], input=detail, text=True, check=False)
+        except OSError:
+            logger.exception("Copying GPU error details failed")
 
     def _set_preset(self, val):
         try:

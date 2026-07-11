@@ -38,6 +38,20 @@ body {
     color: #666688;
 }
 
+/* ── GPU extraction opt-in row ──────────────────────────── */
+
+.gpu-row {
+    margin: 2dp 0dp 6dp 0dp;
+    padding-bottom: 4dp;
+}
+
+.gpu-row__actions {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6dp;
+}
+
 .loop-closure-group {
     margin-left: auto;
     display: flex;

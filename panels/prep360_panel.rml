@@ -188,6 +188,22 @@
       <span class="gpu-indicator" id="gpu-indicator">{{gpu_indicator_text}}</span>
     </div>
     <div class="section-content" id="sec-extraction">
+      <div class="gpu-row" data-if="show_gpu_row">
+        <div class="setting-row" data-if="show_gpu_row_text">
+          <span class="status-text gpu-row__text">{{gpu_row_text}}</span>
+        </div>
+        <div class="setting-row" data-if="show_gpu_notice">
+          <span class="status-text status-muted">{{gpu_notice_text}}</span>
+        </div>
+        <div class="setting-row gpu-row__actions">
+          <div data-if="show_gpu_row_button">
+            <button class="btn btn--primary btn--compact" data-event-click="gpu_primary_action" data-attr-disabled="gpu_busy">{{gpu_row_button_text}}</button>
+          </div>
+          <div data-if="show_gpu_copy_details">
+            <button class="btn btn--secondary btn--compact" data-event-click="gpu_copy_details">Copy details</button>
+          </div>
+        </div>
+      </div>
       <div class="setting-row setting-row--aligned">
         <span class="setting-row__label-col">FPS</span>
         <div class="setting-row__control-col setting-row__control-col--slider">
