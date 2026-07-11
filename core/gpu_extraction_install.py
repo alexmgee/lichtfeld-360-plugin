@@ -15,11 +15,13 @@ wheel has none) — this is the single fingerprint used everywhere.
 """
 from __future__ import annotations
 
+import ctypes
 import datetime
 import hashlib
 import io
 import json
 import shutil
+import sys
 import tomllib
 import urllib.parse
 import urllib.request
@@ -671,3 +673,54 @@ def stage_disable(on_output=None, root: Path = PLUGIN_ROOT) -> bool:
         _emit(on_output, "Disable staging failed: %s" % exc)
         _rmtree_if(staging / "wheel")
         return False
+
+
+# --------------------------------------------------------------------------
+# Panel backend helpers
+# --------------------------------------------------------------------------
+
+def cancel_staged(root: Path = PLUGIN_ROOT) -> str:
+    """Delete the staged transaction and return to the state in force before
+    staging began: enable_staged -> disabled; disable_staged -> active (the
+    CUDA build is still installed and untouched). Keeps the download cache so
+    a re-enable is cheap. No-op for non-staged states."""
+    state = get_state(root=root)["state"]
+    staging = _staging(root)
+    if state == "enable_staged":
+        _rmtree_if(staging / "wheel")
+        _rmtree_if(staging / "lib-gpu")
+        set_state("disabled", root=root)
+        return "disabled"
+    if state == "disable_staged":
+        _rmtree_if(staging / "wheel")
+        set_state("active", root=root)
+        return "active"
+    return state
+
+
+def gpu_hardware_present() -> bool:
+    """Light probe, no cv2/torch: does the NVIDIA driver's nvcuda.dll load?
+    Proves an NVIDIA GPU/driver exists — NOT that the CUDA build will run."""
+    if sys.platform != "win32":
+        return False
+    try:
+        ctypes.WinDLL("nvcuda.dll")
+        return True
+    except OSError:
+        return False
+
+
+def describe_installed_build(root: Path = PLUGIN_ROOT) -> str:
+    """Truthful diagnostics (counterweight to the version disguise): package
+    tools inside the venv report the registered version, so bug reports need
+    this counter-truth. Real build version comes from the state file marker
+    written at apply time, cross-checked against the config.py fingerprint."""
+    build = _installed_build(root)
+    if build == "missing":
+        return "No OpenCV build installed"
+    di = _find_distinfo(_site_packages(root))
+    registered = _distinfo_version(di.name) if di is not None else "unknown"
+    if build == "cuda":
+        real = get_state(root=root).get("build_version") or "unknown"
+        return "CUDA build %s (registered as %s)" % (real, registered)
+    return "CPU build %s" % registered
