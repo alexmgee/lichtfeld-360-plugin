@@ -10,6 +10,8 @@ masking_setup_debug.txt
 .lichtfeld-source.json
 .tmp-dll/
 lib/vocab_tree*.bin
+lib/gpu/
+.gpu_extraction_state.json
 tmp/
 COLMAP_RIG_REPORT.md
 CLAUDE.md
