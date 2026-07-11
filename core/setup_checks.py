@@ -542,10 +542,12 @@ def make_sam3_install_failure_report(
     )
 
 
-def download_model_weights() -> bool:
+def download_model_weights(on_output=None) -> bool:
     """Download SAM 3 model weights from HuggingFace.
 
     Returns True on success. Weights download eagerly (not on first use).
+    On failure the real exception is surfaced through ``on_output`` so the
+    panel shows why (issue #2 — the reason used to be swallowed).
     """
     try:
         from huggingface_hub import snapshot_download
@@ -553,6 +555,8 @@ def download_model_weights() -> bool:
         return True
     except Exception as exc:
         logger.error("Model download failed: %s", exc)
+        if on_output:
+            on_output("SAM 3 weight download failed: %s" % exc)
         return False
 
 
@@ -826,33 +830,25 @@ def install_video_tracking(on_output=None) -> bool:
 
 
 def install_premium_tier(on_output=None) -> bool:
-    """Install SAM 3 into the plugin venv.
+    """Download the SAM 3 model weights into the plugin venv.
 
-    Requires torch already installed (from default tier).
-    Downloads SAM 3 weights eagerly after install.
+    The SAM 3 runtime ships in the base dependencies now, so it is already
+    installed by the host's dependency sync at plugin load. This must NOT
+    run `uv sync` itself: a sync here installs nothing but churns pycolmap
+    and can file-lock while LichtFeld Studio is running, which silently
+    blocked the weight download (issue #2). It only verifies the runtime
+    and downloads the weights.
     """
-    ok = _run_uv_command([
-        "sync",
-        "--locked",
-        "--no-dev",
-        "--extra", "sam3-masking",
-    ], on_output=on_output)
-    if not ok:
-        return False
-
     if not _check_sam3_installed():
-        logger.error("sam3 install completed but image API is still unavailable")
+        logger.error("sam3 runtime unavailable; cannot download weights")
         if on_output:
-            on_output("SAM 3 install appears incomplete: image API import failed.")
+            on_output("SAM 3 runtime is not installed. Restart LichtFeld "
+                      "Studio, then try again.")
         return False
 
-    # Eagerly download SAM 3 weights
     if on_output:
         on_output("Downloading SAM 3 weights (~3.5 GB)...")
-    downloaded = download_model_weights()
-    if not downloaded:
-        if on_output:
-            on_output("SAM 3 weight download failed. Check your connection and try again.")
+    if not download_model_weights(on_output=on_output):
         return False
     if on_output:
         on_output("SAM 3 weights downloaded.")
