@@ -22,7 +22,6 @@ import io
 import json
 import shutil
 import sys
-import tomllib
 import urllib.parse
 import urllib.request
 import zipfile
@@ -264,81 +263,6 @@ def _enable_steps(root: Path, ctx: dict) -> list:
     ]
 
 
-def _disable_steps(root: Path, ctx: dict) -> list:
-    sp = _site_packages(root)
-    staging = _staging(root)
-    staged_cv2 = staging / "wheel" / "cv2"
-    staged_di = _find_distinfo(staging / "wheel")
-    if staged_di is None:
-        raise RuntimeError("no staged CPU wheel dist-info")
-    lib_dst = _lib_gpu(root)
-    backup = staging / "backup"
-    backup_tmp = staging / "backup.__tmp"
-    incoming = sp / "cv2.__gpu_incoming"
-
-    def prep():
-        _rmtree_if(incoming)
-        _rmtree_if(backup_tmp)
-
-    def backup_copy():
-        if backup.is_dir():
-            return
-        backup_tmp.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(sp / "cv2", backup_tmp / "cv2")
-        di = _find_distinfo(sp)
-        shutil.copytree(di, backup_tmp / di.name)
-
-    def backup_commit():
-        if backup.is_dir():
-            return
-        backup_tmp.rename(backup)
-
-    def copy_incoming():
-        shutil.copytree(staged_cv2, incoming)
-
-    def delete_distinfo():
-        di = _find_distinfo(sp)
-        if di is not None:
-            shutil.rmtree(di)
-
-    def delete_cv2():
-        _rmtree_if(sp / "cv2")
-
-    def rename_incoming():
-        incoming.rename(sp / "cv2")
-
-    def write_distinfo():
-        # CPU wheel keeps its REAL dist-info (no camouflage), just strip any
-        # direct_url.json for symmetry with the enable path.
-        dst = sp / staged_di.name
-        _rmtree_if(dst)
-        shutil.copytree(staged_di, dst)
-        du = dst / "direct_url.json"
-        if du.exists():
-            du.unlink()
-
-    def remove_lib_gpu():
-        _rmtree_if(lib_dst)
-
-    def finalize():
-        set_state("disabled", root=root)
-        _rmtree_if(backup)
-        _rmtree_if(backup_tmp)
-
-    return [
-        ("prep", prep),
-        ("backup-copy", backup_copy),
-        ("backup-commit", backup_commit),
-        ("copy-incoming", copy_incoming),
-        ("delete-distinfo", delete_distinfo),
-        ("delete-cv2", delete_cv2),
-        ("rename-incoming", rename_incoming),
-        ("write-distinfo", write_distinfo),
-        ("remove-lib-gpu", remove_lib_gpu),
-        ("finalize", finalize),
-    ]
-
-
 def _rollback(root: Path) -> None:
     """Restore ONLY from a completed backup/. If none exists, leave the tree
     as-is — a dist-info-less tree is exactly what the host sync self-heals.
@@ -369,8 +293,6 @@ def apply_pending(root: Path = PLUGIN_ROOT, _after_step=None) -> str:
     state = get_state(root=root)["state"]
     if state == "enable_staged":
         steps = _enable_steps(root, {})
-    elif state == "disable_staged":
-        steps = _disable_steps(root, {})
     else:
         return state
     try:
@@ -387,7 +309,7 @@ def apply_pending(root: Path = PLUGIN_ROOT, _after_step=None) -> str:
 
 
 # --------------------------------------------------------------------------
-# Staging (download + verify + unpack) — stage_enable / stage_disable
+# Staging (download + verify + unpack) — stage_enable
 # --------------------------------------------------------------------------
 #
 # Runs from the panel's install thread while LFS is up; writes ONLY to
@@ -641,49 +563,14 @@ def stage_enable(on_output=None, root: Path = PLUGIN_ROOT, _sources=None) -> boo
         return False
 
 
-def _cpu_wheel_from_lock(lock_path: Path) -> tuple[str, str]:
-    """Read the pinned CPU opencv wheel (win_amd64 url + sha256) straight from
-    uv.lock — the single source of truth for the CPU floor."""
-    data = tomllib.loads(Path(lock_path).read_text(encoding="utf-8"))
-    for pkg in data.get("package", []):
-        if pkg.get("name") != "opencv-contrib-python":
-            continue
-        for wheel in pkg.get("wheels", []):
-            url = wheel["url"]
-            if url.rsplit("/", 1)[-1].endswith("win_amd64.whl"):
-                h = wheel["hash"]
-                return url, h[len("sha256:"):] if h.startswith("sha256:") else h
-        raise RuntimeError("no win_amd64 opencv wheel in uv.lock")
-    raise RuntimeError("opencv-contrib-python not found in uv.lock")
-
-
-def stage_disable(on_output=None, root: Path = PLUGIN_ROOT) -> bool:
-    """Download + unpack the lock-pinned CPU wheel into staging (with its REAL
-    dist-info — no camouflage). Returns True (state -> disable_staged)."""
-    staging = _staging(root)
-    cache = staging / "cache"
-    try:
-        url, sha = _cpu_wheel_from_lock(Path(root) / "uv.lock")
-        whl = _fetch_verified(url, sha, cache / "opencv-cpu.whl", on_output)
-        _unpack_wheel(whl, staging / "wheel", on_output)
-        set_state("disable_staged", root=root, staged_at=_now())
-        _emit(on_output, "CPU restore staged. Restart to apply.")
-        return True
-    except Exception as exc:
-        _emit(on_output, "Disable staging failed: %s" % exc)
-        _rmtree_if(staging / "wheel")
-        return False
-
-
 # --------------------------------------------------------------------------
 # Panel backend helpers
 # --------------------------------------------------------------------------
 
 def cancel_staged(root: Path = PLUGIN_ROOT) -> str:
-    """Delete the staged transaction and return to the state in force before
-    staging began: enable_staged -> disabled; disable_staged -> active (the
-    CUDA build is still installed and untouched). Keeps the download cache so
-    a re-enable is cheap. No-op for non-staged states."""
+    """Cancel a staged enable: delete the staged wheel + lib-gpu and return to
+    disabled. Keeps the download cache so a re-enable is cheap. No-op for
+    non-staged states."""
     state = get_state(root=root)["state"]
     staging = _staging(root)
     if state == "enable_staged":
@@ -691,10 +578,6 @@ def cancel_staged(root: Path = PLUGIN_ROOT) -> str:
         _rmtree_if(staging / "lib-gpu")
         set_state("disabled", root=root)
         return "disabled"
-    if state == "disable_staged":
-        _rmtree_if(staging / "wheel")
-        set_state("active", root=root)
-        return "active"
     return state
 
 
