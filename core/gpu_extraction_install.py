@@ -607,3 +607,17 @@ def describe_installed_build(root: Path = PLUGIN_ROOT) -> str:
         real = get_state(root=root).get("build_version") or "unknown"
         return "CUDA build %s (registered as %s)" % (real, registered)
     return "CPU build %s" % registered
+
+
+def diagnostics_text(root: Path = PLUGIN_ROOT) -> str:
+    """A paste-ready diagnostic bundle for bug reports. The 'installed build'
+    line is the point: it reports the TRUE build, which venv package tools
+    misreport because of the version disguise."""
+    st = get_state(root=root)
+    return "\n".join([
+        "360 Plugin - GPU extraction diagnostics",
+        "state: %s" % st["state"],
+        "detail: %s" % (st.get("detail") or "(none)"),
+        "installed build: %s" % describe_installed_build(root=root),
+        "nvidia gpu detected: %s" % ("yes" if gpu_hardware_present() else "no"),
+    ])

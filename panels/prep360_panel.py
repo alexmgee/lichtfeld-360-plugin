@@ -2076,15 +2076,15 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _on_gpu_copy_details(self, handle, event, args):
         del handle, event, args
-        detail = self._gpu_error_detail
-        if not detail:
-            return
         try:
+            from ..core import gpu_extraction_install as gpu
+
+            text = gpu.diagnostics_text()
             import subprocess
 
-            subprocess.run(["clip"], input=detail, text=True, check=False)
+            subprocess.run(["clip"], input=text, text=True, check=False)
         except OSError:
-            logger.exception("Copying GPU error details failed")
+            logger.exception("Copying GPU diagnostics failed")
 
     def _set_preset(self, val):
         try:
