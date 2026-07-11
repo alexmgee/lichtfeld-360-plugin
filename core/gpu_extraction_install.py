@@ -436,11 +436,23 @@ def _download(url: str, dest: Path, on_output=None) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     _emit(on_output, "Downloading %s ..." % dest.name)
     with urllib.request.urlopen(url, timeout=120) as r, open(dest, "wb") as f:
+        total = int(r.headers.get("Content-Length") or 0)
+        got = 0
+        next_pct, next_mb = 10, 50
         while True:
             chunk = r.read(1 << 20)
             if not chunk:
                 break
             f.write(chunk)
+            got += len(chunk)
+            if total:
+                pct = got * 100 // total
+                if pct >= next_pct:
+                    _emit(on_output, "  %s %d%%" % (dest.name, pct))
+                    next_pct = pct + 10
+            elif (got >> 20) >= next_mb:
+                _emit(on_output, "  %s %d MB" % (dest.name, got >> 20))
+                next_mb += 50
 
 
 def _fetch_verified(url: str, sha256: str, dest: Path, on_output=None) -> Path:
