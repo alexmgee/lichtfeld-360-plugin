@@ -15,8 +15,15 @@ wheel has none) — this is the single fingerprint used everywhere.
 """
 from __future__ import annotations
 
+import datetime
+import hashlib
+import io
 import json
 import shutil
+import tomllib
+import urllib.parse
+import urllib.request
+import zipfile
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
@@ -375,3 +382,292 @@ def apply_pending(root: Path = PLUGIN_ROOT, _after_step=None) -> str:
                   detail="%s: %s" % (type(exc).__name__, exc))
         return "error"
     return get_state(root=root)["state"]
+
+
+# --------------------------------------------------------------------------
+# Staging (download + verify + unpack) — stage_enable / stage_disable
+# --------------------------------------------------------------------------
+#
+# Runs from the panel's install thread while LFS is up; writes ONLY to
+# tmp/gpu-staging/ (never .venv). apply_pending later consumes the staged
+# layout at the next load. Sizes/hashes are pinned from
+# docs/gpu-dll-manifest.md (Task 0.2, the source of truth). The CUDA overlay
+# is OpenCV 4.12.0.88 (CUDA 12); it is camouflaged to the lock's CPU pin at
+# apply time, not here.
+
+_CUDA_WHEEL = {
+    "url": "https://github.com/cudawarped/opencv-python-cuda-wheels/releases/"
+           "download/4.12.0.88/"
+           "opencv_contrib_python-4.12.0.88-cp37-abi3-win_amd64.whl",
+    "sha256": "061b6c3594ddee34573f4e0e3257f9c1f5069985488f869f46305918cc9a8f52",
+    "version": "4.12.0.88",
+}
+
+# Whole-wheel downloads (we need ~all of each): url, sha256, needed DLLs.
+_NVIDIA_WHEELS = [
+    {"name": "nvidia-npp-cu12",
+     "url": "https://files.pythonhosted.org/packages/ae/91/"
+            "e5f3067f369ce9ff3b35613a3e14bb230a17d4d1fb62390087ef90d9c235/"
+            "nvidia_npp_cu12-12.4.1.87-py3-none-win_amd64.whl",
+     "sha256": "7c425c400b610eecfb1a08cfc92ecfa4a1927c2ecb691bc26406444c605d30a9",
+     "dlls": ["nppc64_12.dll", "nppial64_12.dll", "nppicc64_12.dll",
+              "nppidei64_12.dll", "nppif64_12.dll", "nppig64_12.dll",
+              "nppim64_12.dll", "nppist64_12.dll", "nppitc64_12.dll"]},
+    {"name": "nvidia-cublas-cu12",
+     "url": "https://files.pythonhosted.org/packages/20/e2/"
+            "fc9a0e985249d873150276d5afb02e39a66817fedbf1a385724393e505ed/"
+            "nvidia_cublas_cu12-12.9.2.10-py3-none-win_amd64.whl",
+     "sha256": "623f43027d40d44ceadf0043f002bd25cf353e8f13ce90b9a87057019f560661",
+     "dlls": ["cublas64_12.dll", "cublasLt64_12.dll"]},
+    {"name": "nvidia-cufft-cu12",
+     "url": "https://files.pythonhosted.org/packages/20/ee/"
+            "29955203338515b940bd4f60ffdbc073428f25ef9bfbce44c9a066aedc5c/"
+            "nvidia_cufft_cu12-11.4.1.4-py3-none-win_amd64.whl",
+     "sha256": "8e5bfaac795e93f80611f807d42844e8e27e340e0cde270dcb6c65386d795b80",
+     "dlls": ["cufft64_11.dll"]},
+]
+
+# cuDNN: range-extract ONLY the 0.3 MB dispatcher (its 1070 MB of engine DLLs
+# are runtime-LoadLibrary'd, not needed to import cv2 — see manifest). Guarded
+# by a per-file sha256; whole-wheel download is the fallback if Range fails.
+_CUDNN_WHEEL = {
+    "name": "nvidia-cudnn-cu12",
+    "url": "https://files.pythonhosted.org/packages/29/28/"
+           "2c9a2a97a8b3fedcf74a14f38fd5edfae12274380a829fdc6b16ce29be4c/"
+           "nvidia_cudnn_cu12-9.24.0.43-py3-none-win_amd64.whl",
+    "dll": "cudnn64_9.dll",
+    "dll_sha256": "cccabec1388fd7f93d7067536a3489c8e7ec31405c2984c1f78c0e3d36600fbf",
+}
+
+
+def _default_sources() -> dict:
+    return {"cuda_wheel": _CUDA_WHEEL,
+            "nvidia_wheels": _NVIDIA_WHEELS,
+            "cudnn": _CUDNN_WHEEL}
+
+
+def _emit(on_output, msg: str) -> None:
+    if on_output is not None:
+        on_output(msg)
+
+
+def _now() -> str:
+    return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def _reset_dir(path: Path) -> None:
+    _rmtree_if(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+class HttpRangeFile(io.RawIOBase):
+    """Seekable file-like backed by HTTP Range requests, so stdlib zipfile can
+    read a single wheel entry without downloading the whole wheel."""
+
+    def __init__(self, url: str):
+        self.url = url
+        self.pos = 0
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=60) as r:
+            self.size = int(r.headers["Content-Length"])
+
+    def seekable(self) -> bool:
+        return True
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        if whence == io.SEEK_SET:
+            self.pos = offset
+        elif whence == io.SEEK_CUR:
+            self.pos += offset
+        elif whence == io.SEEK_END:
+            self.pos = self.size + offset
+        return self.pos
+
+    def tell(self) -> int:
+        return self.pos
+
+    def read(self, n=-1):
+        if n is None or n < 0:
+            n = self.size - self.pos
+        if n == 0 or self.pos >= self.size:
+            return b""
+        end = min(self.pos + n, self.size) - 1
+        req = urllib.request.Request(
+            self.url, headers={"Range": "bytes=%d-%d" % (self.pos, end)})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            data = r.read()
+        self.pos += len(data)
+        return data
+
+
+def _download(url: str, dest: Path, on_output=None) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _emit(on_output, "Downloading %s ..." % dest.name)
+    with urllib.request.urlopen(url, timeout=120) as r, open(dest, "wb") as f:
+        while True:
+            chunk = r.read(1 << 20)
+            if not chunk:
+                break
+            f.write(chunk)
+
+
+def _fetch_verified(url: str, sha256: str, dest: Path, on_output=None) -> Path:
+    if dest.exists() and _sha256_file(dest) == sha256:
+        _emit(on_output, "Using cached %s" % dest.name)
+        return dest
+    _download(url, dest, on_output)
+    got = _sha256_file(dest)
+    if got != sha256:
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        raise ValueError("hash mismatch for %s (%s != %s)" % (dest.name, got, sha256))
+    return dest
+
+
+def _url_to_zip(url: str) -> zipfile.ZipFile:
+    """Open a wheel as a seekable zip: HTTP uses Range; file:// / paths open
+    the local file directly."""
+    if url.startswith(("http://", "https://")):
+        return zipfile.ZipFile(HttpRangeFile(url))
+    if url.startswith("file://"):
+        url = urllib.request.url2pathname(urllib.parse.urlparse(url).path)
+    return zipfile.ZipFile(url)
+
+
+def _find_entry(zf: zipfile.ZipFile, basename: str) -> zipfile.ZipInfo:
+    for info in zf.infolist():
+        if info.filename.rsplit("/", 1)[-1] == basename:
+            return info
+    raise KeyError("%s not found in wheel" % basename)
+
+
+def _selective_read(url: str, basename: str) -> bytes:
+    with _url_to_zip(url) as zf:
+        return zf.read(_find_entry(zf, basename))
+
+
+def _verify_and_write(data: bytes, sha256: str, dest: Path) -> None:
+    got = hashlib.sha256(data).hexdigest()
+    if got != sha256:
+        raise ValueError("hash mismatch for %s (%s != %s)" % (dest.name, got, sha256))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+
+
+def _extract_dlls(wheel: Path, dll_names, out_dir: Path, on_output=None) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    wanted = set(dll_names)
+    with zipfile.ZipFile(wheel) as zf:
+        for info in zf.infolist():
+            base = info.filename.rsplit("/", 1)[-1]
+            if base in wanted:
+                (out_dir / base).write_bytes(zf.read(info))
+                _emit(on_output, "  extracted %s" % base)
+
+
+def _extract_cudnn(spec: dict, lib_gpu: Path, cache: Path, on_output=None) -> None:
+    dest = lib_gpu / spec["dll"]
+    try:
+        _emit(on_output, "Fetching cuDNN dispatcher...")
+        data = _selective_read(spec["url"], spec["dll"])
+    except Exception as exc:  # Range unsupported / network -> whole-wheel fallback
+        _emit(on_output,
+              "Range fetch failed (%s); downloading full cuDNN wheel" % exc)
+        whl = cache / (spec["name"] + ".whl")
+        _download(spec["url"], whl, on_output)
+        with zipfile.ZipFile(whl) as zf:
+            data = zf.read(_find_entry(zf, spec["dll"]))
+    _verify_and_write(data, spec["dll_sha256"], dest)
+
+
+def _unpack_wheel(wheel: Path, out: Path, on_output=None) -> None:
+    _reset_dir(out)
+    _emit(on_output, "Unpacking OpenCV build...")
+    with zipfile.ZipFile(wheel) as zf:
+        zf.extractall(out)
+
+
+def stage_enable(on_output=None, root: Path = PLUGIN_ROOT, _sources=None) -> bool:
+    """Download + verify + unpack the CUDA overlay into tmp/gpu-staging/.
+    Returns True on success (state -> enable_staged), False on any failure
+    (state unchanged, partial staging cleaned). Safe while LFS runs.
+
+    ``_sources`` is a test seam (file:// mini-wheels); production uses the
+    pinned constants above.
+    """
+    src = _sources if _sources is not None else _default_sources()
+    staging = _staging(root)
+    cache = staging / "cache"
+    try:
+        cuda = src["cuda_wheel"]
+        whl = _fetch_verified(cuda["url"], cuda["sha256"],
+                              cache / "opencv-cuda.whl", on_output)
+        _unpack_wheel(whl, staging / "wheel", on_output)
+
+        lib_gpu = staging / "lib-gpu"
+        _reset_dir(lib_gpu)
+        for spec in src["nvidia_wheels"]:
+            w = _fetch_verified(spec["url"], spec["sha256"],
+                                cache / (spec["name"] + ".whl"), on_output)
+            _extract_dlls(w, spec["dlls"], lib_gpu, on_output)
+        _extract_cudnn(src["cudnn"], lib_gpu, cache, on_output)
+
+        try:
+            cam = _camouflage_target(root)
+        except RuntimeError:
+            cam = ""  # apply_pending recomputes from the installed dist-info
+        set_state("enable_staged", root=root,
+                  wheel_sha256=cuda["sha256"], camouflage_version=cam,
+                  staged_at=_now())
+        _emit(on_output,
+              "GPU extraction staged. Restart LichtFeld Studio to activate.")
+        return True
+    except Exception as exc:
+        _emit(on_output, "GPU setup failed: %s" % exc)
+        _rmtree_if(staging / "wheel")
+        _rmtree_if(staging / "lib-gpu")
+        return False
+
+
+def _cpu_wheel_from_lock(lock_path: Path) -> tuple[str, str]:
+    """Read the pinned CPU opencv wheel (win_amd64 url + sha256) straight from
+    uv.lock — the single source of truth for the CPU floor."""
+    data = tomllib.loads(Path(lock_path).read_text(encoding="utf-8"))
+    for pkg in data.get("package", []):
+        if pkg.get("name") != "opencv-contrib-python":
+            continue
+        for wheel in pkg.get("wheels", []):
+            url = wheel["url"]
+            if url.rsplit("/", 1)[-1].endswith("win_amd64.whl"):
+                h = wheel["hash"]
+                return url, h[len("sha256:"):] if h.startswith("sha256:") else h
+        raise RuntimeError("no win_amd64 opencv wheel in uv.lock")
+    raise RuntimeError("opencv-contrib-python not found in uv.lock")
+
+
+def stage_disable(on_output=None, root: Path = PLUGIN_ROOT) -> bool:
+    """Download + unpack the lock-pinned CPU wheel into staging (with its REAL
+    dist-info — no camouflage). Returns True (state -> disable_staged)."""
+    staging = _staging(root)
+    cache = staging / "cache"
+    try:
+        url, sha = _cpu_wheel_from_lock(Path(root) / "uv.lock")
+        whl = _fetch_verified(url, sha, cache / "opencv-cpu.whl", on_output)
+        _unpack_wheel(whl, staging / "wheel", on_output)
+        set_state("disable_staged", root=root, staged_at=_now())
+        _emit(on_output, "CPU restore staged. Restart to apply.")
+        return True
+    except Exception as exc:
+        _emit(on_output, "Disable staging failed: %s" % exc)
+        _rmtree_if(staging / "wheel")
+        return False
