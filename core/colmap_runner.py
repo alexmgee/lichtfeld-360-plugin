@@ -307,6 +307,16 @@ def _build_incremental_pipeline_options(
     """
     import pycolmap
 
+    refine_extra_params = config.refine_extra_params
+    CASPAR = pycolmap.BundleAdjustmentBackend.CASPAR
+    if CASPAR in (local_ba_opts.backend, global_ba_opts.backend):
+        # Caspar merges focal + extra params into one block and rejects
+        # refine_focal_length != refine_extra_params
+        # (bundle_adjustment_caspar.cc:173). Caspar models (PINHOLE,
+        # SIMPLE_RADIAL merged block) tolerate the alignment: PINHOLE has no
+        # extra params at all.
+        refine_extra_params = config.refine_focal_length
+
     opts = pycolmap.IncrementalPipelineOptions()
     if hasattr(opts, "multiple_models"):
         _try_set_attr(opts, "multiple_models", False)
@@ -315,7 +325,7 @@ def _build_incremental_pipeline_options(
     _try_set_attr(opts, "ba_refine_sensor_from_rig", config.refine_sensor_from_rig)
     _try_set_attr(opts, "ba_refine_focal_length", config.refine_focal_length)
     _try_set_attr(opts, "ba_refine_principal_point", config.refine_principal_point)
-    _try_set_attr(opts, "ba_refine_extra_params", config.refine_extra_params)
+    _try_set_attr(opts, "ba_refine_extra_params", refine_extra_params)
     # constant_rigs pins the transform independent of ba_refine_sensor_from_rig,
     # so it must be skipped when refinement is requested.
     if rig_ids and not config.refine_sensor_from_rig:
@@ -1194,6 +1204,10 @@ except Exception as exc:
             ba.refine_principal_point = self._config.refine_principal_point
             ba.refine_extra_params = self._config.refine_extra_params
             ba.backend = global_ba_opts.backend
+            if ba.backend == pycolmap.BundleAdjustmentBackend.CASPAR:
+                # Caspar rejects refine_focal_length != refine_extra_params
+                # (merged focal_and_extra block); harmless for PINHOLE.
+                ba.refine_extra_params = ba.refine_focal_length
             if global_ba_opts.backend == pycolmap.BundleAdjustmentBackend.CERES:
                 ba.ceres.use_gpu = global_ba_opts.ceres.use_gpu
                 ba.ceres.auto_select_solver_type = global_ba_opts.ceres.auto_select_solver_type
