@@ -30,6 +30,7 @@ from .colmap_runner import ColmapConfig, ColmapResult, ColmapRunner
 from .colmap_runner import infer_shared_pinhole_camera_params
 from .input_detect import detect_input_type  # noqa: F401  (re-export)
 from .masker import Masker, MaskConfig, MaskResult, is_masking_available
+from .pycolmap_guard import check_loaded_pycolmap
 from .setup_checks import is_sam3_masking_ready
 from .overlap_mask import compute_overlap_masks
 from .presets import (
@@ -321,6 +322,9 @@ class PipelineJob:
         result: PipelineResult
 
         try:
+            guard_error = check_loaded_pycolmap()
+            if guard_error:
+                raise RuntimeError(guard_error)
             result = self._run_stages(cfg, t0)
         except Exception as exc:
             logger.exception("Pipeline failed")
