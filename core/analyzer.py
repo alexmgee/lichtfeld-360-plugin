@@ -9,6 +9,7 @@ Analyze video files to extract metadata and recommend extraction parameters.
 import json
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -70,6 +71,38 @@ def _safe_int(val: object) -> int:
         return int(val)
     except (ValueError, TypeError):
         return 0
+
+
+def _decide_still_writing(
+    seconds_since_mtime: float, size_before: int, size_after: int, mtime_window: float
+) -> bool:
+    """True only if the file was touched within *mtime_window* seconds AND its size changed between the two reads."""
+    if seconds_since_mtime > mtime_window:
+        return False
+    return size_after != size_before
+
+
+class VideoStillWritingError(RuntimeError):
+    """Raised when a video file appears to still be growing on disk."""
+
+
+def is_file_still_writing(
+    path: str, *, mtime_window: float = 3.0, probe_delay: float = 0.5
+) -> bool:
+    """Return *True* if *path* looks like it is still being written to disk.
+
+    Settled files (not modified within *mtime_window* seconds) are reported
+    as not-writing immediately, with no added delay.
+    """
+    st = Path(path).stat()
+    seconds_since = time.time() - st.st_mtime
+    if seconds_since > mtime_window:
+        return False
+
+    size_before = st.st_size
+    time.sleep(probe_delay)
+    size_after = Path(path).stat().st_size
+    return _decide_still_writing(seconds_since, size_before, size_after, mtime_window)
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +221,12 @@ class VideoAnalyzer:
         path = Path(video_path)
         if not path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
+
+        if is_file_still_writing(video_path):
+            raise VideoStillWritingError(
+                "This video looks like it is still being written to disk (its size is changing). "
+                "Wait for the copy or export to finish, then load it again."
+            )
 
         raw_data = self._run_ffprobe(video_path)
         info = self._parse_metadata(raw_data, path)

@@ -11,6 +11,11 @@ All notable changes to the 360 Plugin are documented here.
   each frame matters. Applies to both single 360 videos and dual-fisheye
   inputs. The FPS, Sharpness, and Blur Metric controls grey out and the
   estimate shows the true frame total from the video metadata. ([#3])
+- Loading a video that is still being written to disk (a copy or export in
+  progress) is now blocked with a clear message to wait and reload, instead
+  of failing later with a confusing error. All-frames extraction also stops
+  with a clear message when it produces far fewer frames than the video
+  reports, which usually means an incomplete or corrupt source.
 - One-click opt-in GPU-accelerated frame extraction (NVDEC decode + CUDA
   blur scoring) for machines with an NVIDIA GPU. The plugin vendors the
   required runtime DLLs, so no system CUDA installation is needed. The CPU

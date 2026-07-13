@@ -2919,6 +2919,9 @@ class Plugin360Panel(lf.ui.Panel):
             scene_threshold=sharpness_preset["scene_threshold"],
             blur_scale_width=sharpness_preset["scale_width"],
             all_frames=self._extract_all_frames,
+            expected_frame_count=(
+                self._video_info.frame_count if self._video_info else 0
+            ),
             quality=self._jpeg_quality,
             enable_masking=self._enable_masking and self._masking_available,
             masking_method=masking_method,

@@ -45,6 +45,28 @@ from .sharpest_extractor import SharpestConfig, SharpestExtractor
 
 logger = logging.getLogger(__name__)
 
+# Minimum fraction of the video's reported frame count that all-frames
+# extraction must produce before we treat the run as valid. A large shortfall
+# usually means the source was incomplete (still being copied) or corrupt.
+_ALL_FRAMES_MIN_RATIO = 0.9
+
+
+def _assert_all_frames_complete(
+    all_frames: bool, expected_frame_count: int, extracted: int
+) -> None:
+    """Fail fast when all-frames extraction produced far fewer frames than the
+    video's metadata reports. No-op unless all_frames is set and the expected
+    count is known (> 0)."""
+    if not all_frames or expected_frame_count <= 0:
+        return
+    if extracted < _ALL_FRAMES_MIN_RATIO * expected_frame_count:
+        raise RuntimeError(
+            f"Extracted {extracted} frames but the video reports about "
+            f"{expected_frame_count}. The source video may be incomplete or "
+            f"corrupt. If a copy or export was still in progress, wait for it "
+            f"to finish and run again."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Configuration and result data classes
@@ -68,6 +90,7 @@ class PipelineConfig:
     start_sec: Optional[float] = None
     end_sec: Optional[float] = None
     all_frames: bool = False               # extract every frame (no scoring/GPU)
+    expected_frame_count: int = 0          # video metadata frame count; 0 = unknown (skip all-frames completeness check)
 
     # Masking
     enable_masking: bool = False
@@ -503,6 +526,8 @@ class PipelineJob:
             )
 
         num_source_frames = extract_result.frames_extracted
+        _assert_all_frames_complete(
+            cfg.all_frames, cfg.expected_frame_count, num_source_frames)
 
         # Read ERP frame dimensions from the first extracted frame.
         # Needed by ERP scaffold export for equirectangular intrinsics.
@@ -1007,6 +1032,8 @@ class PipelineJob:
             )
 
         num_source_frames = extract_result.frames_extracted
+        _assert_all_frames_complete(
+            cfg.all_frames, cfg.expected_frame_count, num_source_frames)
 
         erp_width = 0
         erp_height = 0
@@ -1348,6 +1375,8 @@ class PipelineJob:
             )
 
         num_pairs = extract_result.pair_count
+        _assert_all_frames_complete(
+            cfg.all_frames, cfg.expected_frame_count, num_pairs)
         gpu_accel = getattr(extract_result, 'gpu_accelerated', False)
         logger.info("Phase 1: extracted %d frame pairs%s", num_pairs,
                      " (GPU)" if gpu_accel else "")
