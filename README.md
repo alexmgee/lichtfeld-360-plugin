@@ -91,7 +91,7 @@ Then restart LichtFeld Studio.
 3. Choose an **Output Path** and **Output Mode**. For the **Fisheye** mode, a **Training output** selector (Native / Pinhole / Both) chooses which dataset(s) to write from the native reconstruction.
 4. Configure each pipeline stage using the collapsible sections:
 
-   **Frame Extraction** — `FPS` sets the extraction rate. `Sharpness` controls frame selection quality (None / Basic / Better / Best). The blur metric can be switched between Tenengrad and Laplacian.
+   **Frame Extraction** — `FPS` sets the extraction rate. `Sharpness` controls frame selection quality (None / Basic / Better / Best). The blur metric can be switched between Tenengrad and Laplacian. Check **Extract all frames** to skip scoring entirely and save every frame, which suits timelapses and image sequences where each frame matters; the FPS, Sharpness, and Blur Metric controls grey out and the estimate shows the true frame total.
 
    **Masking** — Enable masking and enter prompt keywords (e.g. `person, tripod`). SAM 3 detects and masks matching objects in every frame.
 

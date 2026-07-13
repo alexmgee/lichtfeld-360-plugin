@@ -343,6 +343,7 @@ class Plugin360Panel(lf.ui.Panel):
         self._extract_fps: float = 1.0
         self._extract_sharpness_idx: int = 1  # default: Basic
         self._blur_metric_idx: int = 0        # default: Tenengrad
+        self._extract_all_frames: bool = False
 
         # Masking
         self._setup_state: MaskingSetupState = MaskingSetupState()
@@ -492,6 +493,8 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind("extract_fps_str", lambda: f"{self._extract_fps:.1f}", self._set_extract_fps)
         model.bind("extract_sharpness_idx", lambda: str(self._extract_sharpness_idx), self._set_extract_sharpness)
         model.bind("blur_metric_idx", lambda: str(self._blur_metric_idx), self._set_blur_metric)
+        model.bind("extract_all_frames", lambda: self._extract_all_frames, self._set_extract_all_frames)
+        model.bind_func("extract_controls_disabled", lambda: self._extract_all_frames)
         model.bind_func("est_frames_text", self._get_est_frames_text)
         model.bind_func("gpu_indicator_text", self._get_gpu_indicator_text)
 
@@ -795,6 +798,7 @@ class Plugin360Panel(lf.ui.Panel):
             self._extract_fps,
             self._extract_sharpness_idx,
             self._blur_metric_idx,
+            self._extract_all_frames,
             self._masking_method_idx,
             self._masking_available,
             self._enable_masking,
@@ -1120,6 +1124,11 @@ class Plugin360Panel(lf.ui.Panel):
     def _get_est_frames_text(self) -> str:
         if not self._video_info:
             return "Select a video source"
+        if self._extract_all_frames:
+            n = self._video_info.frame_count
+            if not n:
+                n = round(self._video_info.fps * self._video_info.duration_seconds)
+            return f"All frames: ~{n}"
         interval = 1.0 / max(0.1, self._extract_fps)
         base = VideoAnalyzer.estimate_frame_count(self._video_info, interval)
         preset = EXTRACT_SHARPNESS_PRESETS[self._extract_sharpness_idx]
@@ -1631,6 +1640,12 @@ class Plugin360Panel(lf.ui.Panel):
                 self._blur_metric_idx = v
         except (ValueError, TypeError):
             pass
+
+    def _set_extract_all_frames(self, val):
+        if isinstance(val, bool):
+            self._extract_all_frames = val
+        else:
+            self._extract_all_frames = str(val).lower() in ("true", "1", "yes", "on")
 
     def _set_jpeg_quality(self, val):
         try:
@@ -2903,6 +2918,7 @@ class Plugin360Panel(lf.ui.Panel):
             blur_metric=blur_metric,
             scene_threshold=sharpness_preset["scene_threshold"],
             blur_scale_width=sharpness_preset["scale_width"],
+            all_frames=self._extract_all_frames,
             quality=self._jpeg_quality,
             enable_masking=self._enable_masking and self._masking_available,
             masking_method=masking_method,

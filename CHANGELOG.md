@@ -5,6 +5,12 @@ All notable changes to the 360 Plugin are documented here.
 ## [Unreleased]
 
 ### Added
+- "Extract all frames" toggle in the Frame Extraction section. When
+  enabled, every frame of the video is decoded and saved with no sharpness
+  scoring and no interval sampling, for timelapses and other sources where
+  each frame matters. Applies to both single 360 videos and dual-fisheye
+  inputs. The FPS, Sharpness, and Blur Metric controls grey out and the
+  estimate shows the true frame total from the video metadata. ([#3])
 - One-click opt-in GPU-accelerated frame extraction (NVDEC decode + CUDA
   blur scoring) for machines with an NVIDIA GPU. The plugin vendors the
   required runtime DLLs, so no system CUDA installation is needed. The CPU

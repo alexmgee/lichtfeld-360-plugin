@@ -204,29 +204,33 @@
           </div>
         </div>
       </div>
-      <div class="setting-row setting-row--aligned">
+      <div class="setting-row setting-row--aligned" data-class-row-disabled="extract_controls_disabled">
         <span class="setting-row__label-col">FPS</span>
         <div class="setting-row__control-col setting-row__control-col--slider">
-          <input type="range" class="setting-slider" data-value="extract_fps_str" min="0.1" max="5.0" step="0.1" />
+          <input type="range" class="setting-slider" data-value="extract_fps_str" min="0.1" max="5.0" step="0.1" data-attr-disabled="extract_controls_disabled" />
           <span class="slider-value">{{extract_fps_str}}</span>
         </div>
       </div>
       <div class="setting-row">
         <span class="prop-label"></span>
         <span class="status-text status-muted">{{est_frames_text}}</span>
+        <div class="loop-closure-group">
+          <input type="checkbox" data-checked="extract_all_frames" id="extract_all_frames_cb"/>
+          <label class="checkbox-label" for="extract_all_frames_cb">Extract all frames</label>
+        </div>
       </div>
-      <div class="setting-row setting-row--dropdown setting-row--dropdown-high">
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-high" data-class-row-disabled="extract_controls_disabled">
         <span class="prop-label">Sharpness</span>
-        <select data-value="extract_sharpness_idx">
+        <select data-value="extract_sharpness_idx" data-attr-disabled="extract_controls_disabled">
           <option value="0">None</option>
           <option value="1">Basic</option>
           <option value="2">Better</option>
           <option value="3">Best</option>
         </select>
       </div>
-      <div class="setting-row setting-row--dropdown">
+      <div class="setting-row setting-row--dropdown" data-class-row-disabled="extract_controls_disabled">
         <span class="prop-label">Blur Metric</span>
-        <select data-value="blur_metric_idx">
+        <select data-value="blur_metric_idx" data-attr-disabled="extract_controls_disabled">
           <option value="0">Tenengrad</option>
           <option value="1">Laplacian</option>
         </select>

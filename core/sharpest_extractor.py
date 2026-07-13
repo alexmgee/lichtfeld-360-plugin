@@ -142,6 +142,7 @@ class SharpestConfig:
     output_format: str = "jpg"       # jpg or png
     start_sec: Optional[float] = None
     end_sec: Optional[float] = None
+    all_frames: bool = False         # extract every frame, no scoring, no GPU
 
 
 @dataclass
@@ -646,6 +647,14 @@ class SharpestExtractor:
 
         out.mkdir(parents=True, exist_ok=True)
 
+        if config.all_frames:
+            return self._extract_all_frames(
+                str(video), str(out), config,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                prefix_source=prefix_source,
+            )
+
         eq = config.extraction_sharpness
 
         # None: extract at fixed intervals, no analysis
@@ -749,6 +758,85 @@ class SharpestExtractor:
                 frames_extracted=len(frame_paths),
                 output_dir=str(out),
                 frame_paths=frame_paths,
+            )
+        finally:
+            cap.release()
+
+    # -- all-frames extraction (lossless) ------------------------------------
+
+    def _extract_all_frames(
+        self,
+        video_path: str,
+        output_dir: str,
+        config: SharpestConfig,
+        progress_callback: Optional[Callable] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        prefix_source: bool = True,
+    ) -> SharpestResult:
+        """Extract every frame sequentially, no scoring, no GPU.
+
+        Keeps every decoded frame in source order -- the point is to never
+        drop a frame, so this always decodes CPU-sequentially rather than
+        seeking by timestamp.
+        """
+        import cv2
+
+        out = Path(output_dir)
+        video = Path(video_path)
+        stem = video.stem + "_" if prefix_source else ""
+        ext = config.output_format
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return SharpestResult(success=False, error=f"Cannot open {video_path}")
+
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+            frame_paths: List[str] = []
+            i = 0
+            while True:
+                if cancel_check and cancel_check():
+                    return SharpestResult(success=False, error="Cancelled")
+
+                ok, frame = cap.read()
+                if not ok:
+                    break
+
+                out_name = f"{stem}{i + 1:05d}.{ext}"
+                out_path = out / out_name
+                if ext in ("jpg", "jpeg"):
+                    cv2.imwrite(str(out_path), frame,
+                                [cv2.IMWRITE_JPEG_QUALITY, config.quality])
+                else:
+                    cv2.imwrite(str(out_path), frame)
+                frame_paths.append(str(out_path))
+
+                i += 1
+                if progress_callback:
+                    progress_callback(i, total, f"Extracting {i}/{total}")
+
+            timestamps = [idx / fps for idx in range(len(frame_paths))]
+
+            self._write_manifest(
+                out,
+                frame_paths,
+                video,
+                config,
+                timestamps,
+                fps,
+                0.0,
+                extraction_mode="all_frames",
+            )
+
+            return SharpestResult(
+                success=True,
+                total_frames_analyzed=0,
+                frames_extracted=len(frame_paths),
+                output_dir=str(out),
+                frame_paths=frame_paths,
+                gpu_accelerated=False,
             )
         finally:
             cap.release()

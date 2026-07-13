@@ -105,6 +105,12 @@ body {
     z-index: 1;
 }
 
+/* ── Greyed-out state for sibling controls when "Extract all frames" is on ── */
+
+.setting-row.row-disabled {
+    opacity: 0.4;
+}
+
 /* ── Scrub field layout (mirrors LFS components.rcss) ──── */
 
 .scrub-field {

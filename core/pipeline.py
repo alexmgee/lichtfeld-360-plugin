@@ -67,6 +67,7 @@ class PipelineConfig:
     quality: int = 95
     start_sec: Optional[float] = None
     end_sec: Optional[float] = None
+    all_frames: bool = False               # extract every frame (no scoring/GPU)
 
     # Masking
     enable_masking: bool = False
@@ -481,6 +482,7 @@ class PipelineJob:
             quality=cfg.quality,
             start_sec=cfg.start_sec,
             end_sec=cfg.end_sec,
+            all_frames=cfg.all_frames,
         )
 
         def _extract_progress(cur: int, total: int, msg: str) -> None:
@@ -984,6 +986,7 @@ class PipelineJob:
             quality=cfg.quality,
             start_sec=cfg.start_sec,
             end_sec=cfg.end_sec,
+            all_frames=cfg.all_frames,
         )
 
         def _extract_progress(cur: int, total: int, msg: str) -> None:
@@ -1298,6 +1301,7 @@ class PipelineJob:
             scene_threshold=cfg.scene_threshold,
             start_sec=cfg.start_sec,
             end_sec=cfg.end_sec,
+            all_frames=cfg.all_frames,
         )
 
         def _extract_progress(cur: int, total: int, msg: str) -> None:

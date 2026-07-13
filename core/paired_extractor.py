@@ -86,6 +86,7 @@ class PairedExtractorConfig:
     end_sec: Optional[float] = None
     scene_threshold: float = 0.3
     scale_width: int = 1920
+    all_frames: bool = False             # extract every frame, no scoring, no GPU
 
 
 @dataclass
@@ -1151,6 +1152,118 @@ class PairedExtractor:
             gpu_accelerated=False,
         )
 
+    # -- all-frames extraction (lossless) ------------------------------------
+
+    def _extract_all_frames_pair(
+        self,
+        front_cap,
+        back_cap,
+        out_root: Path,
+        front_out: Path,
+        back_out: Path,
+        front_video: str,
+        back_video: str,
+        start_frame: int,
+        end_frame: int,
+        shared_fps: float,
+        config: PairedExtractorConfig,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        _log: Optional[Callable[[str], None]] = None,
+    ) -> PairedExtractorResult:
+        """Sequentially decode every frame pair, no scoring, no GPU.
+
+        Keeps every decoded pair in source order -- the point is to never
+        drop a frame, so this always decodes CPU-sequentially.
+        """
+        if _log is None:
+            _log = lambda _msg: None
+
+        total_to_write = max(1, end_frame - start_frame)
+        front_paths: List[str] = []
+        back_paths: List[str] = []
+        selected_times: List[float] = []
+        source_front_frames: List[int] = []
+        source_back_frames: List[int] = []
+
+        written = 0
+        for frame_idx in range(start_frame, end_frame):
+            if cancel_check and cancel_check():
+                raise RuntimeError("Cancelled")
+
+            ok_front, front_frame = front_cap.read()
+            ok_back, back_frame = back_cap.read()
+            if not ok_front or not ok_back:
+                break
+
+            written += 1
+            frame_id = f"{written:06d}"
+            front_path = front_out / f"{frame_id}.{config.output_format.lower()}"
+            back_path = back_out / f"{frame_id}.{config.output_format.lower()}"
+            self._write_pair_image(front_path, front_frame, config)
+            self._write_pair_image(back_path, back_frame, config)
+            front_paths.append(str(front_path))
+            back_paths.append(str(back_path))
+            selected_times.append(round(frame_idx / shared_fps, 3))
+            source_front_frames.append(frame_idx)
+            source_back_frames.append(frame_idx)
+
+            if progress_callback and (written == 1 or written == total_to_write or written % 30 == 0):
+                progress_callback(
+                    written, total_to_write,
+                    f"extracting {written}/{total_to_write} pairs (all frames)",
+                )
+
+        _log(f"  All-frames: {written} pairs extracted")
+
+        if written == 0:
+            return PairedExtractorResult(
+                success=False, output_dir=str(out_root),
+                error="No pairs extracted (all-frames path)",
+            )
+
+        manifest = {
+            "schema_version": 1,
+            "dataset_type": "paired_split_frames",
+            "front_video": str(Path(front_video).resolve()),
+            "back_video": str(Path(back_video).resolve()),
+            "mode": "all_frames",
+            "interval_sec": config.interval_sec,
+            "fps": shared_fps,
+            "selection_method": "all_frames_pair",
+            "pairs": [],
+        }
+        for index, (fp, bp, t, sf, sb) in enumerate(
+            zip(front_paths, back_paths, selected_times,
+                source_front_frames, source_back_frames),
+            start=1,
+        ):
+            manifest["pairs"].append({
+                "pair_index": index,
+                "frame_id": f"{index:06d}",
+                "front_image": Path(fp).relative_to(out_root).as_posix(),
+                "back_image": Path(bp).relative_to(out_root).as_posix(),
+                "time_sec": t,
+                "source_front_frame": sf,
+                "source_back_frame": sb,
+            })
+
+        manifest_path = out_root / "paired_extraction_manifest.json"
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8")
+
+        return PairedExtractorResult(
+            success=True,
+            pair_count=written,
+            output_dir=str(out_root),
+            front_paths=front_paths,
+            back_paths=back_paths,
+            selected_times=selected_times,
+            source_front_frames=source_front_frames,
+            source_back_frames=source_back_frames,
+            gpu_accelerated=False,
+        )
+
     def extract(
         self,
         front_video: str,
@@ -1217,6 +1330,19 @@ class PairedExtractor:
 
             window_size = max(1, int(round(config.interval_sec * shared_fps)))
             range_start_sec = max(0.0, float(config.start_sec or 0.0))
+
+            # All-frames mode: sequential CPU decode, no scoring, no GPU.
+            if config.all_frames:
+                front_cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+                back_cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+                return self._extract_all_frames_pair(
+                    front_cap, back_cap, out_root, front_out, back_out,
+                    front_video, back_video,
+                    start_frame, end_frame, shared_fps, config,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                    _log=_log,
+                )
 
             # Release CPU captures before GPU/FFmpeg path
             front_cap.release()
