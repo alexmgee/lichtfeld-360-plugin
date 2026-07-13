@@ -128,12 +128,9 @@
       </div>
       <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
         <span class="prop-label">Output Mode</span>
-        <select data-value="output_mode_idx">
-          <option value="0">ERP</option>
-          <option value="1" selected>ERP (Pinhole)</option>
-          <option value="2">ERP (Scaffold)</option>
-          <option value="3">Fisheye</option>
-          <option value="4">Fisheye (Pinhole)</option>
+        <select data-value="processing_idx">
+          <option value="0">Native</option>
+          <option value="1" selected>Pinhole</option>
         </select>
       </div>
       <div class="setting-row" data-if="show_output_mode_note">
@@ -147,15 +144,6 @@
           <option value="1">Pinhole</option>
           <option value="2">Both</option>
         </select>
-      </div>
-      <div class="setting-row" data-if="show_keep_pinhole_scaffolding">
-        <span class="prop-label"></span>
-        <span class="status-text status-muted">
-          <div class="loop-closure-group">
-            <input type="checkbox" data-checked="keep_pinhole_scaffolding" id="keep_scaffold_cb"/>
-            <label class="checkbox-label" for="keep_scaffold_cb">Keep pinhole scaffolding</label>
-          </div>
-        </span>
       </div>
       <div class="setting-row" data-if="show_keep_native_sparse">
         <span class="prop-label"></span>
@@ -398,10 +386,6 @@
           <option value="3">High (20 views)</option>
           <option value="4">Ultra (24 views)</option>
         </select>
-      </div>
-      <div class="setting-row" data-if="show_erp_scaffold_preset">
-        <span class="prop-label">Preset</span>
-        <span class="status-text status-muted">{{erp_scaffold_preset_text}}</span>
       </div>
       <div class="setting-row" data-if="show_fisheye_preset">
         <span class="prop-label">Preset</span>

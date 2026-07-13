@@ -119,7 +119,8 @@ class PipelineConfig:
     sift_max_features: Optional[int] = None
     sift_max_image_size: Optional[int] = None
 
-    # Output mode: "pinhole" = COLMAP dataset, "erp_scaffold" = transforms.json,
+    # Output mode: "pinhole" = COLMAP pinhole dataset, "erp_native" = native
+    #              EQUIRECTANGULAR transforms.json,
     #              "fisheye" = OPENCV_FISHEYE COLMAP dataset (phase 1) /
     #              fisheye-native transforms.json (phase 2+)
     output_mode: str = "pinhole"
@@ -143,9 +144,8 @@ class PipelineConfig:
     front_video_path: str = ""
     back_video_path: str = ""
     keep_streams: bool = False  # retain demuxed front.mp4/back.mp4 alongside output
-    keep_pinhole_scaffolding: bool = False  # retain pinhole crops after ERP export
-    keep_native_sparse: bool = True  # retain COLMAP sparse/ + database.db after native ERP export (native sparse is a valid EQUIRECTANGULAR dataset, unlike scaffold's)
-    keep_extracted_data: bool = False  # retain raw frames, pinhole crops, masks, and scaffold data
+    keep_native_sparse: bool = True  # retain COLMAP sparse/ + database.db after native ERP export (native sparse is a valid EQUIRECTANGULAR dataset)
+    keep_extracted_data: bool = False  # retain raw frames, pinhole crops, and masks
 
     # Fisheye masking
     fisheye_circle_margin: float = 6.0  # Circle mask margin in percent
@@ -529,17 +529,6 @@ class PipelineJob:
         _assert_all_frames_complete(
             cfg.all_frames, cfg.expected_frame_count, num_source_frames)
 
-        # Read ERP frame dimensions from the first extracted frame.
-        # Needed by ERP scaffold export for equirectangular intrinsics.
-        erp_width = 0
-        erp_height = 0
-        if extract_result.frame_paths:
-            import cv2
-            _first = cv2.imread(extract_result.frame_paths[0])
-            if _first is not None:
-                erp_height, erp_width = _first.shape[:2]
-                del _first
-
         if self._check_cancel():
             raise RuntimeError("Cancelled")
 
@@ -889,57 +878,9 @@ class PipelineJob:
         # ===================================================================
         # Stage 6: Write Output (85-95%)
         # ===================================================================
-        if cfg.output_mode == "erp_scaffold":
-            from .scaffold import (
-                export_erp_scaffold, cleanup_pinhole_crops, cleanup_colmap_artifacts,
-            )
-
-            self._update("output", 85.0, "Cleaning up pinhole scaffold...")
-
-            if erp_width == 0 or erp_height == 0:
-                raise RuntimeError(
-                    "ERP frame dimensions could not be determined — "
-                    "cannot export ERP scaffold"
-                )
-
-            # 1. Remove pinhole images/ and masks/ so the ERP export
-            #    can rename extracted/frames/ → images/.
-            cleanup_pinhole_crops(
-                out, keep=cfg.keep_pinhole_scaffolding, log_fn=logger.info,
-            )
-
-            self._update("output", 88.0, "Extracting rig poses...")
-
-            # 2. Read COLMAP reconstruction, move ERP frames into
-            #    images/, write transforms.json and pointcloud.ply.
-            erp_masks = (extracted_dir / "masks") if cfg.enable_masking else None
-
-            # The reference sensor's pitch determines the rig orientation
-            # offset from the ERP image center.
-            ref_pitch = view_config.rings[0].pitch if view_config.rings else 0.0
-
-            transforms_path = export_erp_scaffold(
-                colmap_sparse_dir=out / "sparse",
-                erp_frames_dir=frames_dir,
-                erp_masks_dir=erp_masks,
-                output_dir=out,
-                erp_width=erp_width,
-                erp_height=erp_height,
-                ref_pitch_deg=ref_pitch,
-                log_fn=logger.info,
-            )
-
-            # 3. Delete sparse/, database.db, etc. — keeping them
-            #    triggers LFS pinhole auto-detection.
-            cleanup_colmap_artifacts(out, log_fn=logger.info)
-
-            self._update("output", 95.0, "ERP scaffold export complete")
-            dataset_path = str(transforms_path)
-
-        else:
-            # Pinhole mode: COLMAP dataset already written by ColmapRunner
-            self._update("output", 85.0, "COLMAP dataset ready")
-            dataset_path = colmap_result.reconstruction_path
+        # Pinhole mode: COLMAP dataset already written by ColmapRunner
+        self._update("output", 85.0, "COLMAP dataset ready")
+        dataset_path = colmap_result.reconstruction_path
 
         # ===================================================================
         # Stage 7: Done (95-100%)
@@ -983,7 +924,7 @@ class PipelineJob:
         """ERP-native pipeline: extract → optional ERP masks → flat stage → COLMAP."""
         import shutil
 
-        from .scaffold import cleanup_colmap_artifacts
+        from .colmap_cleanup import cleanup_colmap_artifacts
         from .transforms_writer import write_erp_native_transforms
 
         out = Path(cfg.output_dir)

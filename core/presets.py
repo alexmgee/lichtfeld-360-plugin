@@ -190,17 +190,7 @@ class ViewConfig:
 # Built-in presets
 # ---------------------------------------------------------------------------
 
-ERP_SCAFFOLD_PRESET = "erp_scaffold_8"
-
 VIEW_PRESETS: dict[str, ViewConfig] = {
-    ERP_SCAFFOLD_PRESET: ViewConfig(
-        rings=[
-            Ring(pitch=-35.0, count=4, fov=90.0, start_yaw=0.0),
-            Ring(pitch=35.0, count=4, fov=90.0, start_yaw=45.0),
-        ],
-        include_zenith=False,
-        include_nadir=False,
-    ),
     "cubemap": ViewConfig(
         rings=[
             Ring(pitch=0, count=4, fov=90),
@@ -315,12 +305,9 @@ DEFAULT_PRESET = "medium"
 def resolve_view_preset_name(preset_name: str, output_mode: str = "pinhole") -> str:
     """Resolve the effective preset name for the current output mode.
 
-    ERP scaffold export always uses the dedicated 8-view staggered layout.
     Pinhole output keeps the user's selected preset, falling back to the
     default if an unknown preset name is provided.
     """
-    if output_mode == "erp_scaffold":
-        return ERP_SCAFFOLD_PRESET
     if preset_name in VIEW_PRESETS:
         return preset_name
     return DEFAULT_PRESET

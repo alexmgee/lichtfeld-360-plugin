@@ -25,6 +25,19 @@ All notable changes to the 360 Plugin are documented here.
   re-enable. Ships as beta until certified on machines without CUDA
   installed.
 
+### Changed
+- The Output Mode dropdown is now just Native or Pinhole. The projection
+  (equirectangular or fisheye) is detected from your input, so the same two
+  choices apply to both, in place of the previous five-entry list. Switching
+  Native or Pinhole now also applies the matching COLMAP matcher and mapper
+  corrections consistently, including on auto-detected fisheye input. ([#3])
+
+### Removed
+- The "ERP (Scaffold)" output mode and its "Keep pinhole scaffolding"
+  checkbox. COLMAP aligns equirectangular frames directly now, so the pinhole
+  scaffold workaround is no longer needed. The ERP mode (Native
+  equirectangular) produces the equivalent transforms.json. ([#3])
+
 ## [0.2.0] - 2026-07-10
 
 ### Fixed

@@ -7,9 +7,8 @@ LichtFeld's transforms.json format (OpenGL, camera-to-world with 180 deg Y
 pre-compensation).
 
 Two writers live here:
-  - write_transforms_json: shared-intrinsics writer (used by the ERP path
-    via scaffold.py's own inline writer; also kept for any future callers
-    that need top-level fl_x/fl_y/cx/cy).
+  - write_transforms_json: shared-intrinsics writer for callers that need
+    top-level fl_x/fl_y/cx/cy.
   - write_fisheye_transforms: per-frame intrinsics + applied_transform +
     pointcloud, for the dual fisheye native-output path. Each lens has
     different OPENCV_FISHEYE intrinsics so each frame entry carries its
@@ -27,9 +26,8 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Coordinate conversion shared with scaffold.py — kept duplicated here
-# rather than imported to avoid coupling fisheye output to the ERP module.
-# If you change one, change the other.
+# Coordinate conversion kept self-contained here (no cross-module import)
+# so fisheye output has no dependency on the ERP output path.
 _M = np.diag([1.0, -1.0, -1.0, 1.0])         # OpenCV → OpenGL world flip
 _Ry180 = np.diag([-1.0, 1.0, -1.0, 1.0])     # cancels LFS loader 180° Y
 _APPLIED_TRANSFORM = [
@@ -42,7 +40,7 @@ _APPLIED_TRANSFORM = [
 def _c2w_opencv_to_lfs(c2w: np.ndarray) -> np.ndarray:
     """Convert an OpenCV c2w 4x4 to LFS transforms.json convention.
 
-    Steps (mirrors scaffold._c2w_opencv_to_lfs):
+    Steps:
       1. Left-multiply by diag(1,-1,-1,1) — world OpenCV → OpenGL
       2. Negate columns 1,2 — camera local axes OpenCV → OpenGL
       3. Left-multiply Ry(180°) — pre-compensate LFS loader Y rotation
@@ -166,9 +164,8 @@ def write_transforms_json(
 def _write_sparse_pointcloud(recon, ply_path: Path) -> int:
     """Write the COLMAP sparse points as a coloured PLY in OpenGL world frame.
 
-    Mirrors scaffold._write_pointcloud — duplicated to avoid importing from
-    scaffold (which is ERP-specific in name). World-frame points get the
-    same diag(1,-1,-1) flip as the c2w matrices.
+    Kept self-contained here (no cross-module import). World-frame points
+    get the same diag(1,-1,-1) flip as the c2w matrices.
     """
     point_ids = sorted(recon.point3D_ids())
     ply_path.parent.mkdir(parents=True, exist_ok=True)
@@ -223,10 +220,9 @@ def write_fisheye_transforms(
         - <output_dir>/<transforms_filename> with applied_transform + frames
         - <output_dir>/<ply_filename> with the sparse points
 
-    The per-frame intrinsics pattern follows scaffold.py's existing approach
-    — each frame entry carries its own w/h/fl_x/fl_y/cx/cy. Front and back
-    lenses have different calibrations, so this is the right shape rather
-    than top-level intrinsics.
+    The per-frame intrinsics pattern gives each frame entry its own
+    w/h/fl_x/fl_y/cx/cy. Front and back lenses have different calibrations,
+    so this is the right shape rather than top-level intrinsics.
 
     Args:
         colmap_sparse_dir: Directory containing the COLMAP sparse model
@@ -403,7 +399,7 @@ def write_erp_native_transforms(
     """Write a native ERP transforms.json from an EQUIRECTANGULAR COLMAP model.
 
     Per-image poses use ``image.cam_from_world()`` converted via
-    ``_c2w_opencv_to_lfs`` — no scaffold pitch correction or auto-orient.
+    ``_c2w_opencv_to_lfs``. No pitch correction or auto-orient.
     """
     import pycolmap
 

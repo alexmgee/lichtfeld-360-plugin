@@ -33,17 +33,15 @@ The pipeline runs in six stages, each configurable from the plugin panel:
 
 ## Output Modes
 
+Output mode is two independent choices: the **projection** (equirectangular or fisheye, detected from your input) and the **Output Mode** dropdown (**Native** or **Pinhole**). The four combinations are the modes below.
+
 ### ERP
 
-Native equirectangular reconstruction using COLMAP's `EQUIRECTANGULAR` camera model. Feeds ERP frames directly without pinhole scaffolding — faster than ERP (Scaffold), but generally lower accuracy.
+Native equirectangular reconstruction using COLMAP's `EQUIRECTANGULAR` camera model. Feeds ERP frames straight to COLMAP with no pinhole reframing step.
 
 ### ERP (Pinhole)
 
 Standard COLMAP pinhole dataset. Each source frame produces multiple perspective crops (6–24 depending on preset). The output is a conventional COLMAP sparse reconstruction with per-view images, masks, and a rig config.
-
-### ERP (Scaffold)
-
-Designed for training with 3DGUT, which can consume equirectangular images directly. The plugin uses the pinhole crops only as temporary scaffolding: COLMAP aligns them to recover the camera trajectory, then the plugin extracts the rig-origin pose for each station, applies pitch correction and auto-orientation (aligning camera up to +Y), converts coordinates from COLMAP's OpenCV convention to LichtFeld's OpenGL convention, and writes a transforms.json referencing the original full-resolution ERP frames with `"camera_model": "EQUIRECTANGULAR"`. The scaffolding is deleted after export by default — a "Keep pinhole scaffolding" checkbox retains it for inspection.
 
 ### Fisheye
 
@@ -187,10 +185,6 @@ The user-selectable preset controls the virtual camera rig. All presets produce 
 | High | 20 | Golden-angle spiral from zenith to nadir |
 | Ultra | 24 | Golden-angle spiral from zenith to nadir |
 
-### ERP Mode
-
-Uses a dedicated internal 8-view staggered scaffold preset (4 views at -35° pitch, 4 at +35°, upper ring offset by 45°). This layout is optimized for pose recovery rather than view coverage — the pinhole crops are temporary scaffolding that gets deleted after COLMAP extracts the rig poses.
-
 ### Fisheye (Pinhole) Mode
 
 Each dual fisheye lens is reframed into 8 pinhole crops (16 views total per source frame), using the fisheye-specific calibration for each camera family. The front and back lens rigs are combined into a single COLMAP rig constraint with a baseline offset between the two optical centers.
@@ -230,8 +224,6 @@ output_dir/
 ├── pointcloud.ply       auto-oriented sparse point cloud
 └── transforms.json      camera_model: EQUIRECTANGULAR
 ```
-
-All pinhole scaffolding is removed after pose extraction. Enable "Keep pinhole scaffolding" to retain the intermediate crops as `pinhole_images/` and `pinhole_masks/`.
 
 ### Fisheye
 
