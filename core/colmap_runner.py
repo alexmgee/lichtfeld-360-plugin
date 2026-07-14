@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
+from .pycolmap_guard import verify_pycolmap_provenance
+
 logger = logging.getLogger(__name__)
 
 # Patterns for parsing COLMAP's stderr log lines
@@ -560,6 +562,13 @@ class ColmapRunner:
                 success=False,
                 elapsed_sec=time.monotonic() - t0,
                 error="pycolmap is not installed. Install it with: pip install pycolmap",
+            )
+        guard_error = verify_pycolmap_provenance(pycolmap)
+        if guard_error:
+            return ColmapResult(
+                success=False,
+                elapsed_sec=time.monotonic() - t0,
+                error=guard_error,
             )
         try:
             return self._run_pipeline(pycolmap, t0)
