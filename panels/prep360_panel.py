@@ -253,8 +253,14 @@ FISHEYE_TRAINING_OUTPUT_LABELS = [
     "Native (fisheye)", "Pinhole", "Both",
 ]
 
+# Image-folder training output (PipelineConfig.training_output). Serves BOTH
+# projections (ERP + fisheye), so the labels stay projection-neutral -- unlike
+# the video-only fisheye control above, which says "Native (fisheye)".
+IMAGE_TRAINING_OUTPUTS = ["native", "pinhole", "both"]
+IMAGE_TRAINING_OUTPUT_LABELS = ["Native", "Pinhole", "Both"]
+
 # Source modes for dual fisheye input (fisheye output mode only)
-SOURCE_MODES = ["container", "split", "resume"]
+SOURCE_MODES = ["container", "split", "image_folder"]
 SOURCE_MODE_LABELS = ["Single file", "Two files (split)"]
 
 # Camera families for split mode (auto-detected for container; manual for split)
@@ -415,7 +421,7 @@ class Plugin360Panel(lf.ui.Panel):
         # Dual fisheye state (only relevant when output_mode == "fisheye")
         # Auto-detected camera family from .osv/.insv extension when in container
         # mode; user-selected via dropdown in split mode.
-        self._source_mode_idx: int = 0  # 0=container, 1=split
+        self._source_mode_idx: int = 0  # 0=container, 1=split, 2=image_folder
         self._camera_family_idx: int = 0  # 0=dji_osmo360, 1=insta360
         self._camera_family_detected: Optional[str] = None  # set by detect_input_type()
         self._front_video_path: str = ""
@@ -425,7 +431,18 @@ class Plugin360Panel(lf.ui.Panel):
         self._keep_native_sparse: bool = True  # native sparse is valid; retain by default (checkbox lets user opt out)
         self._keep_extracted_data: bool = False
         self._fisheye_training_output_idx: int = 0  # native by default
+        self._training_output_idx: int = 0  # image-folder: native by default
         self._fisheye_circle_margin: float = 6.0
+
+        # Image-folder input state (source_mode_idx == 2). Projection reuses
+        # the canonical self._projection (AR-2 — no separate projection field).
+        self._image_dir: str = ""        # ERP: folder of equirectangular frames
+        self._fisheye_dir: str = ""      # one-folder fisheye (front_/back_ files)
+        self._front_dir: str = ""        # two-folder fisheye: front lens frames
+        self._back_dir: str = ""         # two-folder fisheye: back lens frames
+        self._fisheye_folder_mode: str = "one"  # "one" | "two"
+        self._mask_source: str = "generate"     # "generate" | "preexisting" | "none"
+        self._preexisting_mask_dir: str = ""
 
         # COLMAP 4.1 controls
         self._feature_type_idx: int = 0   # SIFT
@@ -520,7 +537,11 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("hf_verify_text", lambda: self._hf_verify_text)
         model.bind_func("masking_available", lambda: self._masking_available)
         # SAM 3 conditional states
-        model.bind_func("show_masking_sam3_setup", lambda: not self._setup_state.sam3_ready)
+        model.bind_func(
+            "show_masking_sam3_setup",
+            lambda: not self._setup_state.sam3_ready
+            and not (self._source_mode_idx == 2 and self._mask_source != "generate"),
+        )
         model.bind_func("show_masking_sam3_ready", lambda: self._setup_state.sam3_ready)
         model.bind_func("sam3_intro_text", self._get_sam3_intro_text)
         model.bind_func("show_sam3_support_text", self._show_sam3_support_text)
@@ -620,9 +641,25 @@ class Plugin360Panel(lf.ui.Panel):
             lambda: str(self._fisheye_training_output_idx),
             self._set_fisheye_training_output,
         )
+        model.bind(
+            "training_output_idx",
+            lambda: str(self._training_output_idx),
+            self._set_training_output,
+        )
         model.bind_func(
+            # Image-folder Native (BOTH projections) gains native|pinhole|both,
+            # bound to PipelineConfig.training_output.
+            "show_image_training_output",
+            lambda: (self._source_mode_idx == 2
+                     and self._processing_idx == NATIVE_PROCESSING_IDX),
+        )
+        model.bind_func(
+            # Video fisheye keeps its own field (fisheye_training_output).
+            # EXCLUDE image-folder here: otherwise an image-folder fisheye run
+            # would show two dropdowns bound to different config fields.
             "show_fisheye_training_output",
-            lambda: self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX,
+            lambda: (self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX
+                     and self._source_mode_idx != 2),
         )
         model.bind_func(
             "show_output_mode_note",
@@ -647,20 +684,19 @@ class Plugin360Panel(lf.ui.Panel):
         # active or when the user loads a .osv/.insv container.
         is_fisheye = lambda: self._output_mode_idx in _FISHEYE_MODES
         is_split = lambda: self._source_mode_idx == 1
-        is_resume = lambda: self._source_mode_idx == 2
-        is_fisheye_container = lambda: is_fisheye() and not is_split() and not is_resume()
+        is_image_folder = lambda: self._source_mode_idx == 2
+        is_fisheye_container = lambda: is_fisheye() and not is_split() and not is_image_folder()
 
         # Empty-state visibility: show two entry buttons when nothing loaded
-        # (no single video AND not in split mode AND not in resume mode).
-        empty_state = lambda: not self._video_loaded and not is_split() and not is_resume()
+        # (no single video AND not in split mode AND not in image-folder mode).
+        empty_state = lambda: not self._video_loaded and not is_split() and not is_image_folder()
         model.bind_func("show_split_entry", empty_state)
-        model.bind_func("show_resume_mode", is_resume)
-        model.bind_func("resume_status_text", self._get_resume_status_text)
+        model.bind_func("show_image_folder_mode", is_image_folder)
         # Single-file picker visible when video loaded (regular flow) or
         # when nothing loaded and not in split mode (so the "Select 360°
         # Video" half of the empty state still works).
         model.bind_func("show_split_pickers", is_split)
-        model.bind_func("show_single_picker", lambda: not is_split() and not is_resume())
+        model.bind_func("show_single_picker", lambda: not is_split() and not is_image_folder())
         model.bind_func("show_camera_family_select", is_split)
         model.bind_func("show_camera_family_detected", lambda: is_fisheye_container() and self._camera_family_detected is not None)
         model.bind_func("show_keep_streams", is_fisheye_container)
@@ -686,8 +722,57 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_event("clear_back_video", self._on_clear_back_video)
         model.bind_event("enter_split_mode", self._on_enter_split_mode)
         model.bind_event("exit_split_mode", self._on_exit_split_mode)
-        model.bind_event("enter_resume_mode", self._on_enter_resume_mode)
-        model.bind_event("exit_resume_mode", self._on_exit_resume_mode)
+        # ── Image-folder input mode (source_mode_idx == 2) ──
+        model.bind_event("enter_image_folder_mode", self._on_enter_image_folder_mode)
+        model.bind_event("exit_image_folder_mode", self._on_exit_image_folder_mode)
+        model.bind("image_projection_idx",
+                   lambda: str(0 if self._projection == "erp" else 1),
+                   self._set_image_projection)
+        # R1: Folders is an inline two-way control rather than a dropdown (the
+        # dropdown overlapped its neighbouring row). Same _fisheye_folder_mode
+        # state; the active button is driven by data-class-is-active.
+        model.bind_func("folder_mode_is_one",
+                        lambda: self._fisheye_folder_mode == "one")
+        model.bind_func("folder_mode_is_two",
+                        lambda: self._fisheye_folder_mode != "one")
+        model.bind_event("set_folder_mode_one", self._on_set_folder_mode_one)
+        model.bind_event("set_folder_mode_two", self._on_set_folder_mode_two)
+        model.bind("mask_source_idx",
+                   lambda: str(("generate", "preexisting", "none").index(self._mask_source)),
+                   self._set_mask_source)
+        model.bind_func("show_image_erp_picker",
+                        lambda: is_image_folder() and self._projection == "erp")
+        model.bind_func("show_image_fisheye_controls",
+                        lambda: is_image_folder() and self._projection == "fisheye")
+        model.bind_func("show_image_fisheye_one",
+                        lambda: is_image_folder() and self._projection == "fisheye"
+                        and self._fisheye_folder_mode == "one")
+        model.bind_func("show_image_fisheye_two",
+                        lambda: is_image_folder() and self._projection == "fisheye"
+                        and self._fisheye_folder_mode == "two")
+        # Pre-existing masks only for ERP + Pinhole (AR-N2)
+        model.bind_func("show_preexisting_mask_option",
+                        lambda: is_image_folder() and self._get_output_mode() == "pinhole")
+        model.bind_func("show_masks_generate_none",
+                        lambda: is_image_folder() and self._get_output_mode() != "pinhole")
+        model.bind_func("show_preexisting_mask_picker",
+                        lambda: is_image_folder() and self._mask_source == "preexisting")
+        model.bind_func("image_dir_text", lambda: self._image_dir or "(not set)")
+        model.bind_func("fisheye_dir_text", lambda: self._fisheye_dir or "(not set)")
+        model.bind_func("front_dir_text", lambda: self._front_dir or "(not set)")
+        model.bind_func("back_dir_text", lambda: self._back_dir or "(not set)")
+        model.bind_func("preexisting_mask_dir_text",
+                        lambda: self._preexisting_mask_dir or "(not set)")
+        model.bind_event("select_image_dir", self._on_select_image_dir)
+        model.bind_event("clear_image_dir", self._on_clear_image_dir)
+        model.bind_event("select_fisheye_dir", self._on_select_fisheye_dir)
+        model.bind_event("clear_fisheye_dir", self._on_clear_fisheye_dir)
+        model.bind_event("select_front_dir", self._on_select_front_dir)
+        model.bind_event("clear_front_dir", self._on_clear_front_dir)
+        model.bind_event("select_back_dir", self._on_select_back_dir)
+        model.bind_event("clear_back_dir", self._on_clear_back_dir)
+        model.bind_event("select_preexisting_mask_dir", self._on_select_preexisting_mask_dir)
+        model.bind_event("clear_preexisting_mask_dir", self._on_clear_preexisting_mask_dir)
         model.bind_event("toggle_sift_advanced", self._on_toggle_sift_advanced)
         model.bind_event("reset_sift_to_preset", self._on_reset_sift_to_preset)
         model.bind_func("output_mode_note", self._get_output_mode_note)
@@ -904,6 +989,17 @@ class Plugin360Panel(lf.ui.Panel):
         if 0 <= self._fisheye_training_output_idx < len(FISHEYE_TRAINING_OUTPUT_LABELS):
             return FISHEYE_TRAINING_OUTPUT_LABELS[self._fisheye_training_output_idx]
         return FISHEYE_TRAINING_OUTPUT_LABELS[0]
+
+    def _get_training_output(self) -> str:
+        """Image-folder training output (native | pinhole | both)."""
+        if 0 <= self._training_output_idx < len(IMAGE_TRAINING_OUTPUTS):
+            return IMAGE_TRAINING_OUTPUTS[self._training_output_idx]
+        return "native"
+
+    def _get_training_output_label(self) -> str:
+        if 0 <= self._training_output_idx < len(IMAGE_TRAINING_OUTPUT_LABELS):
+            return IMAGE_TRAINING_OUTPUT_LABELS[self._training_output_idx]
+        return IMAGE_TRAINING_OUTPUT_LABELS[0]
 
     def _get_current_view_config(self):
         preset_name = resolve_view_preset_name(
@@ -1205,6 +1301,34 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _get_dataset_summary(self) -> str:
         output_mode = self._get_output_mode()
+        if self._source_mode_idx == 2:
+            # Image-folder mode (AR-N4): summarise the folder selection.
+            proc = "Pinhole" if self._processing_idx == PINHOLE_PROCESSING_IDX else "Native"
+            if self._processing_idx == NATIVE_PROCESSING_IDX:
+                # Native gains the training-output choice; spell out what the
+                # run actually delivers (two datasets for "Both").
+                training = self._get_training_output()
+                if training == "both":
+                    proc = "Native + propagated Pinhole"
+                elif training == "pinhole":
+                    proc = "Propagated Pinhole"
+            if self._projection == "erp":
+                where = self._image_dir or "(no folder selected)"
+                return f"Image folder (Equirectangular) | {proc} | {where}"
+            if self._fisheye_folder_mode == "one":
+                where = self._fisheye_dir or "(no folder selected)"
+                mode = "one folder"
+            else:
+                front = self._front_dir or "(front not set)"
+                back = self._back_dir or "(back not set)"
+                where = f"{front} + {back}"
+                mode = "two folders"
+            fam = (
+                CAMERA_FAMILY_LABELS[self._camera_family_idx]
+                if 0 <= self._camera_family_idx < len(CAMERA_FAMILY_LABELS)
+                else "unknown"
+            )
+            return f"Image folder (Fisheye, {mode}) | {fam} | {proc} | {where}"
         if output_mode == "fisheye":
             family = self._camera_family_detected
             if family is None and 0 <= self._camera_family_idx < len(CAMERA_FAMILIES):
@@ -1583,7 +1707,12 @@ class Plugin360Panel(lf.ui.Panel):
 
         if result.views_per_frame > 0:
             dropped_frames = max(result.num_source_frames - result.num_registered_frames, 0)
-            lines.append(f"Frames extracted: {result.num_source_frames}")
+            # Image-folder runs read frames the user supplied; nothing is
+            # extracted from a video, so don't report them as such.
+            frames_label = (
+                "Frames read" if self._source_mode_idx == 2 else "Frames extracted"
+            )
+            lines.append(f"{frames_label}: {result.num_source_frames}")
             lines.append(f"Views per frame: {result.views_per_frame}")
             lines.append(f"Images written: {result.num_output_images}")
             lines.append(
@@ -2465,6 +2594,16 @@ class Plugin360Panel(lf.ui.Panel):
         except (ValueError, TypeError):
             pass
 
+    def _set_training_output(self, val):
+        try:
+            idx = int(val)
+            if 0 <= idx < len(IMAGE_TRAINING_OUTPUTS):
+                self._training_output_idx = idx
+                if self._handle:
+                    self._handle.dirty_all()
+        except (ValueError, TypeError):
+            pass
+
     def _get_output_mode_note(self) -> str:
         if self._output_mode_idx == ERP_NATIVE_OUTPUT_MODE_IDX:
             return (
@@ -2693,41 +2832,140 @@ class Plugin360Panel(lf.ui.Panel):
         if self._handle:
             self._handle.dirty_all()
 
-    def _on_enter_resume_mode(self, handle, event, args):
-        """Switch to resume mode — re-run COLMAP on existing output images."""
-        del handle, event, args
-        self._source_mode_idx = 2  # "resume"
-        self._error_message = ""
-        if self._handle:
-            self._handle.dirty_all()
+    # ── Image-folder input mode (source_mode_idx == 2) ──────────
 
-    def _on_exit_resume_mode(self, handle, event, args):
-        """Leave resume mode and return to normal empty state."""
+    def _on_enter_image_folder_mode(self, handle, event, args):
+        """Switch to image-folder input: the user supplies a folder of
+        already-extracted frames instead of a video (AR-N1)."""
+        del handle, event, args
+        self._source_mode_idx = 2  # "image_folder"
+        # Clear stale single-file / split state.
+        self._video_loaded = False
+        self._video_path = ""
+        self._video_info = None
+        self._video_info_text = ""
+        self._front_video_path = ""
+        self._back_video_path = ""
+        self._camera_family_detected = None
+        self._error_message = ""
+        # Default to Equirectangular; the projection toggle switches to fisheye.
+        self._projection = "erp"
+        self._apply_mode_side_effects(force_sift=True)
+
+    def _on_exit_image_folder_mode(self, handle, event, args):
+        """Leave image-folder mode and return to the empty state."""
         del handle, event, args
         self._source_mode_idx = 0  # "container"
+        self._image_dir = ""
+        self._fisheye_dir = ""
+        self._front_dir = ""
+        self._back_dir = ""
+        self._preexisting_mask_dir = ""
         if self._handle:
             self._handle.dirty_all()
 
-    def _get_resume_status_text(self) -> str:
-        """Status text for resume mode — detect existing images."""
-        if not self._output_path:
-            return "Set an output path to a previous pipeline run."
-        from pathlib import Path
-        images_dir = Path(self._output_path) / "images"
-        if not images_dir.is_dir():
-            return f"No images/ directory found in {self._output_path}"
-        # Count images (flat or subfolder)
-        flat_count = len(list(images_dir.glob("*.jpg")))
-        if flat_count > 0:
-            return f"Found {flat_count} images (flat layout). Ready to re-run COLMAP."
-        # Check subfolders
-        sub_count = 0
-        sub_dirs = [d for d in images_dir.iterdir() if d.is_dir()]
-        if sub_dirs:
-            for d in sub_dirs:
-                sub_count += len(list(d.glob("*.jpg")))
-            return f"Found {sub_count} images in {len(sub_dirs)} subfolders. Ready to re-run COLMAP."
-        return f"No .jpg images found in {images_dir}"
+    def _set_image_projection(self, val):
+        """Projection toggle. Sets the canonical self._projection (AR-2) so
+        _get_output_mode / input_type route ERP vs fisheye; resets a stale
+        pre-existing mask choice when leaving ERP+Pinhole (AR-N2)."""
+        try:
+            idx = int(val)
+        except (TypeError, ValueError):
+            return
+        self._projection = "erp" if idx == 0 else "fisheye"
+        if self._get_output_mode() != "pinhole" and self._mask_source == "preexisting":
+            self._mask_source = "generate"
+        self._apply_mode_side_effects(force_sift=True)
+
+    def _on_set_folder_mode_one(self, handle, event, args):
+        """Folders toggle: one shared folder of front_/back_ files."""
+        self._set_fisheye_folder_mode("0")
+
+    def _on_set_folder_mode_two(self, handle, event, args):
+        """Folders toggle: separate front + back folders."""
+        self._set_fisheye_folder_mode("1")
+
+    def _set_fisheye_folder_mode(self, val):
+        """One (single folder of front_/back_ files) vs Two (front + back)."""
+        try:
+            idx = int(val)
+        except (TypeError, ValueError):
+            return
+        self._fisheye_folder_mode = "one" if idx == 0 else "two"
+        if self._handle:
+            self._handle.dirty_all()
+
+    def _set_mask_source(self, val):
+        try:
+            idx = int(val)
+        except (TypeError, ValueError):
+            return
+        self._mask_source = (
+            ("generate", "preexisting", "none")[idx] if 0 <= idx < 3 else "generate"
+        )
+        if self._handle:
+            self._handle.dirty_all()
+
+    def _pick_folder_into(self, attr: str, title: str, set_output: bool):
+        """Open a folder dialog and store the result in self.<attr>."""
+        path = lf.ui.open_folder_dialog(title=title, start_dir=getattr(self, attr) or "")
+        if not path:
+            return
+        setattr(self, attr, path)
+        if set_output and not self._output_path:
+            # Default Output Path to the PARENT of the chosen frames folder:
+            # picking Folder/Images yields Folder/ -- the supported
+            # source-in-a-subfolder layout (the run writes Folder/colmap/,
+            # Folder/masks/, Folder/metadata/ beside the source). Never
+            # overwrites an Output Path the user already set.
+            self._output_path = str(Path(path).parent)
+        if self._handle:
+            self._handle.dirty_all()
+
+    def _clear_attr(self, attr: str):
+        setattr(self, attr, "")
+        if self._handle:
+            self._handle.dirty_all()
+
+    def _on_select_image_dir(self, handle, event, args):
+        del handle, event, args
+        self._pick_folder_into("_image_dir", "Select Image Folder", set_output=True)
+
+    def _on_clear_image_dir(self, handle, event, args):
+        del handle, event, args
+        self._clear_attr("_image_dir")
+
+    def _on_select_fisheye_dir(self, handle, event, args):
+        del handle, event, args
+        self._pick_folder_into("_fisheye_dir", "Select Fisheye Frames Folder", set_output=True)
+
+    def _on_clear_fisheye_dir(self, handle, event, args):
+        del handle, event, args
+        self._clear_attr("_fisheye_dir")
+
+    def _on_select_front_dir(self, handle, event, args):
+        del handle, event, args
+        self._pick_folder_into("_front_dir", "Select Front Lens Frames Folder", set_output=True)
+
+    def _on_clear_front_dir(self, handle, event, args):
+        del handle, event, args
+        self._clear_attr("_front_dir")
+
+    def _on_select_back_dir(self, handle, event, args):
+        del handle, event, args
+        self._pick_folder_into("_back_dir", "Select Back Lens Frames Folder", set_output=False)
+
+    def _on_clear_back_dir(self, handle, event, args):
+        del handle, event, args
+        self._clear_attr("_back_dir")
+
+    def _on_select_preexisting_mask_dir(self, handle, event, args):
+        del handle, event, args
+        self._pick_folder_into("_preexisting_mask_dir", "Select Pre-existing Masks Folder", set_output=False)
+
+    def _on_clear_preexisting_mask_dir(self, handle, event, args):
+        del handle, event, args
+        self._clear_attr("_preexisting_mask_dir")
 
     def _load_video(self, path: str):
         self._error_message = ""
@@ -2776,12 +3014,6 @@ class Plugin360Panel(lf.ui.Panel):
             # Apply recommended extract rate (convert interval → FPS)
             self._extract_fps = round(1.0 / max(0.1, info.recommended_interval), 1)
 
-            # Auto-set output path next to video
-            if not self._output_path:
-                video_dir = Path(path).parent
-                stem = Path(path).stem
-                self._output_path = str(video_dir / f"{stem}_LFS360")
-
         except Exception as exc:
             logger.error("Failed to analyze video: %s", exc)
             self._error_message = f"Video analysis failed: {exc}"
@@ -2816,9 +3048,6 @@ class Plugin360Panel(lf.ui.Panel):
         if not path:
             return
         self._front_video_path = path
-        # Auto-set output path next to front video if not already set
-        if not self._output_path:
-            self._output_path = str(Path(path).parent / f"{Path(path).stem}_LFS360")
         if self._handle:
             self._handle.dirty_all()
 
@@ -2868,19 +3097,61 @@ class Plugin360Panel(lf.ui.Panel):
         self._import_after = False
         self._start_pipeline()
 
+    def _validate_image_folder_selection(self):
+        """Return an error string if the image-folder selection is incomplete
+        or a source overlaps the output dir (B6); else None."""
+        from ..core.frame_source import assert_source_reads_safe
+        if self._projection == "erp":
+            dirs = {"Image folder": self._image_dir}
+        elif self._fisheye_folder_mode == "one":
+            dirs = {"Fisheye frames folder": self._fisheye_dir}
+        else:
+            dirs = {
+                "Front lens folder": self._front_dir,
+                "Back lens folder": self._back_dir,
+            }
+        for label, d in dirs.items():
+            if not d:
+                return f"{label} is not selected"
+        if self._mask_source == "preexisting":
+            if self._get_output_mode() != "pinhole":
+                return ("Pre-existing masks are only available for "
+                        "Equirectangular + Pinhole output")
+            if not self._preexisting_mask_dir:
+                return "Pre-existing masks folder is not selected"
+        # Pre-run guard: frames are read in place, so reject only a source that
+        # overlaps a folder the run writes to (colmap/, masks/, metadata/).
+        if self._output_path:
+            checks = list(dirs.values())
+            if self._mask_source == "preexisting":
+                checks.append(self._preexisting_mask_dir)
+            for d in checks:
+                try:
+                    assert_source_reads_safe(d, self._output_path)
+                except ValueError as exc:
+                    return str(exc)
+        return None
+
     def _start_pipeline(self):
         if self._is_processing:
             return
         # In Fisheye + split mode the user provides front + back files instead of
         # one container; the standard "video loaded" check doesn't apply.
-        # In resume mode, no video is needed — only the output directory.
+        # In image-folder mode, no video is needed; only the output directory.
         is_fisheye_split = (
             self._output_mode_idx in _FISHEYE_MODES
             and self._source_mode_idx == 1
         )
-        is_resume = self._source_mode_idx == 2
-        if is_resume:
-            pass  # no video required — pipeline reads existing images/
+        is_image_folder = self._source_mode_idx == 2
+        if is_image_folder:
+            # Image-folder mode (AR-5): validate the required folder(s) for the
+            # current projection / folder-mode + B6 path-safety; no video needed.
+            _img_err = self._validate_image_folder_selection()
+            if _img_err:
+                self._error_message = _img_err
+                if self._handle:
+                    self._handle.dirty_all()
+                return
         elif is_fisheye_split:
             if not self._front_video_path or not self._back_video_path:
                 self._error_message = (
@@ -2915,6 +3186,13 @@ class Plugin360Panel(lf.ui.Panel):
         masking_method = "sam3_cubemap"
         mask_backend = "sam3"
 
+        # Image-folder mask source is authoritative (M1/M2): only "generate"
+        # runs SAM 3; "preexisting"/"none" skip generation.
+        if is_image_folder:
+            enable_masking = (self._mask_source == "generate") and self._masking_available
+        else:
+            enable_masking = self._enable_masking and self._masking_available
+
         # Heavy import (cv2 / torch / pycolmap load here). Guarded so a
         # broken dependency surfaces its real error in the panel instead
         # of dying silently in the data-model event handler (#6/#8).
@@ -2943,7 +3221,7 @@ class Plugin360Panel(lf.ui.Panel):
                 self._video_info.frame_count if self._video_info else 0
             ),
             quality=self._jpeg_quality,
-            enable_masking=self._enable_masking and self._masking_available,
+            enable_masking=enable_masking,
             masking_method=masking_method,
             enable_diagnostics=self._enable_diagnostics,
             mask_prompts=prompts if prompts else ["person"],
@@ -2974,6 +3252,14 @@ class Plugin360Panel(lf.ui.Panel):
                 if output_mode == "fisheye"
                 else "native"
             ),
+            # Image-folder tracks (ERP + fisheye) read training_output; it only
+            # applies to Native processing (Pinhole output is a single dataset).
+            training_output=(
+                self._get_training_output()
+                if (self._source_mode_idx == 2
+                    and self._processing_idx == NATIVE_PROCESSING_IDX)
+                else "native"
+            ),
             # Dual fisheye fields
             input_type=("dual_fisheye" if output_mode in ("fisheye", "fisheye_pinhole") else "erp"),
             camera_family=(
@@ -2991,6 +3277,32 @@ class Plugin360Panel(lf.ui.Panel):
                 if (output_mode in ("fisheye", "fisheye_pinhole")
                     and 0 <= self._source_mode_idx < len(SOURCE_MODES))
                 else "container"
+            ),
+            # Image-folder source (AR-C0-1): the pipeline gates on these dirs
+            # being set, uniformly across projections — not on source_mode.
+            image_source_dir=(
+                self._image_dir
+                if (is_image_folder and self._projection == "erp")
+                else self._fisheye_dir
+                if (is_image_folder and self._projection == "fisheye"
+                    and self._fisheye_folder_mode == "one")
+                else ""
+            ),
+            image_front_dir=(
+                self._front_dir
+                if (is_image_folder and self._projection == "fisheye"
+                    and self._fisheye_folder_mode == "two")
+                else ""
+            ),
+            image_back_dir=(
+                self._back_dir
+                if (is_image_folder and self._projection == "fisheye"
+                    and self._fisheye_folder_mode == "two")
+                else ""
+            ),
+            mask_source=self._mask_source if is_image_folder else "generate",
+            preexisting_mask_dir=(
+                self._preexisting_mask_dir if is_image_folder else ""
             ),
             front_video_path=self._front_video_path,
             back_video_path=self._back_video_path,
@@ -3087,6 +3399,21 @@ class Plugin360Panel(lf.ui.Panel):
         "complete":    "Complete",
     }
 
+    # Image-folder runs never extract frames from a video -- they read/stage a
+    # folder -- so "Frame Extraction" would be a lie. Covers EVERY stage key the
+    # image-folder flows emit (ERP pinhole also emits reframe / overlap_masks /
+    # rig_config); any key absent falls through to the raw stage name.
+    _IMAGE_FOLDER_STAGE_LABELS = {
+        "staging":       "Step 1/5 \u2014 Reading Image Folder",
+        "masking":       "Step 2/5 \u2014 Operator Masking",
+        "reframe":       "Step 3/5 \u2014 Reframing",
+        "overlap_masks": "Step 3/5 \u2014 Overlap Masks",
+        "rig_config":    "Step 4/5 \u2014 Rig Config",
+        "colmap":        "Step 4/5 \u2014 COLMAP Alignment",
+        "output":        "Step 5/5 \u2014 Writing Output",
+        "complete":      "Complete",
+    }
+
     # Item count patterns for throughput tracking
     _RE_REFRAME = re.compile(r"Reframing (\d+)/(\d+)")
     _RE_EXTRACT = re.compile(r"Extracting (\d+)/(\d+)")
@@ -3106,7 +3433,11 @@ class Plugin360Panel(lf.ui.Panel):
 
         with self._pending_lock:
             prev_stage = self._timing_current_stage
-            self._processing_stage = self._STAGE_LABELS.get(stage, stage)
+            _labels = (
+                self._IMAGE_FOLDER_STAGE_LABELS
+                if self._source_mode_idx == 2 else self._STAGE_LABELS
+            )
+            self._processing_stage = _labels.get(stage, stage)
             self._processing_progress = percent
             self._processing_status = message
             if stage != prev_stage:

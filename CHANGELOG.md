@@ -24,8 +24,49 @@ All notable changes to the 360 Plugin are documented here.
   update ever resets extraction to CPU, the panel offers one-click
   re-enable. Ships as beta until certified on machines without CUDA
   installed.
+- "Select Image Folder" input. Instead of a video, you can point the plugin
+  at a folder of already-extracted frames. Choose Equirectangular for a
+  single folder of 360 frames, or Fisheye for a dual-lens set (one folder of
+  front... / back... files, or two separate front and back folders). Masking
+  offers Generate with SAM 3, Use pre-existing masks (Equirectangular +
+  Pinhole only), or None. Extraction is skipped and the pipeline runs
+  masking, reframing, and COLMAP on your images. ([#3])
+- **Training output** for image folders, on both projections: Native,
+  Pinhole, or Both. Pinhole and Both derive the pinhole crops from the
+  native reconstruction's poses rather than running COLMAP a second time,
+  so the crops inherit the native registration. ([#3])
 
 ### Changed
+- Every image-folder run now follows one output rule: a single dataset lands
+  in `<output>/colmap/`, and Training output = Both writes two datasets side
+  by side in `<output>/colmap/native/` and `<output>/colmap/pinhole/`. Each
+  dataset is self-contained, with its masks inside it. Previously the fisheye
+  image-folder paths inherited two different hard-coded layouts from the
+  video pipeline and landed in inconsistent places. ([#3])
+- Native output now absorbs your source folder: the frames become the
+  dataset's images and the emptied folder is removed, but only ever after
+  COLMAP succeeds and the frames are safely inside a dataset being kept. The
+  removal takes only image files — a sidecar file or subfolder stops it and
+  leaves the folder alone. Pinhole output never touches your source; the
+  native solve it needs runs in a temporary workspace that is discarded.
+  ([#3])
+- Image-folder runs no longer report "Frame Extraction" while reading your
+  folder; progress now reads "Reading Image Folder". The fisheye Folders
+  choice is an inline One folder / Front + back control instead of a
+  dropdown that overlapped the row beneath it. ([#3])
+- Choosing an image folder now defaults the Output Path to that folder's
+  PARENT (picking `Folder/Images` outputs to `Folder/`), matching the
+  supported source-in-a-subfolder layout instead of inventing a sibling
+  `_LFS360` folder. Loading a video no longer auto-fills the Output Path at
+  all -- you choose it. An already-set Output Path is never overwritten.
+  ([#3])
+- Fisheye image-folder polish from QA: the kept `<output>/masks/` deliverable
+  (Pinhole output) is named after your original images and mirrors your
+  source layout (one folder → flat, front + back → two folders); the staging
+  manifest records each pair's original filenames alongside the staged
+  `000001.jpg` names; absorbing a two-folder source no longer leaves the
+  emptied parent folder behind; and the completion summary reports the
+  frame/registration counts for image-folder runs instead of zeros. ([#3])
 - The Output Mode dropdown is now just Native or Pinhole. The projection
   (equirectangular or fisheye) is detected from your input, so the same two
   choices apply to both, in place of the previous five-entry list. Switching

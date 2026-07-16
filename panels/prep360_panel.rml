@@ -44,9 +44,9 @@
 
       <!-- Empty state: two entry buttons (single 360 video, or pre-split front+back) -->
       <div data-if="show_split_entry">
-        <button class="btn btn--primary btn--full" data-event-click="select_video">Select 360&#xb0; Video</button>
-        <button class="btn btn--secondary btn--full" data-event-click="enter_split_mode">Select Front + Back Lens Videos</button>
-        <button class="btn btn--secondary btn--full" data-event-click="enter_resume_mode">Re-run COLMAP on Existing Output</button>
+        <button class="btn btn--primary btn--full" data-event-click="select_video">360&#xb0; Video</button>
+        <button class="btn btn--secondary btn--full" data-event-click="enter_split_mode">Front + Back Lens Video</button>
+        <button class="btn btn--secondary btn--full" data-event-click="enter_image_folder_mode">Image Folder</button>
         <span class="status-text status-muted">Single file: ERP video, .osv (DJI), or .insv (Insta360). Two-file mode: pre-split fisheye lens pair (e.g. graded .mp4s).</span>
       </div>
 
@@ -55,19 +55,6 @@
         <div class="path-box">{{video_path_text}}</div>
         <span class="status-text status-muted">{{video_info_text}}</span>
         <button class="btn btn--secondary btn--full" data-event-click="clear_video">Clear</button>
-      </div>
-
-      <!-- Resume mode: re-run COLMAP on existing output directory -->
-      <div data-if="show_resume_mode">
-        <div class="setting-row">
-          <span class="prop-label">Output</span>
-          <div class="path-browse-row">
-            <div class="path-box path-box--small">{{output_path_display}}</div>
-            <button class="btn btn--secondary btn--compact" data-event-click="browse_output">Choose</button>
-          </div>
-        </div>
-        <span class="status-text status-muted">{{resume_status_text}}</span>
-        <button class="btn btn--secondary btn--full btn--compact" data-event-click="exit_resume_mode">&#x2190; Back to normal mode</button>
       </div>
 
       <!-- Split-mode pickers (fisheye + source_mode=split) -->
@@ -89,6 +76,98 @@
           </div>
         </div>
         <button class="btn btn--secondary btn--full btn--compact" data-event-click="exit_split_mode">&#x2190; Use single 360&#xb0; video instead</button>
+      </div>
+
+      <!-- Image-folder input mode (source_mode_idx == 2): use existing frames -->
+      <div data-if="show_image_folder_mode">
+        <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
+          <span class="prop-label">Image type</span>
+          <select data-value="image_projection_idx">
+            <option value="0" selected>Equirectangular</option>
+            <option value="1">Fisheye</option>
+          </select>
+        </div>
+        <div class="setting-row" data-if="show_image_erp_picker">
+          <span class="prop-label">Image folder</span>
+          <div class="path-browse-row">
+            <div class="path-box path-box--small">{{image_dir_text}}</div>
+            <button class="btn btn--secondary btn--compact" data-event-click="select_image_dir">Choose</button>
+            <button class="btn btn--secondary btn--compact" data-event-click="clear_image_dir">Clear</button>
+          </div>
+        </div>
+        <div class="setting-row" data-if="show_image_fisheye_controls">
+          <span class="prop-label">Folders</span>
+          <div class="path-browse-row">
+            <button class="btn btn--secondary btn--compact btn--toggle"
+                    data-class-is-active="folder_mode_is_one"
+                    data-event-click="set_folder_mode_one">One folder</button>
+            <button class="btn btn--secondary btn--compact btn--toggle"
+                    data-class-is-active="folder_mode_is_two"
+                    data-event-click="set_folder_mode_two">Front + back</button>
+          </div>
+        </div>
+        <div class="setting-row" data-if="show_image_fisheye_one">
+          <span class="prop-label">Fisheye frames</span>
+          <div class="path-browse-row">
+            <div class="path-box path-box--small">{{fisheye_dir_text}}</div>
+            <button class="btn btn--secondary btn--compact" data-event-click="select_fisheye_dir">Choose</button>
+            <button class="btn btn--secondary btn--compact" data-event-click="clear_fisheye_dir">Clear</button>
+          </div>
+        </div>
+        <div class="setting-row" data-if="show_image_fisheye_one">
+          <span class="prop-label"></span>
+          <span class="status-text status-muted">Name files front... and back... so each pair matches (e.g. front_0001.jpg and back_0001.jpg).</span>
+        </div>
+        <div class="setting-row" data-if="show_image_fisheye_two">
+          <span class="prop-label">Front lens frames</span>
+          <div class="path-browse-row">
+            <div class="path-box path-box--small">{{front_dir_text}}</div>
+            <button class="btn btn--secondary btn--compact" data-event-click="select_front_dir">Choose</button>
+            <button class="btn btn--secondary btn--compact" data-event-click="clear_front_dir">Clear</button>
+          </div>
+        </div>
+        <div class="setting-row" data-if="show_image_fisheye_two">
+          <span class="prop-label">Back lens frames</span>
+          <div class="path-browse-row">
+            <div class="path-box path-box--small">{{back_dir_text}}</div>
+            <button class="btn btn--secondary btn--compact" data-event-click="select_back_dir">Choose</button>
+            <button class="btn btn--secondary btn--compact" data-event-click="clear_back_dir">Clear</button>
+          </div>
+        </div>
+        <!-- Camera sits directly above the Masks dropdown, so it needs the
+             higher stacking tier: two adjacent rows on the same tier tie, and
+             the later one (Masks) would paint over this popup. -->
+        <div class="setting-row setting-row--dropdown setting-row--dropdown-high" data-if="show_image_fisheye_controls">
+          <span class="prop-label">Camera</span>
+          <select data-value="camera_family_idx">
+            <option value="0">DJI Osmo 360</option>
+            <option value="1">Insta360</option>
+          </select>
+        </div>
+        <div class="setting-row setting-row--dropdown setting-row--dropdown-medium" data-if="show_preexisting_mask_option">
+          <span class="prop-label">Masks</span>
+          <select data-value="mask_source_idx">
+            <option value="0" selected>Generate with SAM 3</option>
+            <option value="1">Use pre-existing masks</option>
+            <option value="2">None</option>
+          </select>
+        </div>
+        <div class="setting-row setting-row--dropdown setting-row--dropdown-medium" data-if="show_masks_generate_none">
+          <span class="prop-label">Masks</span>
+          <select data-value="mask_source_idx">
+            <option value="0" selected>Generate with SAM 3</option>
+            <option value="2">None</option>
+          </select>
+        </div>
+        <div class="setting-row" data-if="show_preexisting_mask_picker">
+          <span class="prop-label">Masks folder</span>
+          <div class="path-browse-row">
+            <div class="path-box path-box--small">{{preexisting_mask_dir_text}}</div>
+            <button class="btn btn--secondary btn--compact" data-event-click="select_preexisting_mask_dir">Choose</button>
+            <button class="btn btn--secondary btn--compact" data-event-click="clear_preexisting_mask_dir">Clear</button>
+          </div>
+        </div>
+        <button class="btn btn--secondary btn--full btn--compact" data-event-click="exit_image_folder_mode">&#x2190; Back to video input</button>
       </div>
 
       <!-- Camera family dropdown (split mode only — auto-detected in container mode) -->
@@ -126,7 +205,10 @@
           <button class="btn btn--secondary btn--compact" data-event-click="browse_output">Choose</button>
         </div>
       </div>
-      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
+      <!-- Output Mode sits above the Training output dropdown (only a one-line
+           note may separate them), so it needs the higher stacking tier for the
+           same reason as Camera above Masks. -->
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-high">
         <span class="prop-label">Output Mode</span>
         <select data-value="processing_idx">
           <option value="0">Native</option>
@@ -140,7 +222,15 @@
       <div class="setting-row setting-row--dropdown setting-row--dropdown-medium" data-if="show_fisheye_training_output">
         <span class="prop-label">Training output</span>
         <select data-value="fisheye_training_output_idx">
-          <option value="0" selected>Native (fisheye)</option>
+          <option value="0" selected>Native</option>
+          <option value="1">Pinhole</option>
+          <option value="2">Both</option>
+        </select>
+      </div>
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-medium" data-if="show_image_training_output">
+        <span class="prop-label">Training output</span>
+        <select data-value="training_output_idx">
+          <option value="0" selected>Native</option>
           <option value="1">Pinhole</option>
           <option value="2">Both</option>
         </select>

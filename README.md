@@ -30,6 +30,58 @@ The pipeline runs in six stages, each configurable from the plugin panel:
 | .OSV container | DJI Osmo 360 | Dual fisheye, camera family auto-detected |
 | .INSV container | Insta360 cameras | Dual fisheye, camera family auto-detected |
 | Front + back .mp4 | Pre-split fisheye lens pair | Two-file mode for graded or externally processed footage |
+| Image folder | Already-extracted frames | Equirectangular, or dual fisheye (one folder or two); skips extraction |
+
+### Select Image Folder
+
+You can skip video extraction entirely and point the plugin at a folder of
+frames you already have. Click **Select Image Folder** on the input screen,
+then choose a projection:
+
+- **Equirectangular**: one folder of 360 frames.
+- **Fisheye**: a dual-lens set, as either **One** folder (files named
+  `front...` and `back...` so each pair matches, e.g. `front_0001.jpg` and
+  `back_0001.jpg`) or **Two** folders (front and back). Pick the **Camera**
+  family so calibration matches. Staged pairs are renamed to matched
+  `000001.jpg`-style names — COLMAP pairs the front/back lenses by identical
+  filename — and `colmap/paired_extraction_manifest.json` maps every staged
+  name back to your original file.
+
+**Masks**: **Generate with SAM 3**, **Use pre-existing masks** (available for
+Equirectangular + Pinhole output; point at a folder of masks named to match
+your frames), or **None**.
+
+**Training output** (shown for **Native**, both projections): **Native**,
+**Pinhole**, or **Both**. **Pinhole** and **Both** derive the pinhole crops from
+the native reconstruction's poses — no second COLMAP run.
+
+**Where the output goes.** One rule covers every image-folder run:
+
+| Training output | Datasets | Where |
+|-----------------|----------|-------|
+| Native | 1 | `<output>/colmap/` |
+| Pinhole | 1 | `<output>/colmap/` |
+| Both | 2 | `<output>/colmap/native/` + `<output>/colmap/pinhole/` |
+
+Each dataset is self-contained — its masks live inside it (`colmap/masks/`),
+because `transforms.json` references them relatively. Pinhole output
+additionally keeps the source-projection masks at `<output>/masks/` as a
+reusable deliverable: the equirectangular masks for ERP input, or the lens
+masks for fisheye input — named after your original images and mirroring your
+source folder layout (one folder → flat, front + back → two folders).
+
+**What happens to your source folder.** **Native** output *absorbs* the source:
+your frames become the dataset's images. Equirectangular frames are read where
+they sit and moved into the dataset once COLMAP succeeds; fisheye frames are
+copied into the dataset before the solve (the two-lens intrinsics need them
+there) and the originals removed only after it succeeds. That removal takes only
+image files, and anything else in the folder — a sidecar file, a subfolder —
+stops it and leaves your folder untouched. **Pinhole** output never touches the
+source at all: the native solve it needs runs in a temporary workspace that is
+discarded afterwards.
+
+Your source folder may live inside the Output Path (e.g. `<output>/source/`), as
+long as it isn't where the run writes: `colmap/`, `masks/`, or `metadata/`.
 
 ## Output Modes
 

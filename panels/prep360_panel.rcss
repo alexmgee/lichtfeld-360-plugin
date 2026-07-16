@@ -273,6 +273,21 @@ body {
     padding: 2dp 6dp;
 }
 
+/* Inline two-way toggle (Folders: One folder / Front + back). Follows the
+   existing compound active-state convention (.gpu-indicator.gpu-ready,
+   .setting-row.row-disabled): base class + .is-active driven by
+   data-class-is-active. */
+.btn--toggle {
+    min-width: 84dp;
+    opacity: 0.65;
+}
+
+.btn--toggle.is-active {
+    opacity: 1.0;
+    font-weight: bold;
+    border: 1dp #4a9eff;
+}
+
 /* ── Processing block ───────────────────────────────────── */
 
 .processing-block {

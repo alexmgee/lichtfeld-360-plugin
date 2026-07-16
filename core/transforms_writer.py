@@ -110,6 +110,101 @@ def _fisheye_rotation_matrix(yaw_deg: float, pitch_deg: float) -> np.ndarray:
     return ry @ rx
 
 
+def _erp_rotation_matrix(yaw_deg: float, pitch_deg: float) -> np.ndarray:
+    """Pure-numpy copy of ``core.reframer.create_rotation_matrix``.
+
+    Duplicated here (like ``_fisheye_rotation_matrix``) so this module stays
+    free of the cv2 import that ``core.reframer`` carries. ``rows = [right,
+    up, -forward]`` — an OpenGL world-to-camera. ``tests/test_erp_propagation``
+    imports the REAL reframer function and asserts they agree, so any drift
+    fails loudly.
+    """
+    yaw = np.radians(yaw_deg)
+    pitch = np.radians(pitch_deg)
+    fwd = np.array([
+        np.cos(pitch) * np.sin(yaw),
+        np.sin(pitch),
+        np.cos(pitch) * np.cos(yaw),
+    ])
+    r = np.cross(fwd, np.array([0.0, 1.0, 0.0]))
+    rl = np.linalg.norm(r)
+    r = np.array([1.0, 0.0, 0.0]) if rl < 1e-6 else r / rl
+    u = np.cross(r, fwd)
+    return np.array([r, u, -fwd])
+
+
+def erp_view_rotation(
+    yaw_deg: float, pitch_deg: float, flip_v: bool = False
+) -> np.ndarray:
+    """Camera-to-camera rotation for an ERP pinhole crop (propagation).
+
+    Returns ``R_rel`` such that ``R_v = R_rel @ R_w2c`` is the crop's OpenCV
+    world-to-camera rotation, given the native EQUIRECTANGULAR camera's
+    world-to-camera ``R_w2c`` — the exact composition the proven fisheye twin
+    ``write_native_propagated_transforms`` uses.
+
+    Correct for the reframer's DEFAULT (fliplr'd) crop. The requirement, in
+    COLMAP's world frame, is:
+
+        R_rel.T @ opencv_ray(px,py) == F @ reframe_dir(px,py)
+
+    where ``reframe_dir`` is the direction the crop pixel samples (in the
+    reframer's own frame) and ``F = diag(1,-1,1)`` maps the reframer's y-up
+    equirect frame to COLMAP's y-down EQUIRECTANGULAR frame. F was MEASURED
+    against pycolmap on a real native solve (QA-C2 2026-07-15), exact to 1.7e-16.
+
+    The reframer's always-on ``fliplr`` and COLMAP's y-down convention are two
+    reflections that cancel, so the fliplr'd crop composes to a PROPER rotation:
+
+        R_rel = create_rotation_matrix(yaw,pitch) @ diag(-1,1,-1)     (det = +1)
+
+    Verified machine-exact in ``tests/test_erp_propagation`` (the intrinsics'
+    principal point cx=cy=size/2 carries a documented <=1px offset from the
+    fliplr, negligible for training; the rotation itself is exact).
+
+    ``flip_v`` views (only reachable via a custom ``Ring(flip_vertical=True)``;
+    no built-in preset uses them) add a second, uncancelled reflection and are
+    NOT representable by a proper rotation, so this raises rather than emit a
+    silently-mirrored pose.
+    """
+    if flip_v:
+        raise NotImplementedError(
+            "ERP pinhole propagation does not support flip_vertical (cubemap "
+            "pole) views: the crop would be an improper reflection in COLMAP's "
+            "frame. No built-in ERP preset uses flip_vertical."
+        )
+    R = _erp_rotation_matrix(yaw_deg, pitch_deg)
+    return R @ np.diag([-1.0, 1.0, -1.0])
+
+
+def _erp_crop_intrinsics(output_size: int, fov_deg: float) -> dict:
+    """PINHOLE intrinsics for an ERP-propagated crop, half-integer-exact.
+
+    LFS's rasterizer samples pixel centres at half-integer coordinates
+    (RasterizeToPixelsFromWorld3DGSFwd.cu: ``px = j + 0.5f``), and COLMAP uses
+    the same convention, so the principal point must be expressed in it. The
+    reframe formula puts the optical axis through column/row INDEX ``W/2``;
+    the reframer's always-on fliplr mirrors columns about ``(W-1)/2``, moving
+    the axis to column index ``W/2 - 1``. Index ``i`` has its centre at
+    continuous ``i + 0.5``, hence:
+
+        cx = W/2 - 0.5   (flipped horizontal axis)
+        cy = W/2 + 0.5   (unflipped vertical axis)
+
+    (Identified in the 2026-07-15 adversarial review; ``W/2`` in both was a
+    ~0.7px constant offset.)
+    """
+    fl = (output_size / 2.0) / np.tan(np.radians(fov_deg) / 2.0)
+    return {
+        "w": int(output_size),
+        "h": int(output_size),
+        "fl_x": float(fl),
+        "fl_y": float(fl),
+        "cx": output_size / 2.0 - 0.5,
+        "cy": output_size / 2.0 + 0.5,
+    }
+
+
 def write_transforms_json(
     output_path: str | Path,
     camera_model: str,
@@ -505,6 +600,170 @@ def write_erp_native_transforms(
     log_fn(
         "Wrote native ERP transforms.json with %d frames (%dx%d): %s",
         len(frames), w, h, transforms_path,
+    )
+
+    return transforms_path
+
+
+def write_erp_propagated_transforms(
+    colmap_sparse_dir: str | Path,
+    output_dir: str | Path,
+    view_config,
+    *,
+    output_size: int,
+    images_prefix: str = "images",
+    masks_dir: str | Path | None = None,
+    transforms_filename: str = "transforms.json",
+    ply_filename: str = "pointcloud.ply",
+    propagated_sparse_output_dir: str | Path | None = None,
+    reconstruction_obj=None,
+    log_fn: Callable[..., object] = logger.info,
+) -> Path:
+    """Export pinhole crops propagated from a native ERP (EQUIRECTANGULAR) solve.
+
+    The ERP twin of ``write_native_propagated_transforms``. Every crop shares
+    the native ERP camera's optical centre, so the pose is a pure rotation of
+    the native pose: ``R_v = erp_view_rotation(view) @ R_w2c``,
+    ``t_v = erp_view_rotation(view) @ t_w2c`` (see ``erp_view_rotation``).
+
+    This writer emits POSES only. The crop images and per-view masks are
+    produced by ``Reframer.reframe_batch(..., bake_fliplr=False)`` into
+    ``<output_dir>/<images_prefix>/<view>/<stem>.jpg`` and
+    ``<output_dir>/masks/<view>/<stem>.png`` — the ``bake_fliplr=False`` is
+    mandatory (mirrored crops cannot be matched by a rotation pose).
+
+    Args:
+        colmap_sparse_dir: Native ERP COLMAP sparse model (EQUIRECTANGULAR).
+        output_dir: Where to write transforms.json + pointcloud.ply.
+        view_config: A ``presets.ViewConfig``; ``get_all_views()`` supplies
+            (yaw, pitch, fov, name, flip_v) per view.
+        output_size: Square crop side length (px) reframe_batch produced.
+        images_prefix: Path prefix before ``<view>/<stem>.jpg`` (default
+            ``images``).
+        masks_dir: If given, a per-view masks root; a crop gets a
+            ``mask_path`` only when ``masks_dir/<view>/<stem>.png`` exists.
+        propagated_sparse_output_dir: Optional sparse/0 to write with all
+            propagated pinhole images. Defaults to ``<output_dir>/sparse/0``.
+        reconstruction_obj: Optional pre-loaded ``pycolmap.Reconstruction``.
+        log_fn: Logging callback.
+
+    Returns:
+        Path to the written transforms.json.
+
+    Raises:
+        RuntimeError: no registered images, or a non-EQUIRECTANGULAR camera.
+        NotImplementedError: a flip_vertical view (see ``erp_view_rotation``).
+    """
+    import pycolmap
+
+    sparse_dir = Path(colmap_sparse_dir)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if reconstruction_obj is not None:
+        recon = reconstruction_obj
+    else:
+        log_fn("Loading native ERP reconstruction from %s", sparse_dir)
+        recon = pycolmap.Reconstruction(str(sparse_dir))
+
+    reg_image_ids = sorted(recon.reg_image_ids())
+    if not reg_image_ids:
+        raise RuntimeError(
+            "Native ERP reconstruction contains no registered images — "
+            "cannot export propagated pinhole crops"
+        )
+
+    for cam_id, cam in recon.cameras.items():
+        if cam.model_name != "EQUIRECTANGULAR":
+            raise RuntimeError(
+                f"Camera {cam_id} has model {cam.model_name!r}; "
+                "write_erp_propagated_transforms expects EQUIRECTANGULAR"
+            )
+
+    views = view_config.get_all_views()
+    if not views:
+        raise RuntimeError("View config produced no views for ERP propagation")
+
+    masks_dir_path = Path(masks_dir) if masks_dir is not None else None
+
+    def _intrinsics(fov_deg: float) -> dict:
+        return _erp_crop_intrinsics(output_size, fov_deg)
+
+    frames: list[dict] = []
+    sparse_entries: list[dict] = []
+    rendered_masks = 0
+
+    for img_id in reg_image_ids:
+        image = recon.image(img_id)
+        cam_from_world = image.cam_from_world()
+        R_w2c = np.asarray(cam_from_world.rotation.matrix(), dtype=np.float64)
+        t_w2c = np.asarray(cam_from_world.translation, dtype=np.float64)
+        stem = Path(image.name.replace("\\", "/")).stem
+
+        for yaw, pitch, fov, view_name, flip_v in views:
+            R_rel = erp_view_rotation(yaw, pitch, flip_v)
+            R_v = R_rel @ R_w2c
+            t_v = R_rel @ t_w2c
+
+            R_c2w = R_v.T
+            t_c2w = -R_v.T @ t_v
+            c2w_opencv = np.eye(4, dtype=np.float64)
+            c2w_opencv[:3, :3] = R_c2w
+            c2w_opencv[:3, 3] = t_c2w
+            c2w_lfs = _c2w_opencv_to_lfs(c2w_opencv)
+
+            intr = _intrinsics(fov)
+            entry: dict = {
+                "file_path": f"{images_prefix}/{view_name}/{stem}.jpg",
+                "transform_matrix": c2w_lfs.tolist(),
+                **intr,
+            }
+            if masks_dir_path is not None:
+                mask_file = masks_dir_path / view_name / f"{stem}.png"
+                if mask_file.exists():
+                    entry["mask_path"] = f"masks/{view_name}/{stem}.png"
+                    rendered_masks += 1
+            frames.append(entry)
+
+            sparse_entries.append({
+                "name": f"{view_name}/{stem}.jpg",
+                "view_name": view_name,
+                "intrinsics": intr,
+                "R_w2c": R_v.copy(),
+                "t_w2c": t_v.copy(),
+            })
+
+    if not frames:
+        raise RuntimeError("No ERP propagated pinhole frames were written")
+
+    ply_path = out_dir / ply_filename
+    point_count = _write_sparse_pointcloud(recon, ply_path)
+    log_fn("Wrote sparse pointcloud (%d points): %s", point_count, ply_path)
+
+    top_intr = _intrinsics(views[0][2])
+    transforms_path = out_dir / transforms_filename
+    transforms_data = {
+        "camera_model": "PINHOLE",
+        **top_intr,
+        "applied_transform": _APPLIED_TRANSFORM,
+        "ply_file_path": ply_filename,
+        "frames": sorted(frames, key=lambda e: e["file_path"]),
+    }
+    with transforms_path.open("w", encoding="utf-8") as fp:
+        json.dump(transforms_data, fp, indent=4)
+    log_fn(
+        "Wrote ERP propagated pinhole export: %d crops from %d native images, "
+        "%d masks, %s",
+        len(frames), len(reg_image_ids), rendered_masks, transforms_path,
+    )
+
+    sparse_output_dir = (
+        Path(propagated_sparse_output_dir)
+        if propagated_sparse_output_dir is not None
+        else out_dir / "sparse" / "0"
+    )
+    _write_native_pinhole_sparse_model(
+        recon, sparse_entries, sparse_output_dir, log_fn=log_fn,
     )
 
     return transforms_path
