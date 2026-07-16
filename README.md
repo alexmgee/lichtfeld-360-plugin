@@ -91,9 +91,18 @@ Output mode is two independent choices: the **projection** (equirectangular or f
 
 Native equirectangular reconstruction using COLMAP's `EQUIRECTANGULAR` camera model. Feeds ERP frames straight to COLMAP with no pinhole reframing step.
 
+A **Training output** selector (Native / Pinhole / Both) controls what is
+written from the single native reconstruction, exactly as for image folders:
+one dataset lands in `<output>/colmap/`; **Both** writes
+`colmap/native/` + `colmap/pinhole/`, with the pinhole crops' poses propagated
+from the native solve (no second COLMAP run). **Pinhole** ships only the
+propagated pinhole dataset at `colmap/` and keeps the extracted ERP frames at
+`<output>/images/` and the ERP masks at `<output>/masks/` as reusable
+deliverables.
+
 ### ERP (Pinhole)
 
-Standard COLMAP pinhole dataset. Each source frame produces multiple perspective crops (6–24 depending on preset). The output is a conventional COLMAP sparse reconstruction with per-view images, masks, and a rig config.
+Standard COLMAP pinhole dataset. Each source frame produces multiple perspective crops (6–24 depending on preset). The output is a conventional COLMAP sparse reconstruction with per-view images, masks, and a rig config — packaged under `<output>/colmap/`, with the extracted ERP frames kept at `<output>/images/` (and ERP masks at `<output>/masks/`) as reusable deliverables.
 
 ### Fisheye
 
@@ -243,39 +252,48 @@ Each dual fisheye lens is reframed into 8 pinhole crops (16 views total per sour
 
 ## Output Structure
 
-### Pinhole / Fisheye (Pinhole)
+### Pinhole (direct COLMAP solve)
 
 ```text
 output_dir/
-├── extracted/
-│   ├── frames/          source equirectangular frames
-│   └── masks/           ERP-resolution masks (when masking enabled)
-├── images/              pinhole views, camera-first layout
-│   ├── 00_00/
-│   │   ├── frame_0001.jpg
-│   │   └── frame_0002.jpg
-│   ├── 00_01/
-│   └── ...
-├── masks/               per-view masks (when masking enabled)
-├── sparse/0/            COLMAP sparse reconstruction
-├── transforms.json
-├── rig_config.json
-├── database.db
-├── colmap_debug.log
-└── timing.json
+├── images/                       extracted ERP frames (kept deliverable)
+├── masks/                        ERP masks (when masking enabled)
+├── extraction_manifest.json
+├── colmap/                       THE dataset — point LFS here
+│   ├── images/                   pinhole views, camera-first layout
+│   │   ├── 00_00/ 00_01/ ...       folder = virtual sensor, shared
+│   │   │                            filename across folders = rig frame
+│   ├── masks/                    per-view masks (when masking enabled)
+│   ├── sparse/0/                 COLMAP sparse reconstruction
+│   ├── rig_config.json
+│   ├── database.db
+│   └── colmap_debug.log
+└── metadata/
 ```
 
-The `images/` directory uses camera-first naming: folder prefix = virtual sensor ID, shared filename across folders = rig frame. This convention is required by COLMAP's rig constraint workflow.
+The camera-first naming inside `colmap/images/` is required by COLMAP's rig
+constraint workflow.
 
-### ERP
+### ERP (Native / Pinhole / Both via Training output)
 
 ```text
-output_dir/
-├── images/              original ERP frames
-├── masks/               ERP masks (when masking enabled)
-├── pointcloud.ply       auto-oriented sparse point cloud
-└── transforms.json      camera_model: EQUIRECTANGULAR
+output_dir/                        Training output = Native
+├── colmap/                        THE dataset
+│   ├── images/                    the ERP frames
+│   ├── masks/                     ERP masks (when masking enabled)
+│   ├── sparse/0/  database.db
+│   ├── extraction_manifest.json
+│   ├── pointcloud.ply
+│   └── transforms.json            camera_model: EQUIRECTANGULAR
+└── metadata/
 ```
+
+**Both** nests two self-contained datasets instead: `colmap/native/` (as
+above) plus `colmap/pinhole/` (flat view-prefixed crops `00_00_frame.jpg`,
+matching masks, propagated `sparse/0`, PINHOLE `transforms.json`).
+**Pinhole** ships only the propagated dataset at `colmap/` and keeps the
+extracted ERP frames at `output_dir/images/` + masks at `output_dir/masks/`
+as deliverables.
 
 ### Fisheye
 

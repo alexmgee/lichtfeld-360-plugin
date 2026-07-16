@@ -627,10 +627,11 @@ def write_erp_propagated_transforms(
     ``t_v = erp_view_rotation(view) @ t_w2c`` (see ``erp_view_rotation``).
 
     This writer emits POSES only. The crop images and per-view masks are
-    produced by ``Reframer.reframe_batch(..., bake_fliplr=False)`` into
-    ``<output_dir>/<images_prefix>/<view>/<stem>.jpg`` and
-    ``<output_dir>/masks/<view>/<stem>.png`` — the ``bake_fliplr=False`` is
-    mandatory (mirrored crops cannot be matched by a rotation pose).
+    produced by ``Reframer.reframe_batch`` and then FLATTENED to
+    ``<output_dir>/<images_prefix>/<view>_<stem>.jpg`` and
+    ``<output_dir>/masks/<view>_<stem>.png`` (``_flatten_view_folders``) —
+    LFS's transforms loader resolves masks by bare image filename only, so
+    basenames must be unique across the dataset.
 
     Args:
         colmap_sparse_dir: Native ERP COLMAP sparse model (EQUIRECTANGULAR).
@@ -712,21 +713,25 @@ def write_erp_propagated_transforms(
             c2w_opencv[:3, 3] = t_c2w
             c2w_lfs = _c2w_opencv_to_lfs(c2w_opencv)
 
+            # Flat, view-prefixed names (fisheye propagation convention).
+            # LFS's transforms loader matches masks by bare image filename
+            # only, so basenames must be unique across the whole dataset.
+            flat_name = f"{view_name}_{stem}"
             intr = _intrinsics(fov)
             entry: dict = {
-                "file_path": f"{images_prefix}/{view_name}/{stem}.jpg",
+                "file_path": f"{images_prefix}/{flat_name}.jpg",
                 "transform_matrix": c2w_lfs.tolist(),
                 **intr,
             }
             if masks_dir_path is not None:
-                mask_file = masks_dir_path / view_name / f"{stem}.png"
+                mask_file = masks_dir_path / f"{flat_name}.png"
                 if mask_file.exists():
-                    entry["mask_path"] = f"masks/{view_name}/{stem}.png"
+                    entry["mask_path"] = f"masks/{flat_name}.png"
                     rendered_masks += 1
             frames.append(entry)
 
             sparse_entries.append({
-                "name": f"{view_name}/{stem}.jpg",
+                "name": f"{flat_name}.jpg",
                 "view_name": view_name,
                 "intrinsics": intr,
                 "R_w2c": R_v.copy(),

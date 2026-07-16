@@ -647,11 +647,16 @@ class Plugin360Panel(lf.ui.Panel):
             self._set_training_output,
         )
         model.bind_func(
-            # Image-folder Native (BOTH projections) gains native|pinhole|both,
-            # bound to PipelineConfig.training_output.
+            # training_output (native|pinhole|both) applies to image-folder
+            # Native on BOTH projections, and to video ERP Native (the video
+            # fisheye path keeps its own fisheye_training_output control).
             "show_image_training_output",
-            lambda: (self._source_mode_idx == 2
-                     and self._processing_idx == NATIVE_PROCESSING_IDX),
+            lambda: (
+                (self._source_mode_idx == 2
+                 and self._processing_idx == NATIVE_PROCESSING_IDX)
+                or (self._source_mode_idx != 2
+                    and self._output_mode_idx == ERP_NATIVE_OUTPUT_MODE_IDX)
+            ),
         )
         model.bind_func(
             # Video fisheye keeps its own field (fisheye_training_output).
@@ -1296,6 +1301,14 @@ class Plugin360Panel(lf.ui.Panel):
         frames = VideoAnalyzer.estimate_frame_count(self._video_info, interval)
         total = views * frames
         if output_mode == "erp_native":
+            training = self._get_training_output()
+            if training == "both":
+                return (
+                    f"~{frames:,} ERP images + {views} \u00d7 {frames} "
+                    f"= {total:,} propagated crops"
+                )
+            if training == "pinhole":
+                return f"{views} \u00d7 {frames} = {total:,} propagated crops"
             return f"~{frames:,} ERP images"
         return f"{views} views \u00d7 {frames} frames = {total:,} images"
 
@@ -3252,12 +3265,13 @@ class Plugin360Panel(lf.ui.Panel):
                 if output_mode == "fisheye"
                 else "native"
             ),
-            # Image-folder tracks (ERP + fisheye) read training_output; it only
-            # applies to Native processing (Pinhole output is a single dataset).
+            # training_output applies to image-folder Native (both projections)
+            # and to video ERP Native; Pinhole output is a single dataset.
             training_output=(
                 self._get_training_output()
-                if (self._source_mode_idx == 2
-                    and self._processing_idx == NATIVE_PROCESSING_IDX)
+                if (output_mode == "erp_native"
+                    or (self._source_mode_idx == 2
+                        and self._processing_idx == NATIVE_PROCESSING_IDX))
                 else "native"
             ),
             # Dual fisheye fields
@@ -3659,14 +3673,21 @@ class Plugin360Panel(lf.ui.Panel):
 
             if self._import_after and result.dataset_path:
                 try:
-                    # ERP and native fisheye still pass the JSON file directly.
+                    # ERP native passes the transforms.json FILE (BlenderLoader:
+                    # EQUIRECTANGULAR cameras; its flat masks resolve fine).
+                    # Fisheye native imports the dataset DIRECTORY instead, so
+                    # ColmapLoader wins: its sparse/0 IS the OPENCV_FISHEYE
+                    # reconstruction, and ColmapLoader resolves front/back masks
+                    # by full relative path. BlenderLoader cannot — it matches
+                    # masks by bare filename, and front/000001 + back/000001
+                    # collide ("ambiguous across the dataset mask folders").
                     # Fisheye (Pinhole) uses output/colmap as the dataset base
                     # so LFS mask lookup, transforms, and sparse/0 agree.
-                    if result.output_mode == "fisheye_pinhole":
+                    if result.output_mode in ("fisheye", "fisheye_pinhole"):
                         dataset_base_path, import_output_path = self._resolve_transforms_directory_import_target(
                             result.dataset_path
                         )
-                    elif result.output_mode in ("erp_native", "fisheye"):
+                    elif result.output_mode == "erp_native":
                         dataset_base_path, import_output_path = self._resolve_erp_import_target(
                             result.dataset_path
                         )

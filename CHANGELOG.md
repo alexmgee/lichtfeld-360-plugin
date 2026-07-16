@@ -35,8 +35,26 @@ All notable changes to the 360 Plugin are documented here.
   Pinhole, or Both. Pinhole and Both derive the pinhole crops from the
   native reconstruction's poses rather than running COLMAP a second time,
   so the crops inherit the native registration. ([#3])
+- **Training output for video ERP input** (Native / Pinhole / Both), the same
+  option as image folders: Both writes the native dataset plus propagated
+  pinhole crops; Pinhole ships only the propagated dataset and keeps the
+  extracted ERP frames (`<output>/images/`) and the ERP masks
+  (`<output>/masks/`) as reusable deliverables. ([#3])
 
 ### Changed
+- **BREAKING: video ERP output moved under `<output>/colmap/`.** Both ERP
+  modes now follow the same unified rule as image-folder runs. Native: the
+  dataset (images, masks, sparse, transforms.json, pointcloud.ply) that
+  previously landed at the output root lives in `colmap/`; Training output
+  Both → `colmap/native/` + `colmap/pinhole/`. Pinhole (direct solve): the
+  COLMAP dataset (crops, per-view masks, sparse, database, rig config) is
+  packaged under `colmap/` instead of being spread across the output root,
+  and the extracted ERP frames + masks are kept at `<output>/images/` and
+  `<output>/masks/` instead of being buried in `extracted/`. The `extracted/`
+  work folder no longer outlives any run (the extraction manifest moves
+  beside the frames). Update anything that pointed at
+  `<output>/transforms.json` to `<output>/colmap/transforms.json`; in-app
+  auto-import follows the new locations automatically. ([#3])
 - Every image-folder run now follows one output rule: a single dataset lands
   in `<output>/colmap/`, and Training output = Both writes two datasets side
   by side in `<output>/colmap/native/` and `<output>/colmap/pinhole/`. Each

@@ -524,11 +524,16 @@ class PipelineJob:
         out = Path(cfg.output_dir)
         out.mkdir(parents=True, exist_ok=True)
 
-        # Sub-directories
+        # Sub-directories, per the unified layout rule: the COLMAP dataset
+        # (crops, per-view masks, sparse, database, rig config) is packaged
+        # under <output>/colmap/; the extracted ERP frames and ERP masks are
+        # promoted to <output>/images/ + <output>/masks/ as deliverables once
+        # the run succeeds. extracted/ is a work dir that must not outlive
+        # the run.
         extracted_dir = out / "extracted"
         frames_dir = extracted_dir / "frames"
-        images_dir = out / "images"
-        sparse_dir = out / "sparse"
+        colmap_dir = out / "colmap"
+        images_dir = colmap_dir / "images"
 
         # ===================================================================
         # Stage 1: Sharpest Frame Extraction (0-20%)
@@ -627,7 +632,7 @@ class PipelineJob:
 
                 sam3_result = sam3_masker.process_frames(
                     frames_dir=str(frames_dir),
-                    output_dir=str(out),
+                    output_dir=str(colmap_dir),
                     view_config=view_config,
                     erp_mask_dir=str(extracted_dir / "masks"),
                     progress_callback=_sam3_progress,
@@ -732,7 +737,7 @@ class PipelineJob:
                     self._update("masking", pct, msg)
 
                 # Direct per-view masking on reframed cubemap images
-                cubemap_masks_dir = out / "masks"
+                cubemap_masks_dir = colmap_dir / "masks"
                 mask_result = masker.process_reframed_views(
                     images_dir,
                     cubemap_masks_dir,
@@ -829,7 +834,7 @@ class PipelineJob:
             if overlap_masks is not None:
                 import cv2
                 import shutil
-                operator_masks_dir = out / "masks"
+                operator_masks_dir = colmap_dir / "masks"
                 # Copy operator masks to temp dir, then AND with Voronoi
                 shutil.copytree(operator_masks_dir, colmap_masks_dir)
                 for view_name, voronoi_mask in overlap_masks.items():
@@ -855,7 +860,8 @@ class PipelineJob:
         # ===================================================================
         self._update("rig_config", 56.0, "Generating rig configuration...")
 
-        rig_config_path = str(out / "rig_config.json")
+        colmap_dir.mkdir(parents=True, exist_ok=True)
+        rig_config_path = str(colmap_dir / "rig_config.json")
         write_rig_config(view_config, rig_config_path)
 
         # ===================================================================
@@ -897,10 +903,12 @@ class PipelineJob:
         # Pass mask directory to COLMAP if masks were generated.
         # Use Voronoi-combined masks (colmap_masks_dir) if available,
         # otherwise fall back to operator-only masks.
-        effective_mask_path = colmap_masks_dir if colmap_masks_dir.is_dir() else (out / "masks")
+        effective_mask_path = (
+            colmap_masks_dir if colmap_masks_dir.is_dir()
+            else (colmap_dir / "masks"))
         runner = ColmapRunner(
             images_dir=str(images_dir),
-            output_dir=str(out),
+            output_dir=str(colmap_dir),
             rig_config_path=rig_config_path,
             mask_path=str(effective_mask_path) if effective_mask_path.is_dir() else None,
             config=colmap_config,
@@ -921,9 +929,33 @@ class PipelineJob:
         # ===================================================================
         # Stage 6: Write Output (85-95%)
         # ===================================================================
-        # Pinhole mode: COLMAP dataset already written by ColmapRunner
+        # Pinhole mode: COLMAP dataset already written by ColmapRunner under
+        # colmap/. Promote the extraction work products to root deliverables:
+        # ERP frames -> <output>/images/, ERP masks -> <output>/masks/, the
+        # extraction manifest beside them; then drop the emptied extracted/
+        # (rmdir-only -- anything unexpected keeps it).
         self._update("output", 85.0, "COLMAP dataset ready")
         dataset_path = colmap_result.reconstruction_path
+
+        import shutil
+
+        from .frame_source import relocate_erp_frames_to_colmap
+
+        _manifest = frames_dir / "extraction_manifest.json"
+        if _manifest.is_file():
+            shutil.move(str(_manifest), str(out / _manifest.name))
+        relocate_erp_frames_to_colmap(frames_dir, out)  # frames -> out/images
+        _erp_masks = extracted_dir / "masks"
+        if _erp_masks.is_dir():
+            _dest_masks = out / "masks"
+            _dest_masks.mkdir(parents=True, exist_ok=True)
+            for _m in sorted(_erp_masks.glob("*.png")):
+                shutil.move(str(_m), str(_dest_masks / _m.name))
+        for _d in (extracted_dir / "masks", frames_dir, extracted_dir):
+            try:
+                _d.rmdir()
+            except OSError:
+                pass
 
         # ===================================================================
         # Stage 7: Done (95-100%)
@@ -964,18 +996,42 @@ class PipelineJob:
     # ------------------------------------------------------------------
 
     def _run_erp_native(self, cfg: PipelineConfig, t0: float) -> PipelineResult:
-        """ERP-native pipeline: extract → optional ERP masks → flat stage → COLMAP."""
+        """Video ERP pipeline: extract → optional ERP masks → native solve →
+        training_output routing, under the unified layout rule.
+
+        1 dataset → ``<output>/colmap/`` (native, or propagated pinhole);
+        training=both → ``colmap/native/`` + ``colmap/pinhole/``. training=
+        pinhole keeps the extracted ERP frames at ``<output>/images/`` and the
+        ERP masks at ``<output>/masks/`` as deliverables (the video analog of
+        image-folder's untouched source) and discards the throwaway native
+        solve. Masks live inside the dataset they belong to otherwise.
+        """
         import shutil
 
         from .colmap_cleanup import cleanup_colmap_artifacts
+        from .frame_source import relocate_erp_frames_to_colmap
         from .transforms_writer import write_erp_native_transforms
 
         out = Path(cfg.output_dir)
         out.mkdir(parents=True, exist_ok=True)
         extracted_dir = out / "extracted"
         frames_dir = extracted_dir / "frames"
-        images_dir = out / "images"
-        masks_output_dir = out / "masks"
+        colmap_dir = out / "colmap"
+
+        training = (cfg.training_output or "native").lower()
+        if training not in ("native", "pinhole", "both"):
+            raise ValueError(f"Unknown training_output: {cfg.training_output!r}")
+
+        # Where the ERP masks land (same rule as the image-folder tracks):
+        # native → colmap/masks (the dataset's masks; transforms.json references
+        # "masks/<name>" relative to the dataset); both → colmap/native/masks;
+        # pinhole → root <output>/masks/ (kept deliverable).
+        if training == "native":
+            masks_dir = colmap_dir / "masks"
+        elif training == "both":
+            masks_dir = colmap_dir / "native" / "masks"
+        else:
+            masks_dir = out / "masks"
 
         # ===================================================================
         # Stage 1: Sharpest Frame Extraction (0-30%)
@@ -1032,10 +1088,12 @@ class PipelineJob:
             raise RuntimeError("Cancelled")
 
         # ===================================================================
-        # Stage 2: ERP masking (30-50%, optional)
+        # Stage 2: ERP masking (30-50%, optional) — written straight to the
+        # track's mask destination (no extracted/masks intermediate).
         # ===================================================================
         mask_result: Optional[MaskResult] = None
-        erp_masks_dir = extracted_dir / "masks"
+        erp_masks_dir = masks_dir
+        view_config = _build_runtime_view_config(cfg)
 
         if cfg.enable_masking:
             if cfg.masking_method == "sam3_cubemap":
@@ -1118,136 +1176,154 @@ class PipelineJob:
                 raise RuntimeError("Cancelled")
 
         # ===================================================================
-        # Stage 3: Stage flat ERP frames (+ masks) (50-55%)
+        # Stage 3+: native solve + training_output routing (50-100%).
+        # The solve reads extracted/frames IN PLACE (no flat-stage move);
+        # _erp_native_solve relocates the frames into the kept dataset's
+        # images/ only after COLMAP succeeds.
         # ===================================================================
-        self._update("staging", 50.0, "Staging ERP frames for COLMAP...")
-        if images_dir.exists():
-            shutil.rmtree(images_dir, ignore_errors=True)
-        images_dir.mkdir(parents=True, exist_ok=True)
-
-        frame_files = sorted(
-            f for f in frames_dir.iterdir()
-            if f.suffix.lower() in (".jpg", ".jpeg", ".png")
-        )
-        for frame_file in frame_files:
-            shutil.move(str(frame_file), str(images_dir / frame_file.name))
-
-        num_output_images = len(frame_files)
-        effective_colmap_mask: str | None = None
-
-        if cfg.enable_masking and erp_masks_dir.is_dir():
-            if masks_output_dir.exists():
-                shutil.rmtree(masks_output_dir, ignore_errors=True)
-            masks_output_dir.mkdir(parents=True, exist_ok=True)
-            for mask_file in sorted(erp_masks_dir.glob("*.png")):
-                shutil.move(str(mask_file), str(masks_output_dir / mask_file.name))
-            effective_colmap_mask = str(masks_output_dir)
-
-        if self._check_cancel():
-            raise RuntimeError("Cancelled")
-
-        # ===================================================================
-        # Stage 4: COLMAP (55-85%)
-        # ===================================================================
-        self._update("colmap", 55.0, "Running COLMAP (EQUIRECTANGULAR)...")
-
-        colmap_config = ColmapConfig(
-            camera_model="EQUIRECTANGULAR",
-            camera_mode="SINGLE",
-            camera_params=None,
-            matcher=cfg.colmap_matcher or "sequential",
-            match_budget_tier=cfg.colmap_match_budget_tier,
-            max_num_matches_override=cfg.colmap_max_num_matches,
-            refine_focal_length=False,
-            refine_principal_point=False,
-            refine_extra_params=False,
-            sift_max_num_features_override=cfg.sift_max_features,
-            sift_max_image_size_override=cfg.sift_max_image_size,
-            feature_type=cfg.colmap_feature_type,
-            matcher_type=cfg.colmap_matcher_type,
-            mapper="incremental",
-            ba_solver=cfg.colmap_ba_solver,
-            vocab_tree_path=cfg.vocab_tree_path or None,
-            loop_detection=cfg.loop_detection,
-            sequential_overlap=cfg.colmap_sequential_overlap,
-            guided_matching=cfg.colmap_guided_matching,
-            sift_estimate_affine_shape=cfg.colmap_sift_affine_dsp,
-            sift_domain_size_pooling=cfg.colmap_sift_affine_dsp,
+        equirect_mask_dir = (
+            str(masks_dir)
+            if cfg.enable_masking and masks_dir.is_dir()
+            else None
         )
 
-        def _colmap_progress(stage: str, pct: float, msg: str) -> None:
-            self._update("colmap", 55 + pct * 30, msg)
+        def _erp_result(dataset_path, num_output_images, preset_signature,
+                        colmap_result) -> PipelineResult:
+            elapsed = time.time() - t0
+            return PipelineResult(
+                success=True,
+                dataset_path=str(dataset_path),
+                output_mode=cfg.output_mode,
+                num_source_frames=num_source_frames,
+                num_output_images=num_output_images,
+                num_aligned_cameras=colmap_result.num_registered_images,
+                num_registered_frames=colmap_result.num_registered_frames,
+                num_complete_frames=colmap_result.num_complete_frames,
+                num_partial_frames=colmap_result.num_partial_frames,
+                views_per_frame=colmap_result.views_per_frame,
+                expected_images_by_view=colmap_result.expected_images_by_view,
+                registered_images_by_view=colmap_result.registered_images_by_view,
+                partial_frame_examples=colmap_result.partial_frame_examples,
+                dropped_frame_examples=colmap_result.dropped_frame_examples,
+                preset_signature=preset_signature,
+                mask_backend_name=mask_result.backend_name if mask_result else "",
+                video_backend_name=(
+                    mask_result.video_backend_name if mask_result else ""),
+                used_fallback_video_backend=(
+                    mask_result.used_fallback_video_backend if mask_result else False
+                ),
+                video_backend_error=(
+                    mask_result.video_backend_error if mask_result else ""),
+                mask_diagnostics_path=(
+                    mask_result.diagnostics_path if mask_result else ""),
+                gpu_extraction=extract_result.gpu_accelerated,
+                masking_timers=(
+                    getattr(mask_result, "masking_timers", {}) if mask_result else {}),
+                elapsed_sec=elapsed,
+            )
 
-        runner = ColmapRunner(
-            images_dir=str(images_dir),
-            output_dir=str(out),
-            rig_config_path=None,
-            mask_path=effective_colmap_mask,
-            config=colmap_config,
-            on_progress=_colmap_progress,
-            cancel_check=self._check_cancel,
-        )
+        def _write_native_transforms(dataset_dir: Path, dataset_masks: Path):
+            sparse_dir = dataset_dir / "sparse" / "0"
+            if not sparse_dir.is_dir():
+                sparse_dir = dataset_dir / "sparse"
+            transforms_path = write_erp_native_transforms(
+                colmap_sparse_dir=sparse_dir,
+                output_dir=dataset_dir,
+                masks_dir=dataset_masks if dataset_masks.is_dir() else None,
+                erp_width=erp_width,
+                erp_height=erp_height,
+                log_fn=logger.info,
+            )
+            return sparse_dir, transforms_path
 
-        colmap_result = runner.run()
+        def _finalize_extracted(manifest_dest: Path) -> None:
+            # The extraction work dir must not outlive the run. The extractor's
+            # manifest follows the frames to their final home (beside the
+            # dataset's images, mirroring the fisheye paired manifest); the
+            # emptied dirs are then dropped rmdir-only, so anything unexpected
+            # left inside keeps them.
+            manifest = frames_dir / "extraction_manifest.json"
+            if manifest.is_file():
+                manifest_dest.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(manifest), str(manifest_dest / manifest.name))
+            for d in (frames_dir, extracted_dir):
+                try:
+                    d.rmdir()
+                except OSError:
+                    pass
 
+        if training == "native":
+            # Single dataset at colmap/; the extracted frames become its images.
+            colmap_result, num_output_images = self._erp_native_solve(
+                cfg, frames_dir, colmap_dir, equirect_mask_dir, move_frames=True)
+            if not colmap_result.success:
+                raise RuntimeError(f"COLMAP failed: {colmap_result.error}")
+            _finalize_extracted(colmap_dir)
+            self._update("output", 90.0, "Writing native ERP transforms.json...")
+            _sparse, transforms_path = _write_native_transforms(
+                colmap_dir, masks_dir)
+            if not cfg.keep_native_sparse:
+                cleanup_colmap_artifacts(colmap_dir, log_fn=logger.info)
+            self._update("complete", 100.0, "Native ERP export complete")
+            return _erp_result(
+                transforms_path, num_output_images,
+                "native EQUIRECTANGULAR", colmap_result)
+
+        if training == "both":
+            # Two datasets: kept native at colmap/native/ + pinhole propagated
+            # from the native solve at colmap/pinhole/.
+            native_dir = colmap_dir / "native"
+            colmap_result, num_output_images = self._erp_native_solve(
+                cfg, frames_dir, native_dir, equirect_mask_dir, move_frames=True)
+            if not colmap_result.success:
+                raise RuntimeError(f"COLMAP failed: {colmap_result.error}")
+            _finalize_extracted(native_dir)
+            self._update("output", 90.0, "Writing native ERP transforms.json...")
+            native_sparse, transforms_path = _write_native_transforms(
+                native_dir, masks_dir)
+            self._erp_propagate_pinhole(
+                cfg, native_dir / "images", native_sparse,
+                colmap_dir / "pinhole", view_config,
+                str(masks_dir) if masks_dir.is_dir() else None)
+            # Cleanup honors the checkbox only after propagation no longer
+            # needs the native sparse model.
+            if not cfg.keep_native_sparse:
+                cleanup_colmap_artifacts(native_dir, log_fn=logger.info)
+            self._update(
+                "complete", 100.0,
+                "Native + propagated Pinhole export complete")
+            return _erp_result(
+                transforms_path, num_output_images,
+                "EQUIRECTANGULAR native + propagated pinhole", colmap_result)
+
+        # training == "pinhole": ship ONLY the propagated pinhole dataset at
+        # colmap/. The native solve runs in a throwaway temp; the extracted ERP
+        # frames and masks are KEPT at <output>/images/ and <output>/masks/ as
+        # deliverables (the video analog of image-folder's untouched source).
+        temp_dir = colmap_dir / "_native_tmp"
+        colmap_result, _ = self._erp_native_solve(
+            cfg, frames_dir, temp_dir, equirect_mask_dir, move_frames=False)
         if not colmap_result.success:
             raise RuntimeError(f"COLMAP failed: {colmap_result.error}")
-
-        # ===================================================================
-        # Stage 5: Write transforms.json + pointcloud.ply (85-95%)
-        # ===================================================================
-        self._update("output", 85.0, "Writing native ERP transforms.json...")
-
-        sparse_dir = out / "sparse" / "0"
-        if not sparse_dir.is_dir():
-            sparse_dir = out / "sparse"
-
-        transforms_path = write_erp_native_transforms(
-            colmap_sparse_dir=sparse_dir,
-            output_dir=out,
-            masks_dir=masks_output_dir if masks_output_dir.is_dir() else None,
-            erp_width=erp_width,
-            erp_height=erp_height,
-            log_fn=logger.info,
-        )
-
-        # ===================================================================
-        # Stage 6: Finalize (95-100%)
-        # ===================================================================
-        if not cfg.keep_native_sparse:
-            cleanup_colmap_artifacts(out, log_fn=logger.info)
-
-        self._update("complete", 100.0, "Native ERP export complete")
-        dataset_path = str(transforms_path)
-        elapsed = time.time() - t0
-
-        return PipelineResult(
-            success=True,
-            dataset_path=dataset_path,
-            output_mode=cfg.output_mode,
-            num_source_frames=num_source_frames,
-            num_output_images=num_output_images,
-            num_aligned_cameras=colmap_result.num_registered_images,
-            num_registered_frames=colmap_result.num_registered_frames,
-            num_complete_frames=colmap_result.num_complete_frames,
-            num_partial_frames=colmap_result.num_partial_frames,
-            views_per_frame=colmap_result.views_per_frame,
-            expected_images_by_view=colmap_result.expected_images_by_view,
-            registered_images_by_view=colmap_result.registered_images_by_view,
-            partial_frame_examples=colmap_result.partial_frame_examples,
-            dropped_frame_examples=colmap_result.dropped_frame_examples,
-            preset_signature="native EQUIRECTANGULAR",
-            mask_backend_name=mask_result.backend_name if mask_result else "",
-            video_backend_name=mask_result.video_backend_name if mask_result else "",
-            used_fallback_video_backend=(
-                mask_result.used_fallback_video_backend if mask_result else False
-            ),
-            video_backend_error=mask_result.video_backend_error if mask_result else "",
-            mask_diagnostics_path=mask_result.diagnostics_path if mask_result else "",
-            gpu_extraction=extract_result.gpu_accelerated,
-            masking_timers=getattr(mask_result, "masking_timers", {}) if mask_result else {},
-            elapsed_sec=elapsed,
-        )
+        temp_sparse = temp_dir / "sparse" / "0"
+        if not temp_sparse.is_dir():
+            temp_sparse = temp_dir / "sparse"
+        num_output_images = self._erp_propagate_pinhole(
+            cfg, frames_dir, temp_sparse, colmap_dir, view_config,
+            equirect_mask_dir)
+        # SM4: cancel gate immediately before removing the temp (COLMAP
+        # artifacts only — frames and masks are kept deliverables).
+        if self._check_cancel():
+            raise RuntimeError("Cancelled")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        moved, _removed = relocate_erp_frames_to_colmap(frames_dir, out)
+        _finalize_extracted(out)
+        logger.info(
+            "Kept %d extracted ERP frames at %s", moved, out / "images")
+        self._update("complete", 100.0, "Propagated Pinhole export complete")
+        return _erp_result(
+            colmap_dir / "transforms.json", num_output_images,
+            "propagated pinhole (EQUIRECTANGULAR native)", colmap_result)
 
     # ------------------------------------------------------------------
     # Image-folder ERP path (read-in-place; all artifacts under colmap/)
@@ -1369,8 +1445,19 @@ class PipelineJob:
                 "(no cleanup runs, no data deleted)."
             )
 
-        self._update("output", 95.0, "Writing propagated pinhole transforms.json...")
+        # Flatten view subfolders to view-prefixed flat names (the fisheye
+        # propagation convention). LFS's transforms loader resolves masks by
+        # bare image FILENAME only (transforms.cpp: _image_name =
+        # image_path.filename(); mask_path in the JSON is not consulted), so
+        # same-stem crops across view subfolders make every mask lookup
+        # ambiguous and the import hard-fails. Unique basenames are the
+        # loader's real contract.
         pinhole_masks = pinhole_out_dir / "masks"
+        _flatten_view_folders(images_dir)
+        if pinhole_masks.is_dir():
+            _flatten_view_folders(pinhole_masks)
+
+        self._update("output", 95.0, "Writing propagated pinhole transforms.json...")
         write_erp_propagated_transforms(
             colmap_sparse_dir=native_sparse_dir,
             output_dir=pinhole_out_dir,
