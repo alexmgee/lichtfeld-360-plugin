@@ -316,8 +316,10 @@ def stage_fisheye_frames(
             "frame_id": f"{i:06d}",
             "front_image": f"front/{name_front}",
             "back_image": f"back/{name_back}",
-            # Staged names are index-based (COLMAP pairs front/back by
-            # identical basename); these map back to the user's files.
+            # Staged names are index-based, giving each front/back pair a
+            # shared basename; these map back to the user's original files.
+            # (The shared basename also lets the dual-fisheye rig group the
+            # pair into one frame, but only when the opt-in rig is enabled.)
             "original_front": Path(front_path).name,
             "original_back": Path(back_path).name,
         })

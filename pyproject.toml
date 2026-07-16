@@ -8,10 +8,11 @@ license = { text = "GPL-3.0-or-later" }
 authors = [{name = "Alex Gee"}]
 dependencies = [
     "huggingface-hub==1.9.0",
-    # Must be a DIFFERENT version than the CUDA wheel in the gpu-opencv
-    # extra (4.13.0.90): uv reconciles installed packages by version string
-    # only, so an equal version would leave existing CUDA-wheel venvs
-    # permanently unconverged on sync.
+    # Pinned to exactly the version the GPU installer camouflages its CUDA
+    # build to (see core/gpu_extraction_install.py): the overlay is opencv
+    # 4.12.0.88 (CUDA 12) relabeled to 4.13.0.92 at apply time, so uv's
+    # version-string reconciliation PRESERVES it on a bare `uv sync` instead
+    # of reverting to the CPU wheel. Keep this equal to that relabel target.
     "opencv-contrib-python==4.13.0.92",
     "numpy",
     "pycolmap",
@@ -37,13 +38,14 @@ video-tracking = []
 # Legacy compatibility alias: the SAM 3 runtime moved into base
 # dependencies (see note there) so the host's bare sync can't prune it.
 sam3-masking = []
-# Placeholder: opt-in GPU-accelerated frame extraction (CUDA OpenCV).
-# The CUDA wheel (cudawarped opencv_contrib_python 4.13.0.90, win_amd64)
-# cannot be expressed as an extra because it version-conflicts with the
-# CPU baseline and uv conflicts() only arbitrates between extras, not
-# extra-vs-base. The panel will install/manage it explicitly (Component B),
-# including surviving bare `uv sync` runs. Never install it by default:
-# it needs CUDA 13 runtime DLLs most machines lack (issues #6/#8).
+# Placeholder: opt-in GPU-accelerated frame extraction (CUDA OpenCV) is
+# installed and managed by the panel (core/gpu_extraction_install.py), NOT
+# as an extra. The CUDA overlay (cudawarped opencv_contrib_python 4.12.0.88,
+# win_amd64) version-conflicts with the CPU baseline, and uv conflicts()
+# only arbitrates between extras, not extra-vs-base; the installer vendors
+# the CUDA 12 runtime DLLs and survives bare `uv sync` runs (see the
+# opencv-contrib-python note above). This entry stays empty so the name
+# resolves. Never installed by default (needs an NVIDIA GPU; issues #6/#8).
 gpu-opencv = []
 
 [project.urls]

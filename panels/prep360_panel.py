@@ -1464,15 +1464,17 @@ class Plugin360Panel(lf.ui.Panel):
     def _resolve_erp_import_target(self, transforms_path: str) -> tuple[str, str]:
         """Resolve a transforms.json-based dataset import target.
 
-        Used for both ERP native (camera_model=EQUIRECTANGULAR) and
-        Fisheye native (camera_model=OPENCV_FISHEYE) outputs. Both produce
-        transforms.json at the dataset root.
+        Used for ERP native (camera_model=EQUIRECTANGULAR) output, which
+        produces transforms.json at the dataset root. Fisheye native is
+        imported by DIRECTORY instead (see _resolve_transforms_directory_import_target)
+        because its front/back masks collide under BlenderLoader's
+        bare-filename matching; see the call site in the import block.
 
         Passes the transforms.json file path directly (not the directory)
         so LFS's BlenderLoader picks it up instead of ColmapLoader. When
         the directory is passed and sparse/ also exists, ColmapLoader wins
         (registered first) and loads pinhole crop cameras instead of
-        the ERP/fisheye cameras declared in transforms.json.
+        the ERP cameras declared in transforms.json.
         """
         transforms_file = Path(transforms_path)
         if transforms_file.suffix.lower() != ".json":
