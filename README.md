@@ -88,7 +88,7 @@ long as it isn't where the run writes: `colmap/`, `masks/`, or `metadata/`.
 
 ## Output Modes
 
-Output mode is two independent choices: the **projection** (equirectangular or fisheye, detected from your input) and the **Output Mode** dropdown (**Native** or **Pinhole**). The four combinations are the modes below.
+Output mode is two independent choices: the **projection** (equirectangular or fisheye, detected from your input) and the **Output Mode** dropdown (**Native** or **Pinhole**). The three combinations are the modes below. Fisheye input has no Native/Pinhole choice — the dropdown is hidden for it, and its output is chosen by the **Training output** selector alone.
 
 ### ERP
 
@@ -120,11 +120,7 @@ A **Training output** selector then controls which dataset is written from that 
 | **Pinhole** | Pinhole crops **derived from the native poses** — no second COLMAP run | Standard 3DGS |
 | **Both** | Both datasets, side by side | Either trainer |
 
-The **Pinhole** option renders pinhole crops from the raw fisheye using the COLMAP-refined intrinsics and propagates each crop's pose from its lens's *measured* pose. Because the crops inherit the native reconstruction's registration (rather than being re-aligned as a rig of assumed geometry), the resulting pinhole dataset covers far more frames than the legacy Fisheye (Pinhole) mode below.
-
-### Fisheye (Pinhole)
-
-The original direct-pinhole path: reframes each dual fisheye lens into 8 pinhole crops (16 total per source frame), aligns the two front-lens reference views in COLMAP under a mini-rig constraint, and propagates the remaining crops' poses from that solve. Kept for compatibility, but for a pinhole dataset from fisheye input the **Fisheye** mode's **Pinhole** training output is now recommended — reconstructing the reframed crops directly registers noticeably fewer frames than the native path.
+The **Pinhole** option renders pinhole crops from the raw fisheye using the COLMAP-refined intrinsics and propagates each crop's pose from its lens's *measured* pose. Because the crops inherit the native reconstruction's registration (rather than being re-aligned as a rig of assumed geometry), the resulting pinhole dataset covers far more frames than re-solving the reframed crops directly ever did.
 
 ## Installation
 
@@ -172,7 +168,7 @@ The masking system uses Meta's SAM 3 (Segment Anything Model 3) with text-prompt
 
 **ERP and Pinhole modes** — The equirectangular frame is reframed into pinhole views at detection resolution, and SAM 3 runs on each pinhole view independently. All per-view detections are then back-projected into ERP space and OR-merged into a single high-resolution ERP mask — if any view detects the operator at a given ERP pixel, that pixel is masked, even in views where detection missed them. The merged ERP mask is then reprojected into each output pinhole view during the final reframing stage.
 
-**Fisheye and Fisheye (Pinhole) modes** — Each dual fisheye lens is masked independently. SAM 3 runs on the raw fisheye frames from both the front and back lenses. A circular mask is also applied to exclude the dark border outside the fisheye image circle — the `Circle Margin` setting (visible when masking is enabled in fisheye modes) controls how aggressively this border is trimmed. For Fisheye (Pinhole) mode, the fisheye masks are reprojected into the pinhole crops during reframing, just like the ERP path.
+**Fisheye mode** — Each dual fisheye lens is masked independently. SAM 3 runs on the raw fisheye frames from both the front and back lenses. A circular mask is also applied to exclude the dark border outside the fisheye image circle — the `Circle Margin` setting (visible when masking is enabled in fisheye mode) controls how aggressively this border is trimmed. When the Training output is **Pinhole** or **Both**, these lens masks are carried into the derived pinhole crops.
 
 ### SAM 3 Setup
 
@@ -249,10 +245,6 @@ The user-selectable preset controls the virtual camera rig. All presets produce 
 | Medium | 16 | 8+8 two-ring layout at ±35° with staggered upper ring |
 | High | 20 | Golden-angle spiral from zenith to nadir |
 | Ultra | 24 | Golden-angle spiral from zenith to nadir |
-
-### Fisheye (Pinhole) Mode
-
-Each dual fisheye lens is reframed into 8 pinhole crops (16 views total per source frame), using the fisheye-specific calibration for each camera family. COLMAP aligns only the two front-lens reference views, joined by a mini-rig constraint; every other view's pose is propagated from the reference solve.
 
 ## Output Structure
 

@@ -23,7 +23,7 @@ _MODE_BY_AXES = {
     ("fisheye", "native"): "fisheye",
     # No ("fisheye", "pinhole") entry: fisheye's pinhole output is chosen by
     # the Training output selector (Native/Pinhole/Both), not the processing
-    # axis. The legacy direct-reframe "fisheye_pinhole" mode was retired.
+    # axis. The legacy direct-reframe mode that used this pair was retired.
 }
 
 

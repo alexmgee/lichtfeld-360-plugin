@@ -107,6 +107,22 @@ All notable changes to the 360 Plugin are documented here.
   instead of leaving an `extracted/` folder behind). ([#3])
 
 ### Removed
+- The **"Fisheye (Pinhole)"** output mode — the legacy direct-reframe path
+  that cut each lens into 8 pinhole crops, solved
+  two front reference views under an inline mini-rig, and propagated the other
+  14 by rig geometry. Fisheye input now has exactly one pinhole route: the
+  **Fisheye** mode with **Training output = Pinhole** (or **Both**), which
+  solves the raw lenses natively and derives the crops from the COLMAP-refined
+  poses — registering substantially more frames. Fisheye no longer uses the
+  Native/Pinhole processing axis at all: the Output Mode dropdown is hidden for
+  fisheye input, and its output is chosen solely by the Training output
+  selector (Native / Pinhole / Both). ([#3])
+- The **Insta360 calibration JSON picker** (the "Calibration" file field) and
+  its `dual_fisheye_calibration_path` setting, which existed only to override
+  the reframing intrinsics of the retired mode. The surviving native path
+  builds its calibration from the COLMAP-refined reconstruction instead. The
+  inline mini-rig, the rig-propagated transforms writer, and the dual-fisheye
+  calibration provider module were removed along with it. ([#3])
 - The "ERP (Scaffold)" output mode and its "Keep pinhole scaffolding"
   checkbox. COLMAP aligns equirectangular frames directly now, so the pinhole
   scaffold workaround is no longer needed. The ERP mode (Native
