@@ -22,12 +22,6 @@ import numpy as np
 from .presets import ViewConfig
 from .reframer import create_rotation_matrix
 
-# Lazy import to avoid circular dependency — fisheye types only needed
-# by generate_fisheye_pinhole_rig_config.
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from .fisheye_reframer import FisheyeViewConfig
-
 
 def rotation_matrix_to_quaternion(R: np.ndarray) -> list[float]:
     """Convert a 3x3 rotation matrix to a [w, x, y, z] quaternion.
@@ -201,80 +195,6 @@ def write_dual_fisheye_rig_config(
         ]
     }]
 
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(rig, indent=2))
-    return str(out.resolve())
-
-
-def write_fisheye_pinhole_rig_config(
-    view_config: "FisheyeViewConfig",
-    output_path: str,
-    baseline_m: float = 0.026,
-) -> str:
-    """Generate and write rig config for fisheye → pinhole reframed views.
-
-    Each virtual pinhole camera's world-space rotation combines:
-      1. View-in-lens rotation: _rotation_matrix(yaw, pitch)
-      2. Lens-in-world rotation: front = identity, back = 180° Y
-
-    Reference sensor: first view in the config (front center).
-    Back-lens views get a translational offset for the baseline.
-
-    Args:
-        view_config: FisheyeViewConfig with all virtual views.
-        output_path: JSON file path to write.
-        baseline_m: Inter-lens baseline in metres.
-
-    Returns:
-        Absolute path to the written file.
-    """
-    from .fisheye_reframer import _rotation_matrix
-
-    # 180° Y rotation for back lens
-    R_back = np.array([
-        [-1, 0, 0],
-        [0, 1, 0],
-        [0, 0, -1],
-    ], dtype=np.float64)
-
-    views = view_config.views
-    if not views:
-        rig = [{"cameras": []}]
-        out = Path(output_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(rig, indent=2))
-        return str(out.resolve())
-
-    # Compute world-space rotation for each view
-    def _world_rotation(view) -> np.ndarray:
-        R_view = _rotation_matrix(view.yaw_deg, view.pitch_deg)
-        if view.source_lens == "back":
-            return R_view @ R_back
-        return R_view
-
-    R_ref = _world_rotation(views[0])
-
-    cameras: List[dict] = []
-    for i, view in enumerate(views):
-        cam_entry: dict = {"image_prefix": f"{view.name}/"}
-
-        if i == 0:
-            cam_entry["ref_sensor"] = True
-        else:
-            R = _world_rotation(view)
-            R_relative = R @ R_ref.T
-            qw, qx, qy, qz = rotation_matrix_to_quaternion(R_relative)
-            cam_entry["cam_from_rig_rotation"] = [qw, qx, qy, qz]
-
-            if view.source_lens == "back":
-                cam_entry["cam_from_rig_translation"] = [0.0, 0.0, -baseline_m]
-            else:
-                cam_entry["cam_from_rig_translation"] = [0.0, 0.0, 0.0]
-
-        cameras.append(cam_entry)
-
-    rig = [{"cameras": cameras}]
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(rig, indent=2))
