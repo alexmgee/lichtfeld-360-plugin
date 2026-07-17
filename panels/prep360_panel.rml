@@ -185,19 +185,6 @@
         <span class="status-text status-muted">{{camera_family_detected_text}}</span>
       </div>
 
-      <div class="setting-row" data-if="show_dual_fisheye_calibration_path">
-        <span class="prop-label">Calibration</span>
-        <div class="path-browse-row">
-          <div class="path-box path-box--small">{{dual_fisheye_calibration_path_text}}</div>
-          <button class="btn btn--secondary btn--compact" data-event-click="select_dual_fisheye_calibration">Choose</button>
-          <button class="btn btn--secondary btn--compact" data-event-click="clear_dual_fisheye_calibration">Clear</button>
-        </div>
-      </div>
-      <div class="setting-row" data-if="show_dual_fisheye_calibration_path">
-        <span class="prop-label"></span>
-        <span class="status-text status-muted">{{dual_fisheye_calibration_note}}</span>
-      </div>
-
       <div class="setting-row">
         <span class="prop-label">Output Path</span>
         <div class="path-browse-row">
@@ -208,7 +195,7 @@
       <!-- Output Mode sits above the Training output dropdown (only a one-line
            note may separate them), so it needs the higher stacking tier for the
            same reason as Camera above Masks. -->
-      <div class="setting-row setting-row--dropdown setting-row--dropdown-high">
+      <div class="setting-row setting-row--dropdown setting-row--dropdown-high" data-if="show_processing_dropdown">
         <span class="prop-label">Output Mode</span>
         <select data-value="processing_idx">
           <option value="0">Native</option>

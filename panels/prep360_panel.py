@@ -423,7 +423,6 @@ class Plugin360Panel(lf.ui.Panel):
         self._camera_family_detected: Optional[str] = None  # set by detect_input_type()
         self._front_video_path: str = ""
         self._back_video_path: str = ""
-        self._dual_fisheye_calibration_path: str = ""
         self._keep_streams: bool = False
         self._keep_native_sparse: bool = True  # native sparse is valid; retain by default (checkbox lets user opt out)
         self._keep_extracted_data: bool = True  # keep frames & masks by default
@@ -639,6 +638,9 @@ class Plugin360Panel(lf.ui.Panel):
         # The Output Mode dropdown is now the 2-option processing axis
         # (Native / Pinhole); projection is orthogonal and auto-detected.
         model.bind("processing_idx", lambda: str(self._processing_idx), self._set_processing_idx)
+        # Fisheye has no Native/Pinhole processing axis (its output is chosen by
+        # the Training output selector), so hide the Output Mode dropdown for it.
+        model.bind_func("show_processing_dropdown", lambda: self._projection != "fisheye")
         model.bind(
             "fisheye_training_output_idx",
             lambda: str(self._fisheye_training_output_idx),
@@ -674,7 +676,6 @@ class Plugin360Panel(lf.ui.Panel):
             lambda: self._output_mode_idx in (
                 ERP_NATIVE_OUTPUT_MODE_IDX,
                 FISHEYE_OUTPUT_MODE_IDX,
-                FISHEYE_PINHOLE_OUTPUT_MODE_IDX,
             ),
         )
         model.bind_func(
@@ -714,9 +715,6 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("front_video_path_text", lambda: self._front_video_path or "(not set)")
         model.bind_func("back_video_path_text", lambda: self._back_video_path or "(not set)")
         model.bind_func("camera_family_detected_text", self._get_camera_family_detected_text)
-        model.bind_func("show_dual_fisheye_calibration_path", self._show_dual_fisheye_calibration_path)
-        model.bind_func("dual_fisheye_calibration_path_text", lambda: self._dual_fisheye_calibration_path or "(not set)")
-        model.bind_func("dual_fisheye_calibration_note", self._get_dual_fisheye_calibration_note)
         model.bind("keep_streams", lambda: self._keep_streams, self._set_keep_streams)
         model.bind("keep_native_sparse", lambda: self._keep_native_sparse, self._set_keep_native_sparse)
         model.bind_func("show_keep_native_sparse", lambda: self._output_mode_idx == ERP_NATIVE_OUTPUT_MODE_IDX)
@@ -745,8 +743,6 @@ class Plugin360Panel(lf.ui.Panel):
                 )
             ),
         )
-        model.bind_event("select_dual_fisheye_calibration", self._on_select_dual_fisheye_calibration)
-        model.bind_event("clear_dual_fisheye_calibration", self._on_clear_dual_fisheye_calibration)
         model.bind_event("select_front_video", self._on_select_front_video)
         model.bind_event("select_back_video", self._on_select_back_video)
         model.bind_event("clear_front_video", self._on_clear_front_video)
@@ -1054,35 +1050,6 @@ class Plugin360Panel(lf.ui.Panel):
         label = family_to_label.get(self._camera_family_detected, self._camera_family_detected)
         return f"Camera family detected: {label}"
 
-    def _current_dual_fisheye_family(self) -> Optional[str]:
-        if self._camera_family_detected is not None and self._source_mode_idx == 0:
-            return self._camera_family_detected
-        if 0 <= self._camera_family_idx < len(CAMERA_FAMILIES):
-            return CAMERA_FAMILIES[self._camera_family_idx]
-        return None
-
-    def _show_dual_fisheye_calibration_path(self) -> bool:
-        # Video Fisheye (Pinhole) only. The image-folder fisheye path resolves
-        # priors from camera_family alone (image_folder_fisheye.py) and never
-        # reads dual_fisheye_calibration_path, so offering the picker there
-        # would silently discard the user's selection.
-        return (
-            self._source_mode_idx != 2
-            and self._output_mode_idx == FISHEYE_PINHOLE_OUTPUT_MODE_IDX
-            and self._current_dual_fisheye_family() == "insta360"
-        )
-
-    def _get_dual_fisheye_calibration_note(self) -> str:
-        if self._dual_fisheye_calibration_path:
-            return (
-                "Advanced override selected. This replaces the built-in generic "
-                "Insta360 estimate for Fisheye (Pinhole) reframing."
-            )
-        return (
-            "Optional advanced override. Leave empty to use the built-in generic "
-            "Insta360 estimate; choose JSON only if you have measured calibration."
-        )
-
     @staticmethod
     def _format_sam3_status(status: str) -> str:
         labels = {
@@ -1296,8 +1263,6 @@ class Plugin360Panel(lf.ui.Panel):
             if training_output == "both":
                 return "Native fisheye plus 8 pinhole crops per registered lens"
             return "2 fisheye images per pair (front + back, native resolution)"
-        if self._get_output_mode() == "fisheye_pinhole":
-            return "8+8 pinhole crops per pair (Default preset, 90° FOV, rig-constrained)"
         name = resolve_view_preset_name(
             self._get_selected_preset_name(),
             self._get_output_mode(),
@@ -1321,12 +1286,6 @@ class Plugin360Panel(lf.ui.Panel):
             if training_output == "both":
                 return f"~{_pairs_fish} pairs x 18 = {18 * _pairs_fish:,} total images"
             return f"~{_pairs_fish} pairs x 2 = {2 * _pairs_fish:,} fisheye images"
-        if output_mode == "fisheye_pinhole":
-            if not self._video_info:
-                return "16 pinhole crops per pair (8 front + 8 back)"
-            _interval_fp = 1.0 / max(0.1, self._extract_fps)
-            _pairs_fp = VideoAnalyzer.estimate_frame_count(self._video_info, _interval_fp)
-            return f"~{_pairs_fp} pairs x 16 = {16 * _pairs_fp:,} pinhole crops"
         vc = self._get_current_view_config()
         views = vc.total_views()
         if not self._video_info:
@@ -1405,26 +1364,6 @@ class Plugin360Panel(lf.ui.Panel):
                 f"Fisheye | {family_label} | "
                 f"{self._get_fisheye_training_output_label()} | "
                 "OPENCV_FISHEYE \u00d7 2 cameras | "
-                f"~{pairs:,} pairs"
-            )
-
-        if output_mode == "fisheye_pinhole":
-            family = self._camera_family_detected
-            if family is None and 0 <= self._camera_family_idx < len(CAMERA_FAMILIES):
-                family = CAMERA_FAMILIES[self._camera_family_idx]
-            family_label = (
-                CAMERA_FAMILY_LABELS[CAMERA_FAMILIES.index(family)]
-                if family in CAMERA_FAMILIES else (family or "unknown")
-            )
-            if not self._video_loaded:
-                return "No video loaded"
-            interval = 1.0 / max(0.1, self._extract_fps)
-            pairs = (
-                VideoAnalyzer.estimate_frame_count(self._video_info, interval)
-                if self._video_info else 0
-            )
-            return (
-                f"Fisheye (Pinhole) | {family_label} | PINHOLE \u00d7 16 cameras | "
                 f"~{pairs:,} pairs"
             )
 
@@ -2613,9 +2552,6 @@ class Plugin360Panel(lf.ui.Panel):
         mode = self._get_output_mode()
         # Snap SIFT to the new mode's preset row (no-op if Custom and not forced).
         self._resnap_sift_for_mode(force=force_sift)
-        # Fisheye (Pinhole) defaults to sequential matching (rig-constrained).
-        if mode == "fisheye_pinhole":
-            self._colmap_matcher_idx = 0  # sequential
         # Force incremental mapper for rig-dependent modes (GLOMAP lacks the
         # constant_rigs constraint). Native fisheye is the only exempt mode.
         if mode != "fisheye" and self._mapper_idx != 0:
@@ -2668,12 +2604,6 @@ class Plugin360Panel(lf.ui.Panel):
                 "camera model with PER_FOLDER mode. Each lens (front/back) is "
                 "calibrated independently by bundle adjustment."
             )
-        if self._output_mode_idx == FISHEYE_PINHOLE_OUTPUT_MODE_IDX:
-            return (
-                "Reframes fisheye into 16 pinhole crops (8 per lens) and aligns "
-                "via COLMAP with PINHOLE model + rig constraints + sequential "
-                "matching. Faster and more robust than native fisheye."
-            )
         return ""
 
     def _set_output_path(self, val):
@@ -2722,32 +2652,6 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _set_back_video_path_noop(self, val):
         del val
-
-    @staticmethod
-    def _open_calibration_file_dialog(title: str = "Select Calibration JSON") -> str:
-        if os.name == "nt":
-            return _open_file_via_win32(
-                title=title,
-                filters=[
-                    ("Calibration JSON", "*.json"),
-                    ("All files", "*.*"),
-                ],
-            )
-        return ""
-
-    def _on_select_dual_fisheye_calibration(self, handle, event, args):
-        del handle, event, args
-        path = self._open_calibration_file_dialog()
-        if path:
-            self._dual_fisheye_calibration_path = path
-            if self._handle:
-                self._handle.dirty_all()
-
-    def _on_clear_dual_fisheye_calibration(self, handle, event, args):
-        del handle, event, args
-        self._dual_fisheye_calibration_path = ""
-        if self._handle:
-            self._handle.dirty_all()
 
     # ── Section toggle ────────────────────────────────────────
 
@@ -2858,7 +2762,7 @@ class Plugin360Panel(lf.ui.Panel):
         """
         del handle, event, args
         # Auto-detect transition → fisheye projection, Pinhole processing
-        # (matches the prior forced fisheye_pinhole behavior).
+        # (processing is moot for fisheye; output is chosen by Training output).
         self._projection = "fisheye"
         self._processing_idx = PINHOLE_PROCESSING_IDX
         self._source_mode_idx = 1  # "split"
@@ -3313,20 +3217,20 @@ class Plugin360Panel(lf.ui.Panel):
                 else "native"
             ),
             # Dual fisheye fields
-            input_type=("dual_fisheye" if output_mode in ("fisheye", "fisheye_pinhole") else "erp"),
+            input_type=("dual_fisheye" if output_mode == "fisheye" else "erp"),
             camera_family=(
                 self._camera_family_detected
-                if (output_mode in ("fisheye", "fisheye_pinhole") and self._source_mode_idx == 0)
+                if (output_mode == "fisheye" and self._source_mode_idx == 0)
                 else (
                     CAMERA_FAMILIES[self._camera_family_idx]
-                    if (output_mode in ("fisheye", "fisheye_pinhole")
+                    if (output_mode == "fisheye"
                         and 0 <= self._camera_family_idx < len(CAMERA_FAMILIES))
                     else None
                 )
             ),
             source_mode=(
                 SOURCE_MODES[self._source_mode_idx]
-                if (output_mode in ("fisheye", "fisheye_pinhole")
+                if (output_mode == "fisheye"
                     and 0 <= self._source_mode_idx < len(SOURCE_MODES))
                 else "container"
             ),
@@ -3358,7 +3262,6 @@ class Plugin360Panel(lf.ui.Panel):
             ),
             front_video_path=self._front_video_path,
             back_video_path=self._back_video_path,
-            dual_fisheye_calibration_path=self._dual_fisheye_calibration_path,
             keep_streams=self._keep_streams,
             keep_native_sparse=self._keep_native_sparse,
             keep_extracted_data=self._keep_extracted_data,
@@ -3397,22 +3300,6 @@ class Plugin360Panel(lf.ui.Panel):
                 )
         else:
             self._append_processing_log(f"Preset: {PRESET_LABELS[self._preset_idx]}")
-        if output_mode == "fisheye_pinhole":
-            family = (
-                self._camera_family_detected
-                or (CAMERA_FAMILIES[self._camera_family_idx]
-                    if 0 <= self._camera_family_idx < len(CAMERA_FAMILIES)
-                    else "unknown")
-            )
-            if family == "insta360":
-                if self._dual_fisheye_calibration_path:
-                    self._append_processing_log(
-                        f"Calibration: {self._dual_fisheye_calibration_path}"
-                    )
-                else:
-                    self._append_processing_log(
-                        "Calibration: built-in generic Insta360 estimate (unverified)"
-                    )
         self._append_processing_log(
             f"Output mode: {OUTPUT_MODE_LABELS[self._output_mode_idx]}"
         )
@@ -3719,9 +3606,7 @@ class Plugin360Panel(lf.ui.Panel):
                     # by full relative path. BlenderLoader cannot — it matches
                     # masks by bare filename, and front/000001 + back/000001
                     # collide ("ambiguous across the dataset mask folders").
-                    # Fisheye (Pinhole) uses output/colmap as the dataset base
-                    # so LFS mask lookup, transforms, and sparse/0 agree.
-                    if result.output_mode in ("fisheye", "fisheye_pinhole"):
+                    if result.output_mode == "fisheye":
                         dataset_base_path, import_output_path = self._resolve_transforms_directory_import_target(
                             result.dataset_path
                         )
