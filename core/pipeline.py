@@ -154,7 +154,7 @@ class PipelineConfig:
                                        # (video fisheye keeps fisheye_training_output)
     keep_streams: bool = False  # retain demuxed front.mp4/back.mp4 alongside output
     keep_native_sparse: bool = True  # retain COLMAP sparse/ + database.db after native ERP export (native sparse is a valid EQUIRECTANGULAR dataset)
-    keep_extracted_data: bool = False  # retain raw frames, pinhole crops, and masks
+    keep_extracted_data: bool = True  # keep extracted frames + masks as <output>/images + <output>/masks deliverables (ERP/Fisheye Pinhole); default on so generated data is never silently discarded
 
     # Fisheye masking
     fisheye_circle_margin: float = 6.0  # Circle mask margin in percent
@@ -427,7 +427,10 @@ class PipelineJob:
         if not sparse_dir.is_dir():
             sparse_dir = native_out / "sparse"
 
-        pinhole_out = out / "pinhole"
+        # Pinhole-only ships a single dataset in colmap/ (unified with the ERP
+        # Pinhole layout: <output>/images + <output>/masks + <output>/colmap).
+        # Both keeps the two-dataset native/ + pinhole/ layout.
+        pinhole_out = out / ("colmap" if training_output == "pinhole" else "pinhole")
         self._update(
             "output", 96.0,
             "Exporting native-derived pinhole crops...",
@@ -477,6 +480,20 @@ class PipelineJob:
                 raise RuntimeError(
                     f"Refusing to remove unsafe native output path: {native_out}"
                 )
+            # Always preserve the solve log alongside the shipped dataset.
+            _native_log = native_out / "metadata" / "colmap_debug.log"
+            if _native_log.is_file():
+                shutil.move(str(_native_log), str(pinhole_out / "colmap_debug.log"))
+            if cfg.keep_extracted_data:
+                # Keep the extracted fisheye frames + masks as deliverables,
+                # unified with ERP Pinhole: <output>/images + <output>/masks
+                # (front/back preserved). Propagation already rendered its own
+                # self-contained crops into colmap/, so these are free to move.
+                if images_dir.is_dir():
+                    shutil.move(str(images_dir), str(out / "images"))
+                if masks_dir.is_dir():
+                    shutil.move(str(masks_dir), str(out / "masks"))
+            # native/ is now a spent intermediate (sparse/transforms/pointcloud).
             shutil.rmtree(str(native_out))
             result.dataset_path = str(pinhole_transforms)
             result.num_output_images = len(pinhole_frames)
@@ -930,32 +947,37 @@ class PipelineJob:
         # Stage 6: Write Output (85-95%)
         # ===================================================================
         # Pinhole mode: COLMAP dataset already written by ColmapRunner under
-        # colmap/. Promote the extraction work products to root deliverables:
-        # ERP frames -> <output>/images/, ERP masks -> <output>/masks/, the
-        # extraction manifest beside them; then drop the emptied extracted/
-        # (rmdir-only -- anything unexpected keeps it).
+        # colmap/. When "keep frames & masks" is on (default), promote the
+        # extraction work products to root deliverables: ERP frames ->
+        # <output>/images/, ERP masks -> <output>/masks/, the extraction
+        # manifest beside them; then drop the emptied extracted/ (rmdir-only,
+        # so anything unexpected keeps it). When off, discard extracted/ and
+        # ship only the colmap/ dataset.
         self._update("output", 85.0, "COLMAP dataset ready")
         dataset_path = colmap_result.reconstruction_path
 
         import shutil
 
-        from .frame_source import relocate_erp_frames_to_colmap
+        if cfg.keep_extracted_data:
+            from .frame_source import relocate_erp_frames_to_colmap
 
-        _manifest = frames_dir / "extraction_manifest.json"
-        if _manifest.is_file():
-            shutil.move(str(_manifest), str(out / _manifest.name))
-        relocate_erp_frames_to_colmap(frames_dir, out)  # frames -> out/images
-        _erp_masks = extracted_dir / "masks"
-        if _erp_masks.is_dir():
-            _dest_masks = out / "masks"
-            _dest_masks.mkdir(parents=True, exist_ok=True)
-            for _m in sorted(_erp_masks.glob("*.png")):
-                shutil.move(str(_m), str(_dest_masks / _m.name))
-        for _d in (extracted_dir / "masks", frames_dir, extracted_dir):
-            try:
-                _d.rmdir()
-            except OSError:
-                pass
+            _manifest = frames_dir / "extraction_manifest.json"
+            if _manifest.is_file():
+                shutil.move(str(_manifest), str(out / _manifest.name))
+            relocate_erp_frames_to_colmap(frames_dir, out)  # frames -> out/images
+            _erp_masks = extracted_dir / "masks"
+            if _erp_masks.is_dir():
+                _dest_masks = out / "masks"
+                _dest_masks.mkdir(parents=True, exist_ok=True)
+                for _m in sorted(_erp_masks.glob("*.png")):
+                    shutil.move(str(_m), str(_dest_masks / _m.name))
+            for _d in (extracted_dir / "masks", frames_dir, extracted_dir):
+                try:
+                    _d.rmdir()
+                except OSError:
+                    pass
+        else:
+            shutil.rmtree(extracted_dir, ignore_errors=True)
 
         # ===================================================================
         # Stage 7: Done (95-100%)
@@ -1316,10 +1338,18 @@ class PipelineJob:
         if self._check_cancel():
             raise RuntimeError("Cancelled")
         shutil.rmtree(temp_dir, ignore_errors=True)
-        moved, _removed = relocate_erp_frames_to_colmap(frames_dir, out)
-        _finalize_extracted(out)
-        logger.info(
-            "Kept %d extracted ERP frames at %s", moved, out / "images")
+        if cfg.keep_extracted_data:
+            moved, _removed = relocate_erp_frames_to_colmap(frames_dir, out)
+            _finalize_extracted(out)
+            logger.info(
+                "Kept %d extracted ERP frames at %s", moved, out / "images")
+        else:
+            # Lean: ship only colmap/. Drop the extracted ERP frames and the
+            # source ERP masks (colmap/ carries its own propagated per-crop
+            # masks). extracted/ never outlives the run.
+            shutil.rmtree(extracted_dir, ignore_errors=True)
+            if masks_dir.is_dir():
+                shutil.rmtree(masks_dir, ignore_errors=True)
         self._update("complete", 100.0, "Propagated Pinhole export complete")
         return _erp_result(
             colmap_dir / "transforms.json", num_output_images,
@@ -2462,18 +2492,6 @@ class PipelineJob:
         if cfg.output_mode == "fisheye_pinhole":
             import shutil as _shutil2
 
-            if cfg.keep_extracted_data:
-                extracted_dir.mkdir(exist_ok=True)
-                _rig_img_dst = extracted_dir / "pinhole_images"
-                if _rig_img_dst.exists():
-                    _shutil2.rmtree(str(_rig_img_dst))
-                _shutil2.copytree(str(images_dir), str(_rig_img_dst))
-                if output_masks_dir and output_masks_dir.exists():
-                    _rig_msk_dst = extracted_dir / "pinhole_masks"
-                    if _rig_msk_dst.exists():
-                        _shutil2.rmtree(str(_rig_msk_dst))
-                    _shutil2.copytree(str(output_masks_dir), str(_rig_msk_dst))
-
             # Flatten view subfolders: images/front_ctr_hi/000042.jpg → images/front_ctr_hi_000042.jpg
             self._update("output", 93.0, "Flattening output folders...")
             _flatten_view_folders(images_dir)
@@ -2545,11 +2563,7 @@ class PipelineJob:
         self._update("complete", 100.0, "Fisheye reconstruction + transforms.json ready")
 
         # Clean up intermediate files and organize metadata
-        self._cleanup_fisheye_output(
-            out,
-            extracted_dir,
-            keep_extracted_data=cfg.keep_extracted_data,
-        )
+        self._cleanup_fisheye_output(out, extracted_dir)
 
         elapsed = time.time() - t0
         return PipelineResult(
@@ -2648,19 +2662,17 @@ class PipelineJob:
         )
 
     @staticmethod
-    def _cleanup_fisheye_output(
-        out: Path, extracted_dir: Path, keep_extracted_data: bool = False
-    ) -> None:
+    def _cleanup_fisheye_output(out: Path, extracted_dir: Path) -> None:
         """Clean up intermediate files after a successful fisheye run.
 
-        - Removes the extracted/ directory (demuxed streams already cleaned,
-          frames staged to images/, masks staged to masks/).
+        - Always removes the extracted/ working directory — it must not outlive
+          a run. Any frames/masks kept for delivery are promoted to
+          <output>/images + <output>/masks by the caller beforehand.
         - Moves colmap_debug.log into metadata/.
         """
         import shutil
         if extracted_dir.exists():
-            if not keep_extracted_data:
-                shutil.rmtree(extracted_dir, ignore_errors=True)
+            shutil.rmtree(extracted_dir, ignore_errors=True)
 
         # Move debug files into metadata/
         metadata_dir = out / "metadata"

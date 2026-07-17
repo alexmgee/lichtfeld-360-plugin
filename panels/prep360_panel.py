@@ -429,7 +429,7 @@ class Plugin360Panel(lf.ui.Panel):
         self._dual_fisheye_calibration_path: str = ""
         self._keep_streams: bool = False
         self._keep_native_sparse: bool = True  # native sparse is valid; retain by default (checkbox lets user opt out)
-        self._keep_extracted_data: bool = False
+        self._keep_extracted_data: bool = True  # keep frames & masks by default
         self._fisheye_training_output_idx: int = 0  # native by default
         self._training_output_idx: int = 0  # image-folder: native by default
         self._fisheye_circle_margin: float = 6.0
@@ -599,6 +599,12 @@ class Plugin360Panel(lf.ui.Panel):
         # Loop closure detection
         model.bind("loop_closure_enabled", lambda: self._loop_closure_enabled, self._set_loop_closure)
         model.bind_func("show_loop_closure_tree", lambda: self._loop_closure_enabled)
+        # ERP (Pinhole) hardcodes loop_detection=False (rig-constrained
+        # sequential pairs suffice — pipeline.py); grey the checkbox out there
+        # so it doesn't accept a setting the solve ignores. All other modes
+        # (ERP Native, both fisheye paths) forward the value.
+        model.bind_func("loop_closure_disabled",
+                        lambda: self._output_mode_idx == PINHOLE_OUTPUT_MODE_IDX)
         model.bind_func("vocab_tree_status", self._get_vocab_tree_status)
 
         # Advanced quality toggles (default off)
@@ -718,7 +724,30 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind("keep_native_sparse", lambda: self._keep_native_sparse, self._set_keep_native_sparse)
         model.bind_func("show_keep_native_sparse", lambda: self._output_mode_idx == ERP_NATIVE_OUTPUT_MODE_IDX)
         model.bind("keep_extracted_data", lambda: self._keep_extracted_data, self._set_keep_extracted_data)
-        model.bind_func("show_keep_extracted_data", lambda: self._output_mode_idx == FISHEYE_PINHOLE_OUTPUT_MODE_IDX)
+        # "Keep frames & masks" — retain the extracted source frames + masks as
+        # <output>/images + <output>/masks deliverables next to the pinhole
+        # dataset. Shown for the VIDEO runs that produce a pinhole dataset with
+        # otherwise-discarded source frames: ERP (Pinhole), native Fisheye with
+        # Training output = Pinhole, and ERP (Native) with Training output =
+        # Pinhole. Image folders read the user's own frames in place, so there
+        # is nothing to discard there.
+        model.bind_func(
+            "show_keep_extracted_data",
+            lambda: (
+                self._source_mode_idx != 2
+                and (
+                    self._output_mode_idx == PINHOLE_OUTPUT_MODE_IDX
+                    or (
+                        self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX
+                        and self._get_fisheye_training_output() == "pinhole"
+                    )
+                    or (
+                        self._output_mode_idx == ERP_NATIVE_OUTPUT_MODE_IDX
+                        and self._get_training_output() == "pinhole"
+                    )
+                )
+            ),
+        )
         model.bind_event("select_dual_fisheye_calibration", self._on_select_dual_fisheye_calibration)
         model.bind_event("clear_dual_fisheye_calibration", self._on_clear_dual_fisheye_calibration)
         model.bind_event("select_front_video", self._on_select_front_video)
@@ -1031,8 +1060,13 @@ class Plugin360Panel(lf.ui.Panel):
         return None
 
     def _show_dual_fisheye_calibration_path(self) -> bool:
+        # Video Fisheye (Pinhole) only. The image-folder fisheye path resolves
+        # priors from camera_family alone (image_folder_fisheye.py) and never
+        # reads dual_fisheye_calibration_path, so offering the picker there
+        # would silently discard the user's selection.
         return (
-            self._output_mode_idx == FISHEYE_PINHOLE_OUTPUT_MODE_IDX
+            self._source_mode_idx != 2
+            and self._output_mode_idx == FISHEYE_PINHOLE_OUTPUT_MODE_IDX
             and self._current_dual_fisheye_family() == "insta360"
         )
 

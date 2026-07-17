@@ -111,6 +111,13 @@ body {
     opacity: 0.4;
 }
 
+/* Loop-closure checkbox greys out in ERP (Pinhole), where the solve
+   hardcodes loop_detection off (the checkbox shares its row with Total
+   Output, so only the group greys, not the whole row). */
+.loop-closure-group.row-disabled {
+    opacity: 0.4;
+}
+
 /* ── Scrub field layout (mirrors LFS components.rcss) ──── */
 
 .scrub-field {

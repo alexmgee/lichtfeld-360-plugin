@@ -16,11 +16,11 @@ The pipeline runs in six stages, each configurable from the plugin panel:
 
 3. **Mask** — When SAM 3 is installed and masking is enabled, the plugin automatically detects and masks the camera operator (and any other objects specified by prompt keywords) from every extracted frame. For ERP/Pinhole modes, detection runs on pinhole crops and results are back-projected and merged into a full-resolution ERP mask. For fisheye modes, detection runs directly on the raw fisheye frames.
 
-4. **Reframe** — Each equirectangular frame is reprojected into multiple pinhole perspective views arranged in a virtual camera rig. Built-in presets range from 6 views (cubemap) to 24 views (ultra-dense Fibonacci spiral). These pinhole crops give COLMAP clean perspective images to work with, which is critical because COLMAP cannot align equirectangular images directly.
+4. **Reframe** — In the Pinhole output modes, each equirectangular frame is reprojected into multiple pinhole perspective views arranged in a virtual camera rig. Built-in presets range from 6 views (cubemap) to 24 views (ultra-dense Fibonacci spiral). The native modes skip this stage for the reconstruction itself — COLMAP 4.1 aligns equirectangular and fisheye frames directly — but reframing is still used for ERP masking detection and for deriving a Pinhole training output from a native solve.
 
-5. **Align** — All pinhole views are fed to COLMAP 4.1 for structure-from-motion reconstruction. The plugin configures COLMAP with rig constraints that lock the geometric relationship between virtual cameras from the same panorama, since they share an exact optical center. This produces a single consistent reconstruction across the full sequence. Feature extraction uses SIFT or ALIKED (N16/N32) with Bruteforce or LightGlue matching. Sequential or exhaustive pair selection is available, with a configurable overlap window for sequential mode.
+5. **Align** — The images are fed to COLMAP 4.1 for structure-from-motion reconstruction: pinhole views in the Pinhole modes, the source ERP or fisheye frames in the native modes. In the Pinhole modes the plugin configures COLMAP with rig constraints that lock the geometric relationship between virtual cameras from the same panorama, since they share an exact optical center. This produces a single consistent reconstruction across the full sequence. Feature extraction uses SIFT or ALIKED (N16/N32) with Bruteforce or LightGlue matching. Sequential or exhaustive pair selection is available, with a configurable overlap window for sequential mode.
 
-6. **Output** — The final dataset is written in one of five output modes (see below) and can be imported directly into LichtFeld Studio for Gaussian Splatting training.
+6. **Output** — The final dataset is written in one of four output modes (see below) and can be imported directly into LichtFeld Studio for Gaussian Splatting training.
 
 ## Supported Input
 
@@ -35,17 +35,19 @@ The pipeline runs in six stages, each configurable from the plugin panel:
 ### Select Image Folder
 
 You can skip video extraction entirely and point the plugin at a folder of
-frames you already have. Click **Select Image Folder** on the input screen,
+frames you already have. Click **Image Folder** on the input screen,
 then choose a projection:
 
 - **Equirectangular**: one folder of 360 frames.
 - **Fisheye**: a dual-lens set, as either **One** folder (files named
   `front...` and `back...` so each pair matches, e.g. `front_0001.jpg` and
   `back_0001.jpg`) or **Two** folders (front and back). Pick the **Camera**
-  family so calibration matches. Staged pairs are renamed to matched
-  `000001.jpg`-style names — COLMAP pairs the front/back lenses by identical
-  filename — and `colmap/paired_extraction_manifest.json` maps every staged
-  name back to your original file.
+  family so calibration matches. Staged pairs are renamed to matched index
+  names (`000001.jpg`, each file keeping its own extension) so each
+  front/back pair shares a basename, and for Native and Both outputs the
+  native dataset's `paired_extraction_manifest.json` (beside its `images/`
+  folder, i.e. in `colmap/` or `colmap/native/`) maps every staged name back
+  to your original file.
 
 **Masks**: **Generate with SAM 3**, **Use pre-existing masks** (available for
 Equirectangular + Pinhole output; point at a folder of masks named to match
@@ -75,8 +77,9 @@ your frames become the dataset's images. Equirectangular frames are read where
 they sit and moved into the dataset once COLMAP succeeds; fisheye frames are
 copied into the dataset before the solve (the two-lens intrinsics need them
 there) and the originals removed only after it succeeds. That removal takes only
-image files, and anything else in the folder — a sidecar file, a subfolder —
-stops it and leaves your folder untouched. **Pinhole** output never touches the
+image files — the frames themselves are preserved inside the dataset — and
+anything else in the folder (a sidecar file, a subfolder) is never deleted;
+it just blocks removal of the emptied folder, which stays in place. **Pinhole** output never touches the
 source at all: the native solve it needs runs in a temporary workspace that is
 discarded afterwards.
 
@@ -95,14 +98,15 @@ A **Training output** selector (Native / Pinhole / Both) controls what is
 written from the single native reconstruction, exactly as for image folders:
 one dataset lands in `<output>/colmap/`; **Both** writes
 `colmap/native/` + `colmap/pinhole/`, with the pinhole crops' poses propagated
-from the native solve (no second COLMAP run). **Pinhole** ships only the
-propagated pinhole dataset at `colmap/` and keeps the extracted ERP frames at
-`<output>/images/` and the ERP masks at `<output>/masks/` as reusable
-deliverables.
+from the native solve (no second COLMAP run). **Pinhole** ships the propagated
+pinhole dataset at `colmap/`; with **Keep frames & masks** on (the default) it
+also keeps the extracted ERP frames at `<output>/images/` and the ERP masks at
+`<output>/masks/` as reusable deliverables, and unchecking it ships only
+`colmap/`.
 
 ### ERP (Pinhole)
 
-Standard COLMAP pinhole dataset. Each source frame produces multiple perspective crops (6–24 depending on preset). The output is a conventional COLMAP sparse reconstruction with per-view images, masks, and a rig config — packaged under `<output>/colmap/`, with the extracted ERP frames kept at `<output>/images/` (and ERP masks at `<output>/masks/`) as reusable deliverables.
+Standard COLMAP pinhole dataset. Each source frame produces multiple perspective crops (6–24 depending on preset). The output is a conventional COLMAP sparse reconstruction with per-view images, masks, and a rig config — packaged under `<output>/colmap/`. For video input, the **Keep frames & masks** checkbox (on by default) also keeps the extracted ERP frames at `<output>/images/` and ERP masks at `<output>/masks/` as reusable deliverables; unchecking it ships only `colmap/`. An image-folder source is read in place and left untouched.
 
 ### Fisheye
 
@@ -120,7 +124,7 @@ The **Pinhole** option renders pinhole crops from the raw fisheye using the COLM
 
 ### Fisheye (Pinhole)
 
-The original direct-pinhole path: reframes each dual fisheye lens into 8 pinhole crops (16 total per source frame) and reconstructs them directly in COLMAP with pinhole camera models and rig constraints. Kept for compatibility, but for a pinhole dataset from fisheye input the **Fisheye** mode's **Pinhole** training output is now recommended — reconstructing the reframed crops directly registers noticeably fewer frames than the native path.
+The original direct-pinhole path: reframes each dual fisheye lens into 8 pinhole crops (16 total per source frame), aligns the two front-lens reference views in COLMAP under a mini-rig constraint, and propagates the remaining crops' poses from that solve. Kept for compatibility, but for a pinhole dataset from fisheye input the **Fisheye** mode's **Pinhole** training output is now recommended — reconstructing the reframed crops directly registers noticeably fewer frames than the native path.
 
 ## Installation
 
@@ -143,20 +147,20 @@ Then restart LichtFeld Studio.
 ## Usage
 
 1. Open the **360 Plugin** tab in the right panel
-2. Load your video:
-   - **Select 360° Video** for a single file (ERP, .osv, or .insv)
-   - **Select Front + Back Lens Videos** for pre-split fisheye .mp4 pairs
-   - **Re-run COLMAP on Existing Output** to re-align previously extracted frames with different COLMAP settings
-3. Choose an **Output Path** and **Output Mode**. For the **Fisheye** mode, a **Training output** selector (Native / Pinhole / Both) chooses which dataset(s) to write from the native reconstruction.
+2. Load your input:
+   - **360° Video** for a single file (ERP, .osv, or .insv)
+   - **Front + Back Lens Video** for pre-split fisheye .mp4 pairs
+   - **Image Folder** for already-extracted frames (see [Select Image Folder](#select-image-folder))
+3. Choose an **Output Path** and **Output Mode**. For the **ERP** and **Fisheye** modes, a **Training output** selector (Native / Pinhole / Both) chooses which dataset(s) to write from the native reconstruction.
 4. Configure each pipeline stage using the collapsible sections:
 
    **Frame Extraction** — `FPS` sets the extraction rate. `Sharpness` controls frame selection quality (None / Basic / Better / Best). The blur metric can be switched between Tenengrad and Laplacian. Check **Extract all frames** to skip scoring entirely and save every frame, which suits timelapses and image sequences where each frame matters; the FPS, Sharpness, and Blur Metric controls grey out and the estimate shows the true frame total.
 
    **Masking** — Enable masking and enter prompt keywords (e.g. `person, tripod`). SAM 3 detects and masks matching objects in every frame.
 
-   **Reframe & Alignment** — `Preset` selects the virtual camera rig layout (Pinhole mode). `Features` chooses the extractor (SIFT, ALIKED N16 rot, ALIKED N32). `Matcher Type` chooses the matcher (Bruteforce or LightGlue). `Matcher` selects pair strategy (Sequential with configurable overlap, or Exhaustive). `Mapper` selects Incremental (supports rig constraints) or Global/GLOMAP (faster, no rig support).
+   **Reframe & Alignment** — `Preset` selects the virtual camera rig layout (Pinhole mode). `Features` chooses the extractor (SIFT, ALIKED N16 rot, ALIKED N32). `Matcher Type` chooses the matcher (Bruteforce or LightGlue). `Matcher` selects pair strategy (Sequential with configurable overlap, or Exhaustive). `Mapper` selects Incremental (supports rig constraints) or Global/GLOMAP (faster, no rig support). `BA Solver` picks the bundle-adjustment backend: Hybrid (default), Caspar, Ceres GPU, or Ceres CPU.
 
-   **Output Quality** — `Crop Size` sets pinhole view resolution. `COLMAP Preset` (Low / Normal / High) adjusts match limits, and `Max. Matches` sets the per-pair cap directly.
+   **Output Quality** — `Crop Size` sets pinhole view resolution. `COLMAP Preset` (Normal / High / Custom) snaps max features, max image size, and the match budget to per-mode defaults; `Match Limit` (Fast / Balanced / Default / High / Custom) picks the per-pair match budget, and `Max. Matches` sets the cap directly.
 
 5. Click **Process & Import** to run the pipeline and load the result into LichtFeld Studio, or **Process Only** to create the dataset without importing
 
@@ -210,7 +214,7 @@ All 6 combinations of extractor and matcher are supported. The required ONNX mod
 
 - **Sequential** matches each image against its temporal neighbors. The **Overlap** slider (2–20) controls the neighborhood size. Faster for video sequences with smooth motion.
 - **Exhaustive** tests all possible image pairs. Slower but more robust for irregular capture patterns or scenes that need global loop closure.
-- **Loop Closure** can be enabled alongside sequential matching to add vocabulary-tree-based global pair candidates, helping close loops in sequences that revisit earlier viewpoints.
+- **Loop Closure** can be enabled alongside sequential matching to add vocabulary-tree-based global pair candidates, helping close loops in sequences that revisit earlier viewpoints. Every mode honors it except the ERP direct-pinhole solves (video and image folder), which force it off — their rig-constrained sequential pairs are sufficient.
 - **Guided Matching** (off by default) re-matches geometrically verified pairs under their estimated epipolar geometry, recovering extra correspondences on difficult pairs at the cost of a second matching pass.
 
 ### Mapper
@@ -220,7 +224,7 @@ All 6 combinations of extractor and matcher are supported. The required ONNX mod
 | Incremental | Standard COLMAP incremental mapper. Supports rig constraints, which are required for pinhole-reframed 360° data where multiple virtual cameras share the same optical center. |
 | Global (GLOMAP) | COLMAP 4.1's global SfM mapper. Faster for large datasets but does not support rig constraints. A warning is shown when selected with rig-dependent output modes. |
 
-### Match Budget
+### Match Limit
 
 | Preset | Max Matches / Pair | Use Case |
 |--------|-------------------:|----------|
@@ -232,7 +236,7 @@ All 6 combinations of extractor and matcher are supported. The required ONNX mod
 
 ## Reframing Presets
 
-Each output mode uses a different reframing strategy to convert the source footage into pinhole views for COLMAP alignment.
+The Pinhole modes use reframing to convert the source footage into pinhole views for COLMAP alignment; the native modes reconstruct the source frames directly and reframe only for ERP masking detection or a Pinhole training output.
 
 ### Pinhole Mode
 
@@ -248,11 +252,16 @@ The user-selectable preset controls the virtual camera rig. All presets produce 
 
 ### Fisheye (Pinhole) Mode
 
-Each dual fisheye lens is reframed into 8 pinhole crops (16 views total per source frame), using the fisheye-specific calibration for each camera family. The front and back lens rigs are combined into a single COLMAP rig constraint with a baseline offset between the two optical centers.
+Each dual fisheye lens is reframed into 8 pinhole crops (16 views total per source frame), using the fisheye-specific calibration for each camera family. COLMAP aligns only the two front-lens reference views, joined by a mini-rig constraint; every other view's pose is propagated from the reference solve.
 
 ## Output Structure
 
-### Pinhole (direct COLMAP solve)
+### Pinhole (direct COLMAP solve, video input)
+
+The `images/` + `masks/` deliverables below are kept when **Keep frames &
+masks** is on (the default) and dropped when it's off (only `colmap/` ships).
+Image-folder Pinhole runs read the source in place and never promote an
+`images/` folder (masks still export to `<output>/masks/`).
 
 ```text
 output_dir/
@@ -297,7 +306,9 @@ as deliverables.
 
 ### Fisheye
 
-The **Training output** selector determines the layout. Each dataset lands in its own subfolder and is self-contained — its own COLMAP `sparse/0`, `transforms.json`, images, masks, and point cloud. **Native** writes `native/` only; **Pinhole** writes `pinhole/` only; **Both** writes both.
+For video input, the **Training output** selector determines the layout (image-folder runs follow the unified `colmap/` rule in [Select Image Folder](#select-image-folder)). **Native** and **Both** write self-contained datasets in their own subfolders; **Pinhole** ships a single dataset in `colmap/`, matching the ERP (Pinhole) layout.
+
+**Native** / **Both** — each dataset self-contained (its own `sparse/0`, `transforms.json`, images, masks, point cloud):
 
 ```text
 output_dir/
@@ -307,7 +318,7 @@ output_dir/
 │   ├── sparse/0/                  COLMAP reconstruction (OPENCV_FISHEYE)
 │   ├── pointcloud.ply
 │   └── transforms.json
-└── pinhole/                       (Pinhole or Both)
+└── pinhole/                       (Both only)
     ├── images/                    flat pinhole crops (view_frame.jpg)
     ├── masks/
     ├── sparse/0/                  COLMAP model (PINHOLE; poses derived from native)
@@ -315,7 +326,22 @@ output_dir/
     └── transforms.json
 ```
 
-Point LichtFeld Studio at the specific subfolder you want to train (`native/` or `pinhole/`).
+**Pinhole** — single dataset in `colmap/`; with **Keep frames & masks** on (default) the extracted lens frames + masks are also kept at the output root (unchecking ships only `colmap/`):
+
+```text
+output_dir/
+├── images/ front/ back/           extracted lens frames (Keep frames & masks)
+├── masks/ front/ back/            lens masks (Keep frames & masks)
+└── colmap/                        THE dataset — point LFS here
+    ├── images/                    flat pinhole crops (view_frame.jpg)
+    ├── masks/
+    ├── sparse/0/                  COLMAP model (PINHOLE; poses derived from native)
+    ├── pointcloud.ply
+    ├── transforms.json
+    └── colmap_debug.log
+```
+
+Point LichtFeld Studio at `colmap/` (Pinhole), or the `native/` / `pinhole/` subfolder you want to train.
 
 ## Dependencies
 

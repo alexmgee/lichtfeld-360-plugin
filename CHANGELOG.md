@@ -90,6 +90,21 @@ All notable changes to the 360 Plugin are documented here.
   choices apply to both, in place of the previous five-entry list. Switching
   Native or Pinhole now also applies the matching COLMAP matcher and mapper
   corrections consistently, including on auto-detected fisheye input. ([#3])
+- **Keep frames & masks** (the former "Keep extracted data" checkbox,
+  relabeled and now **on by default**) governs whether a Pinhole run keeps the
+  extracted source frames + masks as `<output>/images/` + `<output>/masks/`
+  deliverables next to the `colmap/` dataset. It covers the three video paths
+  that ship a pinhole dataset: **ERP (Pinhole)**, native **Fisheye → Training
+  output = Pinhole**, and **ERP (Native) → Training output = Pinhole**.
+  Unchecking ships only the dataset. The native Fisheye → Pinhole path
+  previously deleted the native fisheye frames and masks outright; it now
+  keeps them (default) and ships its dataset in `<output>/colmap/` (unified
+  with ERP (Pinhole)) instead of `<output>/pinhole/`, always preserving the
+  COLMAP solve log. ([#3])
+- The transient `extracted/` work directory is now **always removed** at the
+  end of every run, including fisheye runs — it no longer survives when frames
+  are retained (retention promotes them to `<output>/images/` + `<output>/masks/`
+  instead of leaving an `extracted/` folder behind). ([#3])
 
 ### Removed
 - The "ERP (Scaffold)" output mode and its "Keep pinhole scaffolding"

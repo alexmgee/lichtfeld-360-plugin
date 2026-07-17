@@ -249,7 +249,7 @@
         <span class="status-text status-muted">
           <div class="loop-closure-group">
             <input type="checkbox" data-checked="keep_extracted_data" id="keep_extracted_data_cb"/>
-            <label class="checkbox-label" for="keep_extracted_data_cb">Keep extracted data</label>
+            <label class="checkbox-label" for="keep_extracted_data_cb">Keep frames &amp; masks</label>
           </div>
         </span>
       </div>
@@ -488,8 +488,8 @@
       <div class="setting-row">
         <span class="prop-label">Total Output</span>
         <span class="status-text status-muted">{{total_output_text}}</span>
-        <div class="loop-closure-group">
-          <input type="checkbox" data-checked="loop_closure_enabled" id="loop_closure_cb"/>
+        <div class="loop-closure-group" data-class-row-disabled="loop_closure_disabled">
+          <input type="checkbox" data-checked="loop_closure_enabled" id="loop_closure_cb" data-attr-disabled="loop_closure_disabled"/>
           <label class="checkbox-label" for="loop_closure_cb">Loop closure</label>
         </div>
       </div>
