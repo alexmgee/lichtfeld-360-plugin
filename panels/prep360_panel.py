@@ -217,8 +217,6 @@ SIFT_PRESET_MATRIX: dict[tuple[str, str], tuple[int, int, int]] = {
     ("pinhole", "high"):   (4096, 2432, 65536),
     ("fisheye", "normal"):         (8192, 3840, 32768),
     ("fisheye", "high"):           (16384, 3840, 65536),
-    ("fisheye_pinhole", "normal"): (8192, 1920, 32768),
-    ("fisheye_pinhole", "high"):   (16384, 1920, 65536),
 }
 
 # Default max_num_features per extractor type (from COLMAP docs).
@@ -231,16 +229,15 @@ _FEATURE_MAX_DEFAULTS = {
 }
 
 # OUTPUT_MODES is imported from core.output_mode (the single source of truth):
-# ("erp_native", "pinhole", "fisheye", "fisheye_pinhole"). Labels stay local
-# because the mapping module is deliberately kept free of UI concerns.
+# ("erp_native", "pinhole", "fisheye"). Labels stay local because the mapping
+# module is deliberately kept free of UI concerns.
 OUTPUT_MODE_LABELS = [
-    "ERP", "ERP (Pinhole)", "Fisheye", "Fisheye (Pinhole)",
+    "ERP", "ERP (Pinhole)", "Fisheye",
 ]
 ERP_NATIVE_OUTPUT_MODE_IDX = OUTPUT_MODES.index("erp_native")
 PINHOLE_OUTPUT_MODE_IDX = OUTPUT_MODES.index("pinhole")
 FISHEYE_OUTPUT_MODE_IDX = OUTPUT_MODES.index("fisheye")
-FISHEYE_PINHOLE_OUTPUT_MODE_IDX = OUTPUT_MODES.index("fisheye_pinhole")
-_FISHEYE_MODES = {FISHEYE_OUTPUT_MODE_IDX, FISHEYE_PINHOLE_OUTPUT_MODE_IDX}
+_FISHEYE_MODES = {FISHEYE_OUTPUT_MODE_IDX}
 
 # Processing axis: the collapsed Output Mode dropdown (Native / Pinhole),
 # orthogonal to projection ("erp" / "fisheye"). The derived output_mode is
@@ -1006,8 +1003,13 @@ class Plugin360Panel(lf.ui.Panel):
         Computed from the two orthogonal axes (_projection, _processing).
         The ~two dozen read sites keep working unchanged; the four former
         write sites now set _projection / _processing_idx instead.
+
+        Fisheye has no processing axis — its output is chosen by the Training
+        output selector — so processing is pinned to "native" for fisheye and
+        the retired ("fisheye", "pinhole") combo is never derived.
         """
-        return output_mode_index(self._projection, self._processing)
+        processing = "native" if self._projection == "fisheye" else self._processing
+        return output_mode_index(self._projection, processing)
 
     def _get_output_mode(self) -> str:
         if 0 <= self._output_mode_idx < len(OUTPUT_MODES):

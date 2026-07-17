@@ -15,13 +15,15 @@ stays unit-testable on its own.
 
 # Internal mode strings, in a stable order. The obsolete "erp_scaffold" mode
 # is intentionally absent (COLMAP handles equirectangular natively).
-OUTPUT_MODES = ("erp_native", "pinhole", "fisheye", "fisheye_pinhole")
+OUTPUT_MODES = ("erp_native", "pinhole", "fisheye")
 
 _MODE_BY_AXES = {
     ("erp", "native"): "erp_native",
     ("erp", "pinhole"): "pinhole",
     ("fisheye", "native"): "fisheye",
-    ("fisheye", "pinhole"): "fisheye_pinhole",
+    # No ("fisheye", "pinhole") entry: fisheye's pinhole output is chosen by
+    # the Training output selector (Native/Pinhole/Both), not the processing
+    # axis. The legacy direct-reframe "fisheye_pinhole" mode was retired.
 }
 
 
