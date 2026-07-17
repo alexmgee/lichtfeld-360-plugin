@@ -152,9 +152,7 @@ def run_image_folder_fisheye(cfg, update, cancel_check) -> dict:
 
     output_mode = (cfg.output_mode or "fisheye").lower()
     training = (cfg.training_output or "native").lower()
-    if output_mode == "fisheye_pinhole":
-        track = "pinhole"
-    elif output_mode == "fisheye":
+    if output_mode == "fisheye":
         if training not in ("native", "pinhole", "both"):
             raise ValueError(f"Unknown training_output: {cfg.training_output!r}")
         track = training
