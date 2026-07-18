@@ -1212,18 +1212,29 @@ except Exception as exc:
             ba.refine_focal_length = self._config.refine_focal_length
             ba.refine_principal_point = self._config.refine_principal_point
             ba.refine_extra_params = self._config.refine_extra_params
-            ba.backend = global_ba_opts.backend
-            if ba.backend == pycolmap.BundleAdjustmentBackend.CASPAR:
-                # Caspar rejects refine_focal_length != refine_extra_params
-                # (merged focal_and_extra block); harmless for PINHOLE.
-                ba.refine_extra_params = ba.refine_focal_length
-            if global_ba_opts.backend == pycolmap.BundleAdjustmentBackend.CERES:
-                ba.ceres.use_gpu = global_ba_opts.ceres.use_gpu
-                ba.ceres.auto_select_solver_type = global_ba_opts.ceres.auto_select_solver_type
-                if global_ba_opts.ceres.use_gpu:
-                    ba.ceres.solver_options.sparse_linear_algebra_library_type = (
-                        global_ba_opts.ceres.solver_options.sparse_linear_algebra_library_type
-                    )
+            if global_ba_opts.backend == pycolmap.BundleAdjustmentBackend.CASPAR:
+                # Caspar under GLOMAP terminates prematurely
+                # (CONVERGED_DIAG_EXIT on every BA round; measured +0.08px
+                # reprojection and −5% points vs Ceres on identical input) —
+                # GLOMAP always runs its BA on Ceres-GPU instead.
+                ba.backend = pycolmap.BundleAdjustmentBackend.CERES
+                ba.ceres.use_gpu = True
+                ba.ceres.auto_select_solver_type = True
+                _sla = type(ba.ceres.solver_options.sparse_linear_algebra_library_type)
+                ba.ceres.solver_options.sparse_linear_algebra_library_type = (
+                    _sla.CUDA_SPARSE
+                )
+                _log("Step 4: GLOMAP — Caspar global BA demoted to Ceres-GPU "
+                     "(premature-convergence regression)")
+            else:
+                ba.backend = global_ba_opts.backend
+                if global_ba_opts.backend == pycolmap.BundleAdjustmentBackend.CERES:
+                    ba.ceres.use_gpu = global_ba_opts.ceres.use_gpu
+                    ba.ceres.auto_select_solver_type = global_ba_opts.ceres.auto_select_solver_type
+                    if global_ba_opts.ceres.use_gpu:
+                        ba.ceres.solver_options.sparse_linear_algebra_library_type = (
+                            global_ba_opts.ceres.solver_options.sparse_linear_algebra_library_type
+                        )
             ba.refine_sensor_from_rig = False
             global_opts.mapper.refine_sensor_from_rig = False
             global_opts.mapper.global_positioning.refine_sensor_from_rig = False

@@ -33,6 +33,25 @@ def verify_pycolmap_provenance(pycolmap_module) -> Optional[str]:
     loaded = os.path.normcase(str(Path(module_file).resolve()))
     expected_root = os.path.normcase(str((_PLUGIN_DIR / ".venv").resolve()))
     if loaded.startswith(expected_root + os.sep):
+        # Right venv — but a CPU pycolmap inside OUR OWN venv (e.g. an
+        # accidental `pip install -U pycolmap` pulling PyPI's CPU-only
+        # Windows wheel) breaks GPU BA. PyPI's wheel reports has_cuda=False;
+        # the pinned CUDA wheel reports True.
+        if getattr(pycolmap_module, "has_cuda", None) is False:
+            version = getattr(pycolmap_module, "__version__", "unknown")
+            logger.error(
+                "pycolmap %s in the plugin venv has no CUDA "
+                "(has_cuda=False) — the CUDA wheel was replaced, likely by "
+                "PyPI's CPU-only build", version,
+            )
+            return (
+                f"COLMAP blocked: the installed pycolmap {version} is a "
+                f"CPU-only build (has_cuda=False). The plugin requires its "
+                f"pinned CUDA wheel. Fix: run 'uv sync' in the plugin "
+                f"directory (the lockfile pins the correct wheel), then "
+                f"restart LichtFeld Studio. Never run 'pip install -U "
+                f"pycolmap' — PyPI's Windows wheel has no CUDA."
+            )
         return None
     version = getattr(pycolmap_module, "__version__", "unknown")
     culprit = _plugin_name_from_path(Path(module_file))

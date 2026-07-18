@@ -2497,17 +2497,39 @@ class Plugin360Panel(lf.ui.Panel):
     def _get_ba_solver_note(self) -> str:
         solver = BA_SOLVERS[self._ba_solver_idx] if 0 <= self._ba_solver_idx < len(BA_SOLVERS) else "auto"
         output_mode = self._get_output_mode()
+        # Effective mapper: erp_native forces incremental regardless of the
+        # dropdown (pipeline._erp_native_solve hardcodes it), so the note
+        # must not describe GLOMAP there.
+        is_glomap = self._mapper_idx == 1 and output_mode != "erp_native"
+        # Caspar is only eligible for PINHOLE/SIMPLE_RADIAL; fisheye
+        # (OPENCV_FISHEYE) and erp_native (EQUIRECTANGULAR) always route
+        # global BA to Ceres-GPU on model grounds.
+        caspar_eligible_model = output_mode == "pinhole"
+
+        if solver == "ceres":
+            return "Ceres CPU solver (no GPU — for debugging/comparison)."
+
+        # GLOMAP has a single BA option (no separate local/global).
+        if is_glomap:
+            if solver == "caspar" and caspar_eligible_model:
+                return "GLOMAP BA runs on Ceres-GPU (Caspar excluded here: converges prematurely under GLOMAP)."
+            if solver == "auto" and caspar_eligible_model:
+                return "GLOMAP BA runs on Ceres-GPU (Caspar excluded under GLOMAP)."
+            return "GLOMAP BA runs on Ceres-GPU (cuDSS)."
+
+        # Incremental mapper (local + global BA are distinct)
         if solver == "auto":
-            if output_mode == "fisheye":
-                return "Hybrid: Ceres-GPU on both local and global BA (OPENCV_FISHEYE)."
-            return "Hybrid: Ceres-GPU local BA + Caspar global BA."
+            if caspar_eligible_model:
+                return "Hybrid: Ceres-GPU local BA + Caspar global BA."
+            model = "OPENCV_FISHEYE" if output_mode == "fisheye" else "EQUIRECTANGULAR"
+            return f"Hybrid: Ceres-GPU on both local and global BA ({model})."
         if solver == "caspar":
-            if output_mode == "fisheye":
-                return "OPENCV_FISHEYE not supported by Caspar — will fall back to Ceres-GPU."
-            return "Caspar GPU BA on both local and global (fast, PINHOLE only)."
-        if solver == "ceres_gpu":
-            return "Ceres with cuDSS GPU acceleration on both local and global BA."
-        return "Ceres CPU solver (no GPU — for debugging/comparison)."
+            if caspar_eligible_model:
+                return "Caspar GPU BA on both local and global (fast, PINHOLE only)."
+            model = "OPENCV_FISHEYE" if output_mode == "fisheye" else "EQUIRECTANGULAR"
+            return f"{model} not supported by Caspar — will fall back to Ceres-GPU."
+        # ceres_gpu
+        return "Ceres with cuDSS GPU acceleration on both local and global BA."
 
     def _get_mapper_note(self) -> str:
         """Warning when GLOMAP is selected in a rig-dependent output mode."""
@@ -2516,6 +2538,11 @@ class Plugin360Panel(lf.ui.Panel):
         mode = self._get_output_mode()
         if mode == "fisheye":
             return ""  # fisheye native doesn't use rig constraints
+        if mode == "erp_native":
+            # ERP-native always runs the incremental mapper
+            # (pipeline._erp_native_solve hardcodes it); the dropdown choice
+            # is ignored here.
+            return "ERP-native always uses the Incremental mapper — GLOMAP selection is ignored."
         return ("GLOMAP lacks rig constraints — cameras will drift relative to "
                 "each other. Use Incremental mapper for rig-dependent modes.")
 
