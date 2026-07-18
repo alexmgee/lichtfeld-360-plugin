@@ -84,20 +84,27 @@ def generate_rig_config(view_config: ViewConfig) -> list[dict]:
     the frame key shared across all virtual cameras for the same panorama.
 
     Rotation convention:
-        ``create_rotation_matrix()`` returns ``world_from_cam`` for each
-        virtual view because the reframer rotates camera-space rays into
-        world-space before sampling the ERP image. COLMAP's
-        ``cam_from_rig_rotation`` expects the inverse relationship:
-        a transform from rig coordinates into each camera's coordinates.
+        ``create_rotation_matrix()`` returns ``cam_from_world`` for each
+        virtual view — rows ``[right, up, -forward]``. (Ground truth:
+        ``reframe_view`` samples along ``R.T @ ray``, rotating a
+        camera-space ray into world space, so ``R`` is world-to-camera.)
+        COLMAP's ``cam_from_rig_rotation`` is the transform from rig
+        coordinates into each camera's coordinates.
 
-        With the reference sensor defining the rig coordinate system, the
-        correct relative rotation for camera ``i`` is therefore::
+        With the reference sensor (view ``[0]``) defining the rig frame,
+        ``world_from_rig = R_ref.T``, so the relative rotation for camera
+        ``i`` is::
 
-            cam_i_from_rig = cam_i_from_world * world_from_rig
-                           = R_i.T * R_ref
+            cam_i_from_rig = cam_i_from_world @ world_from_rig
+                           = R_i @ R_ref.T
 
-        Writing the forward rotation ``R_i * R_ref.T`` mirrors the rig and
-        causes COLMAP to assemble geometrically inconsistent reconstructions.
+        implemented below as ``R @ R_ref.T`` — a proper rotation (det +1).
+        The cancellation assumes every view shares the same output-axis
+        convention: the reframer's universal ``fliplr`` cancels in the
+        relative rotation. Per-view ``flip_vertical`` is deliberately not
+        honored here (the ``_flip`` field is ignored) — such a view is an
+        improper reflection with no quaternion representation and must not
+        be used with rig alignment. No built-in preset sets ``flip_vertical``.
 
     Args:
         view_config: The view configuration defining all perspective views.
