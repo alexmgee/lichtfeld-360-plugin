@@ -412,6 +412,13 @@ class Plugin360Panel(lf.ui.Panel):
         # Output — two orthogonal axes. _output_mode_idx is a derived,
         # read-only property computed from these (see below).
         self._projection: str = "erp"  # "erp" | "fisheye"
+        # Projection-first input menu (Plan 03 / Option B): False = Initial
+        # state ([Equirectangular]/[Fisheye] buttons); True = that projection's
+        # source menu. Gates ONLY the input-menu markup — _projection stays
+        # non-null ("provisional ERP" in Initial) so the ~24 read sites and the
+        # derived _output_mode_idx keep working unchanged (plan D1).
+        self._projection_chosen: bool = False
+        self._fisheye_single_lens: bool = False
         self._processing_idx: int = PINHOLE_PROCESSING_IDX  # default: ERP (Pinhole)
         self._output_path: str = ""
 
@@ -703,10 +710,20 @@ class Plugin360Panel(lf.ui.Panel):
         is_image_folder = lambda: self._source_mode_idx == 2
         is_fisheye_container = lambda: is_fisheye() and not is_split() and not is_image_folder()
 
-        # Empty-state visibility: show two entry buttons when nothing loaded
-        # (no single video AND not in split mode AND not in image-folder mode).
+        # Projection-first input menu (Plan 03 / Option B). Initial shows the
+        # two projection buttons; after a choice the source menu renders, and
+        # once a source is active (video loaded / split / image folder) the
+        # source buttons yield to that source's block. "‹ Back to projection"
+        # is the single reset affordance (plan D3a).
         empty_state = lambda: not self._video_loaded and not is_split() and not is_image_folder()
-        model.bind_func("show_split_entry", empty_state)
+        model.bind_func("show_projection_choice", lambda: not self._projection_chosen)
+        model.bind_func("show_source_menu", lambda: self._projection_chosen)
+        model.bind_func("show_source_buttons", empty_state)
+        model.bind_func("show_erp_sources", lambda: self._projection == "erp")
+        model.bind_func("show_fisheye_sources", lambda: self._projection == "fisheye")
+        model.bind_event("select_projection_erp", self._on_select_projection_erp)
+        model.bind_event("select_projection_fisheye", self._on_select_projection_fisheye)
+        model.bind_event("back_to_projection", self._on_back_to_projection)
         model.bind_func("show_image_folder_mode", is_image_folder)
         # Single-file picker visible when video loaded (regular flow) or
         # when nothing loaded and not in split mode (so the "Select 360°
@@ -753,13 +770,8 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_event("clear_front_video", self._on_clear_front_video)
         model.bind_event("clear_back_video", self._on_clear_back_video)
         model.bind_event("enter_split_mode", self._on_enter_split_mode)
-        model.bind_event("exit_split_mode", self._on_exit_split_mode)
         # ── Image-folder input mode (source_mode_idx == 2) ──
         model.bind_event("enter_image_folder_mode", self._on_enter_image_folder_mode)
-        model.bind_event("exit_image_folder_mode", self._on_exit_image_folder_mode)
-        model.bind("image_projection_idx",
-                   lambda: str(0 if self._projection == "erp" else 1),
-                   self._set_image_projection)
         # R1: Folders is an inline two-way control rather than a dropdown (the
         # dropdown overlapped its neighbouring row). Same _fisheye_folder_mode
         # state; the active button is driven by data-class-is-active.
@@ -832,7 +844,6 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("error_text", lambda: self._error_message)
         # -- Events --
         model.bind_event("select_video", self._on_select_video)
-        model.bind_event("clear_video", self._on_clear_video)
         model.bind_event("browse_output", self._on_browse_output)
         model.bind_event("run_pipeline", self._on_run_pipeline)
         model.bind_event("run_pipeline_only", self._on_run_pipeline_only)
@@ -1286,6 +1297,13 @@ class Plugin360Panel(lf.ui.Panel):
                 return "2 fisheye images per pair (front + back)"
             _interval_fish = 1.0 / max(0.1, self._extract_fps)
             _pairs_fish = VideoAnalyzer.estimate_frame_count(self._video_info, _interval_fish)
+            if self._fisheye_single_lens:
+                # One lens: 1 native frame and 8 propagated crops per frame.
+                if training_output == "pinhole":
+                    return f"~{_pairs_fish} frames x 8 = {8 * _pairs_fish:,} pinhole crops"
+                if training_output == "both":
+                    return f"~{_pairs_fish} frames x 9 = {9 * _pairs_fish:,} total images"
+                return f"~{_pairs_fish:,} fisheye frames"
             if training_output == "pinhole":
                 return f"~{_pairs_fish} pairs x 16 = {16 * _pairs_fish:,} pinhole crops"
             if training_output == "both":
@@ -1365,6 +1383,15 @@ class Plugin360Panel(lf.ui.Panel):
                 VideoAnalyzer.estimate_frame_count(self._video_info, interval)
                 if self._video_info else 0
             )
+            if self._fisheye_single_lens:
+                # No camera family for a bare single-lens file \u2014 don't let the
+                # dropdown's default leak into the summary.
+                return (
+                    "Fisheye (single lens) | "
+                    f"{self._get_fisheye_training_output_label()} | "
+                    "OPENCV_FISHEYE \u00d7 1 camera | "
+                    f"~{pairs:,} frames"
+                )
             return (
                 f"Fisheye | {family_label} | "
                 f"{self._get_fisheye_training_output_label()} | "
@@ -1713,14 +1740,17 @@ class Plugin360Panel(lf.ui.Panel):
             lines.append(
                 f"Registered frames: {result.num_registered_frames}/{result.num_source_frames}"
             )
-            lines.append(f"Complete rig frames: {result.num_complete_frames}")
-            lines.append(f"Dropped rig frames: {dropped_frames}")
+            # "rig" only describes multi-view frames; single-view runs
+            # (single-lens fisheye, ERP native) have no rig to speak of.
+            rig_label = "rig frames" if result.views_per_frame > 1 else "frames"
+            lines.append(f"Complete {rig_label}: {result.num_complete_frames}")
+            lines.append(f"Dropped {rig_label}: {dropped_frames}")
             if result.dropped_frame_examples:
                 lines.append(
                     f"Dropped examples: {', '.join(result.dropped_frame_examples)}"
                 )
             if result.num_partial_frames > 0:
-                lines.append(f"Partial rig frames: {result.num_partial_frames}")
+                lines.append(f"Partial {rig_label}: {result.num_partial_frames}")
                 if result.partial_frame_examples:
                     lines.append(
                         f"Examples: {', '.join(result.partial_frame_examples)}"
@@ -2629,6 +2659,12 @@ class Plugin360Panel(lf.ui.Panel):
                 "output still derives pinhole crops from that native solve."
             )
         if self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX:
+            if self._fisheye_single_lens:
+                return (
+                    "Outputs raw fisheye frames aligned via COLMAP's "
+                    "OPENCV_FISHEYE camera model — one lens, one camera, "
+                    "calibrated by bundle adjustment."
+                )
             return (
                 "Outputs raw fisheye frames aligned via COLMAP's OPENCV_FISHEYE "
                 "camera model with PER_FOLDER mode. Each lens (front/back) is "
@@ -2780,6 +2816,66 @@ class Plugin360Panel(lf.ui.Panel):
             return
         self._load_video(path)
 
+    # ── Projection-first input menu (Plan 03 / Option B) ──────────
+
+    def _on_select_projection_erp(self, handle, event, args):
+        del handle, event, args
+        self._select_projection("erp")
+
+    def _on_select_projection_fisheye(self, handle, event, args):
+        del handle, event, args
+        self._select_projection("fisheye")
+
+    def _select_projection(self, projection: str):
+        """Explicit projection choice — the first step of the input menu.
+
+        Replaces the old auto-detect (extension / 2:1 aspect guess) as the
+        thing that decides ERP vs fisheye. _projection stays the canonical
+        field the rest of the panel reads (plan D1).
+        """
+        self._projection = projection
+        self._projection_chosen = True
+        if projection == "fisheye":
+            # Processing is moot for fisheye (output is chosen by Training
+            # output); mirror the old fisheye transitions.
+            self._processing_idx = PINHOLE_PROCESSING_IDX
+        # Transplanted from the retired image-folder projection dropdown
+        # (AR-N2): reset a stale pre-existing mask choice when the mode
+        # leaves ERP+Pinhole.
+        if self._get_output_mode() != "pinhole" and self._mask_source == "preexisting":
+            self._mask_source = "generate"
+        self._error_message = ""
+        self._apply_mode_side_effects(force_sift=True)
+
+    def _on_back_to_projection(self, handle, event, args):
+        """The single reset affordance (plan D3a): clear ALL source state and
+        return to the Initial [Equirectangular]/[Fisheye] step."""
+        del handle, event, args
+        self._projection_chosen = False
+        # Deterministic Initial state (matches the on-load mockup):
+        # provisional ERP + Pinhole processing until the next explicit choice.
+        self._projection = "erp"
+        self._processing_idx = PINHOLE_PROCESSING_IDX
+        self._source_mode_idx = 0  # "container"
+        # Single-file state
+        self._video_loaded = False
+        self._video_path = ""
+        self._video_info = None
+        self._video_info_text = ""
+        self._camera_family_detected = None
+        self._fisheye_single_lens = False
+        # Split state
+        self._front_video_path = ""
+        self._back_video_path = ""
+        # Image-folder state
+        self._image_dir = ""
+        self._fisheye_dir = ""
+        self._front_dir = ""
+        self._back_dir = ""
+        self._preexisting_mask_dir = ""
+        self._error_message = ""
+        self._apply_mode_side_effects(force_sift=True)
+
     def _on_enter_split_mode(self, handle, event, args):
         """Switch to fisheye + split-files input mode without opening any
         dialog. The user clicks Choose on each picker separately afterward.
@@ -2796,20 +2892,12 @@ class Plugin360Panel(lf.ui.Panel):
         self._video_info = None
         self._video_info_text = ""
         self._camera_family_detected = None
+        self._fisheye_single_lens = False
         self._error_message = ""
         # Forced SIFT resnap + sequential matcher + incremental mapper + dirty
         # bindings, all via the shared helper (called last so dirty_all sees
         # the final state).
         self._apply_mode_side_effects(force_sift=True)
-
-    def _on_exit_split_mode(self, handle, event, args):
-        """Leave split mode and return to single-file empty state."""
-        del handle, event, args
-        self._source_mode_idx = 0  # "container"
-        self._front_video_path = ""
-        self._back_video_path = ""
-        if self._handle:
-            self._handle.dirty_all()
 
     # ── Image-folder input mode (source_mode_idx == 2) ──────────
 
@@ -2826,34 +2914,10 @@ class Plugin360Panel(lf.ui.Panel):
         self._front_video_path = ""
         self._back_video_path = ""
         self._camera_family_detected = None
+        self._fisheye_single_lens = False
         self._error_message = ""
-        # Default to Equirectangular; the projection toggle switches to fisheye.
-        self._projection = "erp"
-        self._apply_mode_side_effects(force_sift=True)
-
-    def _on_exit_image_folder_mode(self, handle, event, args):
-        """Leave image-folder mode and return to the empty state."""
-        del handle, event, args
-        self._source_mode_idx = 0  # "container"
-        self._image_dir = ""
-        self._fisheye_dir = ""
-        self._front_dir = ""
-        self._back_dir = ""
-        self._preexisting_mask_dir = ""
-        if self._handle:
-            self._handle.dirty_all()
-
-    def _set_image_projection(self, val):
-        """Projection toggle. Sets the canonical self._projection (AR-2) so
-        _get_output_mode / input_type route ERP vs fisheye; resets a stale
-        pre-existing mask choice when leaving ERP+Pinhole (AR-N2)."""
-        try:
-            idx = int(val)
-        except (TypeError, ValueError):
-            return
-        self._projection = "erp" if idx == 0 else "fisheye"
-        if self._get_output_mode() != "pinhole" and self._mask_source == "preexisting":
-            self._mask_source = "generate"
+        # Projection was chosen upstream in the input menu (plan D6) — do NOT
+        # reset it here.
         self._apply_mode_side_effects(force_sift=True)
 
     def _on_set_folder_mode_one(self, handle, event, args):
@@ -2948,36 +3012,85 @@ class Plugin360Panel(lf.ui.Panel):
 
     def _load_video(self, path: str):
         self._error_message = ""
-        # Auto-detect dual fisheye input from extension and flip Output Mode
-        # to Fisheye proactively so the right UI appears before VideoAnalyzer
-        # finishes (VideoAnalyzer also handles .osv/.insv via ffprobe).
         # Import from the stdlib-only module — never from core.pipeline,
         # which pulls the full cv2/torch/pycolmap stack. A broken heavy
         # dependency must not be able to break video selection (#6/#8).
         from ..core.input_detect import detect_input_type
 
         input_type, family = detect_input_type(path)
-        if input_type == "dual_fisheye":
-            # Auto-detect transition → fisheye projection, Pinhole processing.
-            self._projection = "fisheye"
+        info = None
+        if self._projection == "fisheye" and input_type == "dual_fisheye":
+            self._fisheye_single_lens = False
             self._processing_idx = PINHOLE_PROCESSING_IDX
             self._source_mode_idx = 0  # container mode by default
             self._camera_family_detected = family
             if family in CAMERA_FAMILIES:
                 self._camera_family_idx = CAMERA_FAMILIES.index(family)
             self._apply_mode_side_effects(force_sift=True)
+        elif (
+            self._projection == "fisheye"
+            and (input_type, family) == ("erp", None)
+        ):
+            try:
+                info = VideoAnalyzer().analyze(path)
+            except Exception as exc:
+                logger.error("Failed to analyze video: %s", exc)
+                self._error_message = f"Video analysis failed: {exc}"
+                if self._handle:
+                    self._handle.dirty_all()
+                return
+            if info.is_erp:
+                self._error_message = (
+                    "This looks like a 2:1 equirectangular video — go ‹ Back "
+                    "and choose Equirectangular."
+                )
+                if self._handle:
+                    self._handle.dirty_all()
+                return
+            # 1:1 gate: the circle mask assumes a centered, frame-inscribed
+            # image circle, which only holds for square sensors (Osmo /
+            # Insta360). Non-square fisheye needs circle auto-fit + preview
+            # (follow-up plan item) before it can mask correctly.
+            if abs(info.width / max(info.height, 1) - 1.0) > 0.02:
+                self._error_message = (
+                    "Single-lens fisheye currently requires 1:1 video "
+                    "(e.g. 3840×3840) — non-square fisheye is planned."
+                )
+                if self._handle:
+                    self._handle.dirty_all()
+                return
+            self._fisheye_single_lens = True
+            self._source_mode_idx = 0
+            self._camera_family_detected = None
+            self._processing_idx = PINHOLE_PROCESSING_IDX
+            self._apply_mode_side_effects(force_sift=True)
+        elif input_type == "dual_fisheye":
+            self._error_message = (
+                "This is a dual-fisheye container — go ‹ Back and choose "
+                "Fisheye → Video."
+            )
+            if self._handle:
+                self._handle.dirty_all()
+            return
         else:
             self._camera_family_detected = None
-            # AR-3: an ERP load after a fisheye file must reset projection, or
-            # the ERP video would run the fisheye pipeline. Guard on change so
-            # an ERP->ERP reload does not wipe the user's Custom SIFT state.
-            if self._projection != "erp":
-                self._projection = "erp"
-                self._apply_mode_side_effects(force_sift=True)
 
         try:
-            analyzer = VideoAnalyzer()
-            info = analyzer.analyze(path)
+            if info is None:
+                analyzer = VideoAnalyzer()
+                info = analyzer.analyze(path)
+            # ERP content gate (plan D5b): the user chose Equirectangular, so
+            # a non-2:1 video (e.g. a 1:1 single-lens fisheye .mp4) would
+            # silently produce a wrong EQUIRECTANGULAR solve. Refuse
+            # atomically BEFORE any loaded state is set.
+            if self._projection == "erp" and not info.is_erp:
+                self._error_message = (
+                    "This video isn't 2:1 equirectangular — if it's a "
+                    "fisheye capture, go ‹ Back and choose Fisheye."
+                )
+                if self._handle:
+                    self._handle.dirty_all()
+                return
             self._video_info = info
             self._video_path = path
             self._video_loaded = True
@@ -3007,18 +3120,6 @@ class Plugin360Panel(lf.ui.Panel):
         if self._handle:
             self._handle.dirty_all()
 
-    def _on_clear_video(self, handle, event, args):
-        del handle, event, args
-        self._video_loaded = False
-        self._video_path = ""
-        self._video_info = None
-        self._video_info_text = ""
-        self._error_message = ""
-        # Also clear fisheye-specific detection state
-        self._camera_family_detected = None
-        if self._handle:
-            self._handle.dirty_all()
-
     # ── Split-mode video selection (fisheye + source_mode=split) ──
 
     def _probe_split_lens_info(self) -> None:
@@ -3038,11 +3139,31 @@ class Plugin360Panel(lf.ui.Panel):
             logger.error("Failed to analyze split lens video: %s", exc)
             self._video_info = None
 
+    def _reject_container_in_lens_picker(self, path: str) -> bool:
+        """Refuse a dual-fisheye container in the per-lens pickers (plan
+        D5c): Dual Lens Video takes pre-split front/back files; containers
+        belong to Fisheye → Video. Returns True when refused."""
+        from ..core.input_detect import detect_input_type
+
+        if detect_input_type(path)[0] != "dual_fisheye":
+            return False
+        self._error_message = (
+            "This is a dual-fisheye container — use Video (not Dual Lens "
+            "Video) for .osv/.insv files. Dual Lens Video takes pre-split "
+            "front and back .mp4s."
+        )
+        if self._handle:
+            self._handle.dirty_all()
+        return True
+
     def _on_select_front_video(self, handle, event, args):
         del handle, event, args
         path = self._open_video_file_dialog_ext("Select Front Lens Video")
         if not path:
             return
+        if self._reject_container_in_lens_picker(path):
+            return
+        self._error_message = ""
         self._front_video_path = path
         self._probe_split_lens_info()
         if self._handle:
@@ -3053,6 +3174,9 @@ class Plugin360Panel(lf.ui.Panel):
         path = self._open_video_file_dialog_ext("Select Back Lens Video")
         if not path:
             return
+        if self._reject_container_in_lens_picker(path):
+            return
+        self._error_message = ""
         self._back_video_path = path
         self._probe_split_lens_info()
         if self._handle:
@@ -3174,6 +3298,24 @@ class Plugin360Panel(lf.ui.Panel):
         self._error_message = ""
         preset_name = self._get_selected_preset_name()
         output_mode = self._get_output_mode()
+        if (
+            output_mode == "fisheye"
+            and self._source_mode_idx == 0
+            and self._video_path
+        ):
+            from ..core.input_detect import detect_input_type
+
+            if (
+                not self._fisheye_single_lens
+                and detect_input_type(self._video_path)[0] != "dual_fisheye"
+            ):
+                self._error_message = (
+                    "This isn't a recognized dual-fisheye container — choose the "
+                    "fisheye video again."
+                )
+                if self._handle:
+                    self._handle.dirty_all()
+                return
         colmap_matcher = COLMAP_MATCHERS[self._colmap_matcher_idx] if 0 <= self._colmap_matcher_idx < len(COLMAP_MATCHERS) else "sequential"
         match_budget_tier = MATCH_BUDGET_TIERS[self._match_budget_idx] if 0 <= self._match_budget_idx < len(MATCH_BUDGET_TIERS) else "custom"
 
@@ -3262,9 +3404,15 @@ class Plugin360Panel(lf.ui.Panel):
                 else "native"
             ),
             # Dual fisheye fields
-            input_type=("dual_fisheye" if output_mode == "fisheye" else "erp"),
+            input_type=(
+                "single_fisheye"
+                if (output_mode == "fisheye" and self._fisheye_single_lens)
+                else "dual_fisheye" if output_mode == "fisheye" else "erp"
+            ),
             camera_family=(
-                self._camera_family_detected
+                None
+                if (output_mode == "fisheye" and self._fisheye_single_lens)
+                else self._camera_family_detected
                 if (output_mode == "fisheye" and self._source_mode_idx == 0)
                 else (
                     CAMERA_FAMILIES[self._camera_family_idx]
@@ -3274,7 +3422,9 @@ class Plugin360Panel(lf.ui.Panel):
                 )
             ),
             source_mode=(
-                SOURCE_MODES[self._source_mode_idx]
+                "container"
+                if (output_mode == "fisheye" and self._fisheye_single_lens)
+                else SOURCE_MODES[self._source_mode_idx]
                 if (output_mode == "fisheye"
                     and 0 <= self._source_mode_idx < len(SOURCE_MODES))
                 else "container"

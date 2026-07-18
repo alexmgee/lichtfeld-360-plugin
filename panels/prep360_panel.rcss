@@ -295,6 +295,78 @@ body {
     border: 1dp #4a9eff;
 }
 
+/* ── Projection-first input menu (Plan 03 / Option B) ──────
+   Unselected = transparent fill + subtle outline, near-square corners
+   (mockups in planning.pen). .btn--selected is the selected-state hook
+   (blue fill, white text) — unused in v1 (the menu replaces itself on
+   selection) but kept per the design spec. */
+.input-btn-row {
+    display: flex;
+    flex-direction: row;
+    gap: 4dp;
+    width: 100%;
+}
+
+.input-btn-row button {
+    flex: 1;
+}
+
+.btn--outline {
+    background-color: transparent;
+    border-width: 1dp;
+    border-color: #363c48;
+    border-radius: 1dp;
+    /* Taller than the host 2dp default for visual hierarchy (Alex, P1 walk). */
+    padding: 4dp 8dp;
+}
+
+.btn--outline:hover {
+    border-color: #4a90e2;
+}
+
+/* The two on-load projection buttons carry the menu's visual weight
+   (Alex, P4 polish round): taller + larger label than the source tier. */
+.btn--projection {
+    padding: 9dp 8dp;
+    font-size: 13dp;
+}
+
+/* Breathing room between the on-load helper line and the first
+   projection button. */
+.menu-helper {
+    display: block;
+    margin-bottom: 5dp;
+}
+
+/* Air between the projection buttons and the Output Path row below. */
+.projection-menu {
+    margin-bottom: 7dp;
+}
+
+/* Constant-height input block: the fisheye source-key line and its empty
+   twin (Initial / after-ERP) share one fixed-height slot, so Output Path
+   never moves as the menu transforms. */
+.source-key-slot {
+    display: block;
+    height: 19dp;
+    /* .status-text adds 2dp vertical padding OUTSIDE the fixed height
+       (content-box), which made the fisheye state 4dp taller than the
+       empty twins. Zero it so all three states are identical boxes. */
+    padding: 0dp;
+}
+
+.btn--selected {
+    background-color: #4f81c7;
+    border-color: #4f81c7;
+    color: #ffffff;
+}
+
+/* "Back to Source" header caret: the standard section arrow glyph,
+   rotated to point left. */
+.back-arrow {
+    transform: rotate(180deg);
+}
+
 /* ── Processing block ───────────────────────────────────── */
 
 .processing-block {

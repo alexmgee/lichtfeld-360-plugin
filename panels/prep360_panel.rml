@@ -42,19 +42,47 @@
     <!-- ── Always-visible input/output setup ───────────────── -->
     <div class="section-content">
 
-      <!-- Empty state: two entry buttons (single 360 video, or pre-split front+back) -->
-      <div data-if="show_split_entry">
-        <button class="btn btn--primary btn--full" data-event-click="select_video">360&#xb0; Video</button>
-        <button class="btn btn--secondary btn--full" data-event-click="enter_split_mode">Front + Back Lens Video</button>
-        <button class="btn btn--secondary btn--full" data-event-click="enter_image_folder_mode">Image Folder</button>
-        <span class="status-text status-muted">Single file: ERP video, .osv (DJI), or .insv (Insta360). Two-file mode: pre-split fisheye lens pair (e.g. graded .mp4s).</span>
+      <!-- Projection-first input menu (Plan 03 / Option B): the user picks a
+           projection first, then that projection's source. Projection is an
+           EXPLICIT choice — never inferred from extension or aspect ratio. -->
+      <div class="projection-menu" data-if="show_projection_choice">
+        <div class="section-header text-accent">
+          <span class="text-accent">Source</span>
+        </div>
+        <span class="status-text status-muted menu-helper">Choose a projection to begin &#x2014; the menu then shows that projection&#x27;s options.</span>
+        <button class="btn btn--outline btn--projection btn--full" data-event-click="select_projection_erp">Equirectangular</button>
+        <button class="btn btn--outline btn--projection btn--full" data-event-click="select_projection_fisheye">Fisheye</button>
+        <span class="source-key-slot"></span>
       </div>
 
-      <!-- Single-file picker, shown after a 360 video is loaded -->
+      <div class="projection-menu" data-if="show_source_menu">
+        <div class="section-header text-accent" data-event-click="back_to_projection">
+          <span class="section-arrow text-accent back-arrow">&#x25B6;</span>
+          <span class="text-accent">Back to Source</span>
+        </div>
+        <div data-if="show_source_buttons">
+          <div data-if="show_erp_sources">
+            <span class="status-text status-muted menu-helper">Equirectangular selected &#x2014; pick a source.</span>
+            <button class="btn btn--outline btn--projection btn--full" data-event-click="select_video">Video</button>
+            <button class="btn btn--outline btn--projection btn--full" data-event-click="enter_image_folder_mode">Image Folder</button>
+            <span class="status-text status-muted source-key-slot">Video = a single 2:1 equirectangular video</span>
+          </div>
+          <div data-if="show_fisheye_sources">
+            <span class="status-text status-muted menu-helper">Fisheye selected &#x2014; pick a source.</span>
+            <div class="input-btn-row">
+              <button class="btn btn--outline btn--projection" data-event-click="select_video">Video</button>
+              <button class="btn btn--outline btn--projection" data-event-click="enter_split_mode">Dual Lens Video</button>
+            </div>
+            <button class="btn btn--outline btn--projection btn--full" data-event-click="enter_image_folder_mode">Image Folder</button>
+            <span class="status-text status-muted source-key-slot">Video = a single 1:1 fisheye video, Dual Lens Video = front + back pair</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Single-file loaded state (reset via the Back link above) -->
       <div data-if="show_video_loaded">
         <div class="path-box">{{video_path_text}}</div>
         <span class="status-text status-muted">{{video_info_text}}</span>
-        <button class="btn btn--secondary btn--full" data-event-click="clear_video">Clear</button>
       </div>
 
       <!-- Split-mode pickers (fisheye + source_mode=split) -->
@@ -75,18 +103,10 @@
             <button class="btn btn--secondary btn--compact" data-event-click="clear_back_video">Clear</button>
           </div>
         </div>
-        <button class="btn btn--secondary btn--full btn--compact" data-event-click="exit_split_mode">&#x2190; Use single 360&#xb0; video instead</button>
       </div>
 
       <!-- Image-folder input mode (source_mode_idx == 2): use existing frames -->
       <div data-if="show_image_folder_mode">
-        <div class="setting-row setting-row--dropdown setting-row--dropdown-medium">
-          <span class="prop-label">Image type</span>
-          <select data-value="image_projection_idx">
-            <option value="0" selected>Equirectangular</option>
-            <option value="1">Fisheye</option>
-          </select>
-        </div>
         <div class="setting-row" data-if="show_image_erp_picker">
           <span class="prop-label">Image folder</span>
           <div class="path-browse-row">
@@ -96,7 +116,7 @@
           </div>
         </div>
         <div class="setting-row" data-if="show_image_fisheye_controls">
-          <span class="prop-label">Folders</span>
+          <span class="prop-label">Structure</span>
           <div class="path-browse-row">
             <button class="btn btn--secondary btn--compact btn--toggle"
                     data-class-is-active="folder_mode_is_one"
@@ -167,7 +187,6 @@
             <button class="btn btn--secondary btn--compact" data-event-click="clear_preexisting_mask_dir">Clear</button>
           </div>
         </div>
-        <button class="btn btn--secondary btn--full btn--compact" data-event-click="exit_image_folder_mode">&#x2190; Back to video input</button>
       </div>
 
       <!-- Camera family dropdown (split mode only — auto-detected in container mode) -->
