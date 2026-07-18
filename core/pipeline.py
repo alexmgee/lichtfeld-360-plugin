@@ -152,7 +152,6 @@ class PipelineConfig:
     training_output: str = "native"    # image-folder ERP+fisheye: native | pinhole | both
                                        # (video fisheye keeps fisheye_training_output)
     keep_streams: bool = False  # retain demuxed front.mp4/back.mp4 alongside output
-    keep_native_sparse: bool = True  # retain COLMAP sparse/ + database.db after native ERP export (native sparse is a valid EQUIRECTANGULAR dataset)
     keep_extracted_data: bool = True  # keep extracted frames + masks as <output>/images + <output>/masks deliverables (ERP/Fisheye Pinhole); default on so generated data is never silently discarded
 
     # Fisheye masking
@@ -1027,7 +1026,6 @@ class PipelineJob:
         """
         import shutil
 
-        from .colmap_cleanup import cleanup_colmap_artifacts
         from .frame_source import relocate_erp_frames_to_colmap
         from .transforms_writer import write_erp_native_transforms
 
@@ -1281,8 +1279,6 @@ class PipelineJob:
             self._update("output", 90.0, "Writing native ERP transforms.json...")
             _sparse, transforms_path = _write_native_transforms(
                 colmap_dir, masks_dir)
-            if not cfg.keep_native_sparse:
-                cleanup_colmap_artifacts(colmap_dir, log_fn=logger.info)
             self._update("complete", 100.0, "Native ERP export complete")
             return _erp_result(
                 transforms_path, num_output_images,
@@ -1304,10 +1300,6 @@ class PipelineJob:
                 cfg, native_dir / "images", native_sparse,
                 colmap_dir / "pinhole", view_config,
                 str(masks_dir) if masks_dir.is_dir() else None)
-            # Cleanup honors the checkbox only after propagation no longer
-            # needs the native sparse model.
-            if not cfg.keep_native_sparse:
-                cleanup_colmap_artifacts(native_dir, log_fn=logger.info)
             self._update(
                 "complete", 100.0,
                 "Native + propagated Pinhole export complete")

@@ -424,7 +424,6 @@ class Plugin360Panel(lf.ui.Panel):
         self._front_video_path: str = ""
         self._back_video_path: str = ""
         self._keep_streams: bool = False
-        self._keep_native_sparse: bool = True  # native sparse is valid; retain by default (checkbox lets user opt out)
         self._keep_extracted_data: bool = True  # keep frames & masks by default
         self._fisheye_training_output_idx: int = 0  # native by default
         self._training_output_idx: int = 0  # image-folder: native by default
@@ -724,8 +723,6 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("back_video_path_text", lambda: self._back_video_path or "(not set)")
         model.bind_func("camera_family_detected_text", self._get_camera_family_detected_text)
         model.bind("keep_streams", lambda: self._keep_streams, self._set_keep_streams)
-        model.bind("keep_native_sparse", lambda: self._keep_native_sparse, self._set_keep_native_sparse)
-        model.bind_func("show_keep_native_sparse", lambda: self._output_mode_idx == ERP_NATIVE_OUTPUT_MODE_IDX)
         model.bind("keep_extracted_data", lambda: self._keep_extracted_data, self._set_keep_extracted_data)
         # "Keep frames & masks" — retain the extracted source frames + masks as
         # <output>/images + <output>/masks deliverables next to the pinhole
@@ -2665,12 +2662,6 @@ class Plugin360Panel(lf.ui.Panel):
         else:
             self._keep_streams = str(val).lower() in ("true", "1", "yes", "on")
 
-    def _set_keep_native_sparse(self, val):
-        if isinstance(val, bool):
-            self._keep_native_sparse = val
-        else:
-            self._keep_native_sparse = str(val).lower() in ("true", "1", "yes", "on")
-
     def _set_keep_extracted_data(self, val):
         if isinstance(val, bool):
             self._keep_extracted_data = val
@@ -3295,7 +3286,6 @@ class Plugin360Panel(lf.ui.Panel):
             front_video_path=self._front_video_path,
             back_video_path=self._back_video_path,
             keep_streams=self._keep_streams,
-            keep_native_sparse=self._keep_native_sparse,
             keep_extracted_data=self._keep_extracted_data,
         )
 
