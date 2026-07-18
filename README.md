@@ -30,13 +30,14 @@ The pipeline runs in six stages, each configurable from the plugin panel:
 | .OSV container | DJI Osmo 360 | Dual fisheye, camera family auto-detected |
 | .INSV container | Insta360 cameras | Dual fisheye, camera family auto-detected |
 | Front + back .mp4 | Pre-split fisheye lens pair | Two-file mode for graded or externally processed footage |
+| Single-lens fisheye video | One fisheye lens, 1:1 frame (e.g. 3840×3840) | Fisheye → Video; solved as one OPENCV_FISHEYE camera, no rig. Non-square fisheye is planned |
 | Image folder | Already-extracted frames | Equirectangular, or dual fisheye (one folder or two); skips extraction |
 
 ### Select Image Folder
 
 You can skip video extraction entirely and point the plugin at a folder of
-frames you already have. Click **Image Folder** on the input screen,
-then choose a projection:
+frames you already have. Pick your projection first (**Equirectangular** or
+**Fisheye**), then click **Image Folder**:
 
 - **Equirectangular**: one folder of 360 frames.
 - **Fisheye**: a dual-lens set, as either **One** folder (files named
@@ -88,7 +89,7 @@ long as it isn't where the run writes: `colmap/`, `masks/`, or `metadata/`.
 
 ## Output Modes
 
-Output mode is two independent choices: the **projection** (equirectangular or fisheye, detected from your input) and the **Output Mode** dropdown (**Native** or **Pinhole**). The three combinations are the modes below. Fisheye input has no Native/Pinhole choice — the dropdown is hidden for it, and its output is chosen by the **Training output** selector alone.
+Output mode is two independent choices: the **projection** (equirectangular or fisheye, chosen at the top of the input menu) and the **Output Mode** dropdown (**Native** or **Pinhole**). The three combinations are the modes below. Fisheye input has no Native/Pinhole choice — the dropdown is hidden for it, and its output is chosen by the **Training output** selector alone.
 
 ### ERP
 
@@ -153,10 +154,18 @@ Then restart LichtFeld Studio.
 ## Usage
 
 1. Open the **360 Plugin** tab in the right panel
-2. Load your input:
-   - **360° Video** for a single file (ERP, .osv, or .insv)
-   - **Front + Back Lens Video** for pre-split fisheye .mp4 pairs
+2. Pick your projection — **Equirectangular** or **Fisheye** — then a source:
+   - **Video** for a single file: an equirectangular .mp4, or (under Fisheye) a
+     single-lens fisheye .mp4 or a .osv/.insv dual-fisheye container
+   - **Dual Lens Video** (Fisheye only) for pre-split front + back .mp4 pairs
    - **Image Folder** for already-extracted frames (see [Select Image Folder](#select-image-folder))
+
+   The menu checks your pick and refuses mismatches with a pointer to the right
+   place: non-2:1 video and dual-fisheye containers are refused under
+   Equirectangular, 2:1 equirectangular video and non-1:1 (non-square) video
+   are refused under Fisheye, and containers are refused in the per-lens
+   pickers. The **◀ Back to Source** header clears the input and returns to
+   the projection choice.
 3. Choose an **Output Path** and **Output Mode**. For the **ERP** and **Fisheye** modes, a **Training output** selector (Native / Pinhole / Both) chooses which dataset(s) to write from the native reconstruction.
 4. Configure each pipeline stage using the collapsible sections:
 

@@ -5,6 +5,32 @@ All notable changes to the 360 Plugin are documented here.
 ## [Unreleased]
 
 ### Added
+- Projection-first input menu. The input is a **Source** section: it starts
+  with an explicit **Equirectangular / Fisheye** choice; picking one shows
+  that projection's options (**Video** / **Dual Lens Video** /
+  **Image Folder**) under a **◀ Back to Source** header that is the single
+  reset affordance. A one-line key under the buttons states what each Video
+  input accepts, and the menu block is constant-height — the controls below
+  never shift as it transforms. Replaces the old "360° Video / Front + Back
+  Lens Video / Image Folder" buttons and the image-folder "Image type"
+  dropdown — projection is never again inferred from a file extension or
+  aspect-ratio guess.
+- Single-lens fisheye video support. **Fisheye → Video** with a plain .mp4
+  now runs a dedicated path: sharpest-frame extraction, circle + SAM 3
+  masking, an OPENCV_FISHEYE single-camera COLMAP solve (no rig), and the
+  full **Training output** choice (Native / Pinhole / Both) with propagated
+  pinhole crops, exactly like dual fisheye.
+- Input mismatch guards. Wrong file for the chosen projection is refused
+  with a message pointing at the right place, instead of silently producing
+  a wrong reconstruction: non-2:1 video or a dual-fisheye container under
+  Equirectangular, a 2:1 equirectangular video under Fisheye, containers
+  picked into the per-lens Dual Lens slots, and non-1:1 video under
+  Fisheye → Video (the circle mask currently assumes a square sensor;
+  non-square fisheye is planned).
+
+### Changed
+- Fisheye image-folder label "Folders" renamed to "Structure"; input menu
+  buttons are slightly taller.
 - "Extract all frames" toggle in the Frame Extraction section. When
   enabled, every frame of the video is decoded and saved with no sharpness
   scoring and no interval sampling, for timelapses and other sources where
