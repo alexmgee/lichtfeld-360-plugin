@@ -248,7 +248,12 @@ def write_transforms_json(
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
+    # newline="\n": force LF endings. On Windows the default text mode writes
+    # CRLF, and LFS's transforms loader reads in text mode then compares the
+    # byte count to the on-disk stat size — CRLF stripping makes them differ
+    # and it aborts with "Transforms JSON changed size while it was being read"
+    # (transforms.cpp:288). LF-only keeps the two counts equal.
+    with open(output_path, "w", newline="\n") as f:
         json.dump(data, f, indent=4)
 
 
@@ -469,7 +474,7 @@ def write_fisheye_transforms(
         "ply_file_path": ply_filename,
         "frames": frames,
     }
-    with transforms_path.open("w", encoding="utf-8") as fp:
+    with transforms_path.open("w", encoding="utf-8", newline="\n") as fp:
         json.dump(transforms_data, fp, indent=4)
     log_fn(
         "Wrote fisheye transforms.json with %d frames across %d cameras: %s",
@@ -595,7 +600,7 @@ def write_erp_native_transforms(
         "ply_file_path": ply_filename,
         "frames": frames,
     }
-    with transforms_path.open("w", encoding="utf-8") as fp:
+    with transforms_path.open("w", encoding="utf-8", newline="\n") as fp:
         json.dump(transforms_data, fp, indent=4)
     log_fn(
         "Wrote native ERP transforms.json with %d frames (%dx%d): %s",
@@ -754,7 +759,7 @@ def write_erp_propagated_transforms(
         "ply_file_path": ply_filename,
         "frames": sorted(frames, key=lambda e: e["file_path"]),
     }
-    with transforms_path.open("w", encoding="utf-8") as fp:
+    with transforms_path.open("w", encoding="utf-8", newline="\n") as fp:
         json.dump(transforms_data, fp, indent=4)
     log_fn(
         "Wrote ERP propagated pinhole export: %d crops from %d native images, "
@@ -1013,7 +1018,7 @@ def write_native_propagated_transforms(
         "ply_file_path": ply_filename,
         "frames": sorted(frames, key=lambda e: e["file_path"]),
     }
-    with transforms_path.open("w", encoding="utf-8") as fp:
+    with transforms_path.open("w", encoding="utf-8", newline="\n") as fp:
         json.dump(transforms_data, fp, indent=4)
 
     lens_counts = {
