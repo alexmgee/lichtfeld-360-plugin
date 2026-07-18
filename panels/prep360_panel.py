@@ -2623,9 +2623,10 @@ class Plugin360Panel(lf.ui.Panel):
     def _get_output_mode_note(self) -> str:
         if self._output_mode_idx == ERP_NATIVE_OUTPUT_MODE_IDX:
             return (
-                "Feeds equirectangular frames straight to COLMAP using its "
-                "native equirectangular camera model. Faster and simpler, with "
-                "no pinhole reframing step."
+                "Reconstructs the equirectangular frames directly with COLMAP's "
+                "native equirectangular camera model — faster and simpler, with "
+                "no pinhole reframing to align. A Pinhole or Both training "
+                "output still derives pinhole crops from that native solve."
             )
         if self._output_mode_idx == FISHEYE_OUTPUT_MODE_IDX:
             return (
@@ -3020,12 +3021,30 @@ class Plugin360Panel(lf.ui.Panel):
 
     # ── Split-mode video selection (fisheye + source_mode=split) ──
 
+    def _probe_split_lens_info(self) -> None:
+        """Populate ``_video_info`` from a fisheye split-video lens so the Frame
+        Extraction estimate works in two-file mode. Front and back lenses are
+        synchronized, so the front lens (or back, if only it is set) is
+        representative. Clears when neither lens is set. Leaves the FPS the user
+        may have set untouched.
+        """
+        lens = self._front_video_path or self._back_video_path
+        if not lens:
+            self._video_info = None
+            return
+        try:
+            self._video_info = VideoAnalyzer().analyze(lens)
+        except Exception as exc:
+            logger.error("Failed to analyze split lens video: %s", exc)
+            self._video_info = None
+
     def _on_select_front_video(self, handle, event, args):
         del handle, event, args
         path = self._open_video_file_dialog_ext("Select Front Lens Video")
         if not path:
             return
         self._front_video_path = path
+        self._probe_split_lens_info()
         if self._handle:
             self._handle.dirty_all()
 
@@ -3035,18 +3054,21 @@ class Plugin360Panel(lf.ui.Panel):
         if not path:
             return
         self._back_video_path = path
+        self._probe_split_lens_info()
         if self._handle:
             self._handle.dirty_all()
 
     def _on_clear_front_video(self, handle, event, args):
         del handle, event, args
         self._front_video_path = ""
+        self._probe_split_lens_info()
         if self._handle:
             self._handle.dirty_all()
 
     def _on_clear_back_video(self, handle, event, args):
         del handle, event, args
         self._back_video_path = ""
+        self._probe_split_lens_info()
         if self._handle:
             self._handle.dirty_all()
 

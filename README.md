@@ -92,7 +92,7 @@ Output mode is two independent choices: the **projection** (equirectangular or f
 
 ### ERP
 
-Native equirectangular reconstruction using COLMAP's `EQUIRECTANGULAR` camera model. Feeds ERP frames straight to COLMAP with no pinhole reframing step.
+Native equirectangular reconstruction using COLMAP's `EQUIRECTANGULAR` camera model. Feeds ERP frames straight to COLMAP with no pinhole reframing to *align* — a Pinhole or Both training output still derives pinhole crops from that native solve (see below).
 
 A **Training output** selector (Native / Pinhole / Both) controls what is
 written from the single native reconstruction, exactly as for image folders:
