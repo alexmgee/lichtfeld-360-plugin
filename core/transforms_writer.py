@@ -1135,6 +1135,14 @@ def _write_native_pinhole_sparse_model(
             pycolmap.Point3D(
                 xyz=np.asarray(point.xyz, dtype=np.float64),
                 color=np.asarray(point.color, dtype=np.uint8),
+                # Preserve the native reprojection error — these points are
+                # copied 1:1 from the native solve. pycolmap defaults an unset
+                # error to -1, which LFS's ColmapLoader boundary contract
+                # rejects ("point.error >= 0.0 required",
+                # io/formats/colmap.cpp:1305), blocking directory import of
+                # every propagated-pinhole dataset (ERP and fisheye). Floor at
+                # 0 to guarantee the contract even if a native point is unset.
+                error=max(0.0, float(point.error)),
             ),
         )
         point_count += 1
