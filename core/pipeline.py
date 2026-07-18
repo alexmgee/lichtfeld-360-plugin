@@ -129,7 +129,7 @@ class PipelineConfig:
     fisheye_training_output: str = "native"
 
     # Dual fisheye input (phase 1)
-    # input_type: "erp" (default) or "dual_fisheye"
+    # input_type: "erp" (default), "dual_fisheye", or "single_fisheye"
     # camera_family: "dji_osmo360" | "insta360" | None
     # source_mode: "container" (single .osv/.insv) or "split" (two pre-split videos).
     # When source_mode == "split", front_video_path / back_video_path are used and
@@ -516,6 +516,112 @@ class PipelineJob:
         self._update("complete", 100.0, "Fisheye output ready")
         return result
 
+    def _run_single_fisheye_with_training_output(
+        self, cfg: PipelineConfig, t0: float,
+    ) -> PipelineResult:
+        training_output = (cfg.fisheye_training_output or "native").lower()
+        if training_output not in {"native", "pinhole", "both"}:
+            training_output = "native"
+
+        out = Path(cfg.output_dir)
+        native_out = out / "native"
+        native_cfg = replace(cfg, output_dir=str(native_out))
+        result = self._run_single_fisheye_native(native_cfg, t0)
+        if training_output == "native":
+            return result
+
+        images_dir = native_out / "images"
+        masks_dir = native_out / "masks"
+        sparse_dir = native_out / "sparse" / "0"
+        if not sparse_dir.is_dir():
+            sparse_dir = native_out / "sparse"
+
+        pinhole_out = out / ("colmap" if training_output == "pinhole" else "pinhole")
+        self._update(
+            "output", 96.0,
+            "Exporting native-derived pinhole crops...",
+        )
+
+        from .fisheye_reframer import FISHEYE_PINHOLE_PRESET
+        from .transforms_writer import write_native_propagated_transforms
+
+        try:
+            pinhole_transforms = write_native_propagated_transforms(
+                colmap_sparse_dir=sparse_dir,
+                images_root=images_dir,
+                output_dir=pinhole_out,
+                view_config=FISHEYE_PINHOLE_PRESET,
+                masks_root=masks_dir if masks_dir.is_dir() else None,
+                propagated_sparse_output_dir=pinhole_out / "sparse" / "0",
+                lenses=("front",),
+                log_fn=logger.info,
+            )
+        except Exception as exc:
+            logger.exception("Native-derived pinhole export failed")
+            raise RuntimeError(
+                f"Native reconstruction succeeded but pinhole export failed: {exc}"
+            ) from exc
+
+        import json as _json
+
+        pinhole_data = _json.loads(Path(pinhole_transforms).read_text())
+        pinhole_frames = pinhole_data.get("frames", [])
+        active_views = FISHEYE_PINHOLE_PRESET.views_for_lens("front")
+        view_counts: dict[str, int] = {}
+        for frame in pinhole_frames:
+            basename = Path(frame.get("file_path", "")).name
+            for view in active_views:
+                if basename.startswith(f"{view.name}_"):
+                    view_counts[view.name] = view_counts.get(view.name, 0) + 1
+                    break
+
+        if training_output == "pinhole":
+            import shutil
+
+            out_resolved = out.resolve()
+            native_resolved = native_out.resolve()
+            if (
+                native_out.name != "native"
+                or native_resolved == out_resolved
+                or native_resolved.parent != out_resolved
+            ):
+                raise RuntimeError(
+                    f"Refusing to remove unsafe native output path: {native_out}"
+                )
+            _native_log = native_out / "metadata" / "colmap_debug.log"
+            if _native_log.is_file():
+                shutil.move(str(_native_log), str(pinhole_out / "colmap_debug.log"))
+            if cfg.keep_extracted_data:
+                if images_dir.is_dir():
+                    shutil.move(str(images_dir), str(out / "images"))
+                if masks_dir.is_dir():
+                    shutil.move(str(masks_dir), str(out / "masks"))
+            shutil.rmtree(str(native_out))
+            result.dataset_path = str(pinhole_transforms)
+            result.num_output_images = len(pinhole_frames)
+            result.views_per_frame = len(active_views)
+            result.expected_images_by_view = {
+                view.name: result.num_source_frames
+                for view in active_views
+            }
+            result.registered_images_by_view = {
+                view.name: view_counts.get(view.name, 0)
+                for view in active_views
+            }
+        else:
+            result.num_output_images += len(pinhole_frames)
+
+        result.elapsed_sec = time.time() - t0
+        result.preset_signature = (
+            f"{result.preset_signature} | training_output={training_output}"
+        )
+        logger.info(
+            "Native-derived pinhole export complete: %d frames at %s",
+            len(pinhole_frames), pinhole_transforms,
+        )
+        self._update("complete", 100.0, "Fisheye output ready")
+        return result
+
     def _run_stages(self, cfg: PipelineConfig, t0: float) -> PipelineResult:
         # Phase 1 dispatch shim — dual fisheye path is a separate leaf method
         # (Style 2 leaf-functions refactor for the ERP paths is deferred to
@@ -524,6 +630,8 @@ class PipelineJob:
             if cfg.image_source_dir or cfg.image_front_dir:
                 return self._run_image_folder_fisheye(cfg, t0)
             return self._run_dual_fisheye_with_training_output(cfg, t0)
+        if cfg.input_type == "single_fisheye" and cfg.output_mode == "fisheye":
+            return self._run_single_fisheye_with_training_output(cfg, t0)
         # Image-folder ERP input has its own read-in-place pipeline (all
         # artifacts under colmap/). Fisheye image folders were routed to
         # _run_image_folder_fisheye just above, so image_source_dir here is
@@ -1964,6 +2072,295 @@ class PipelineJob:
             dropped_frame_examples=result.get("dropped_frame_examples", []),
             preset_signature=result.get("preset_signature", ""),
             gpu_extraction=False,
+            elapsed_sec=elapsed,
+        )
+
+    # ------------------------------------------------------------------
+    # Single fisheye native path
+    # ------------------------------------------------------------------
+
+    def _run_single_fisheye_native(
+        self, cfg: PipelineConfig, t0: float,
+    ) -> PipelineResult:
+        """Single fisheye pipeline: extraction → masking → COLMAP → output."""
+        import shutil
+
+        from .fisheye_priors import infer_fisheye_camera_params
+
+        out = Path(cfg.output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        extracted_dir = out / "extracted"
+        extracted_front_dir = extracted_dir / "front"
+        images_dir = out / "images"
+
+        # ===================================================================
+        # Stage 1: Sharpest-frame extraction (0-50%)
+        # ===================================================================
+        print(f"\n[pipeline] Output mode: {cfg.output_mode}")
+        print(f"[pipeline] Output: {out}")
+        print("[pipeline] Stage 1: Single-fisheye extraction starting...")
+        self._update("extraction", 0.0, "Extracting fisheye frames...")
+
+        extractor = SharpestExtractor()
+        extract_config = SharpestConfig(
+            interval=cfg.interval,
+            extraction_sharpness=cfg.extraction_sharpness,
+            blur_metric=cfg.blur_metric,
+            scene_threshold=cfg.scene_threshold,
+            scale_width=cfg.blur_scale_width,
+            quality=cfg.quality,
+            start_sec=cfg.start_sec,
+            end_sec=cfg.end_sec,
+            all_frames=cfg.all_frames,
+        )
+
+        def _extract_progress(cur: int, total: int, msg: str) -> None:
+            pct = (cur / max(total, 1)) * 50
+            self._update("extraction", pct, msg)
+
+        extract_result = extractor.extract(
+            cfg.video_path,
+            str(extracted_front_dir),
+            extract_config,
+            progress_callback=_extract_progress,
+            cancel_check=self._check_cancel,
+        )
+        if not extract_result.success:
+            raise RuntimeError(
+                f"Single fisheye extraction failed: {extract_result.error}"
+            )
+
+        frame_count = extract_result.frames_extracted
+        _assert_all_frames_complete(
+            cfg.all_frames, cfg.expected_frame_count, frame_count)
+        gpu_accel = getattr(extract_result, "gpu_accelerated", False)
+        logger.info(
+            "Extracted %d single-fisheye frames%s",
+            frame_count, " (GPU)" if gpu_accel else "",
+        )
+
+        if self._check_cancel():
+            raise RuntimeError("Cancelled")
+
+        # ===================================================================
+        # Stage 2: Fisheye masking (SAM3 + circle mask)
+        # ===================================================================
+        mask_enabled = cfg.enable_masking
+        print(f"[pipeline] Stage 2: Masking {'enabled' if mask_enabled else 'disabled'}")
+        if mask_enabled:
+            self._update("masking", 20.0, "Initializing SAM 3 for fisheye masking...")
+
+            import cv2
+            import numpy as np
+            from .backends import Sam3Backend
+            from .fisheye_circle_mask import generate_fisheye_circle_mask
+
+            backend = Sam3Backend(confidence_threshold=0.3)
+            backend.initialize()
+
+            try:
+                masks_dir = extracted_dir / "masks"
+                lens_names = ("front",)
+                total_frames = sum(
+                    len(list((extracted_dir / lens).glob("*.jpg")))
+                    + len(list((extracted_dir / lens).glob("*.png")))
+                    for lens in lens_names
+                )
+                frame_idx = 0
+                circle_cache: dict[tuple[int, int], np.ndarray] = {}
+
+                for lens in lens_names:
+                    lens_frames_dir = extracted_dir / lens
+                    lens_masks_dir = masks_dir / lens
+                    lens_masks_dir.mkdir(parents=True, exist_ok=True)
+
+                    frame_files = sorted(
+                        f for f in lens_frames_dir.iterdir()
+                        if f.suffix.lower() in (".jpg", ".jpeg", ".png")
+                    )
+
+                    for frame_file in frame_files:
+                        if self._check_cancel():
+                            raise RuntimeError("Cancelled")
+
+                        frame_idx += 1
+                        pct = 20 + (frame_idx / max(total_frames, 1)) * 25
+                        self._update(
+                            "masking", pct,
+                            f"SAM 3 masking {lens}/{frame_file.name} "
+                            f"({frame_idx}/{total_frames})",
+                        )
+
+                        image = cv2.imread(str(frame_file))
+                        if image is None:
+                            logger.warning("Could not read %s, skipping", frame_file)
+                            continue
+
+                        h, w = image.shape[:2]
+                        detection = backend.detect_and_segment(
+                            image, cfg.mask_prompts,
+                        )
+                        keep_mask = ((detection == 0).astype(np.uint8)) * 255
+
+                        cache_key = (w, h)
+                        if cache_key not in circle_cache:
+                            circle = generate_fisheye_circle_mask(
+                                w, h, margin_percent=cfg.fisheye_circle_margin,
+                            )
+                            circle_cache[cache_key] = (
+                                (1 - circle).astype(np.uint8) * 255
+                            )
+                        circle_keep = circle_cache[cache_key]
+                        final_mask = cv2.bitwise_and(keep_mask, circle_keep)
+
+                        mask_out = lens_masks_dir / f"{frame_file.stem}.png"
+                        cv2.imwrite(str(mask_out), final_mask)
+
+                logger.info(
+                    "Fisheye masking complete: %d frames across %d lens",
+                    frame_idx, len(lens_names),
+                )
+                print(f"[pipeline] Masking complete: {frame_idx} frames")
+            finally:
+                backend.cleanup()
+
+            if self._check_cancel():
+                raise RuntimeError("Cancelled")
+
+        # ===================================================================
+        # Stage 3: Staging
+        # ===================================================================
+        colmap_mask_path: str | None = None
+        self._update("staging", 50.0, "Staging images for COLMAP...")
+        images_dir.mkdir(parents=True, exist_ok=True)
+        for lens in ("front",):
+            src = extracted_dir / lens
+            dst = images_dir / lens
+            if not src.is_dir():
+                raise RuntimeError(
+                    f"Extraction did not produce {lens}/ subdirectory at {src}"
+                )
+            if dst.exists():
+                shutil.rmtree(dst, ignore_errors=True)
+            src.rename(dst)
+
+        if mask_enabled:
+            output_masks_dir = out / "masks"
+            output_masks_dir.mkdir(parents=True, exist_ok=True)
+            for lens in ("front",):
+                src = extracted_dir / "masks" / lens
+                dst = output_masks_dir / lens
+                if src.is_dir():
+                    if dst.exists():
+                        shutil.rmtree(dst, ignore_errors=True)
+                    src.rename(dst)
+            colmap_mask_path = str(output_masks_dir)
+
+        # ===================================================================
+        # Stage 5: COLMAP alignment (55-95%)
+        # ===================================================================
+        print("[pipeline] Stage 5: COLMAP alignment starting...")
+        self._update("colmap", 55.0, "Running COLMAP (OPENCV_FISHEYE, PER_FOLDER)...")
+
+        camera_params = infer_fisheye_camera_params(cfg.camera_family)
+        has_prior = camera_params is not None
+        if not has_prior:
+            logger.info(
+                "No calibrated prior for camera_family=%r — using fisheye-"
+                "appropriate default_focal_length_factor=0.30",
+                cfg.camera_family,
+            )
+
+        FISHEYE_DEFAULT_FOCAL_FACTOR = 0.30
+        colmap_config = ColmapConfig(
+            camera_model="OPENCV_FISHEYE",
+            camera_params=camera_params,
+            default_focal_length_factor=None if has_prior else FISHEYE_DEFAULT_FOCAL_FACTOR,
+            matcher=cfg.colmap_matcher,
+            match_budget_tier=cfg.colmap_match_budget_tier,
+            max_num_matches_override=cfg.colmap_max_num_matches,
+            refine_focal_length=True,
+            refine_principal_point=has_prior,
+            refine_extra_params=has_prior,
+            refine_sensor_from_rig=True,
+            sift_max_num_features_override=cfg.sift_max_features,
+            sift_max_image_size_override=cfg.sift_max_image_size,
+            feature_type=cfg.colmap_feature_type,
+            matcher_type=cfg.colmap_matcher_type,
+            mapper=cfg.colmap_mapper,
+            ba_solver=cfg.colmap_ba_solver,
+            vocab_tree_path=cfg.vocab_tree_path or None,
+            loop_detection=cfg.loop_detection,
+            sequential_overlap=cfg.colmap_sequential_overlap,
+            guided_matching=cfg.colmap_guided_matching,
+            sift_estimate_affine_shape=cfg.colmap_sift_affine_dsp,
+            sift_domain_size_pooling=cfg.colmap_sift_affine_dsp,
+        )
+
+        def _colmap_progress(stage: str, pct: float, msg: str) -> None:
+            base = 55.0
+            self._update("colmap", base + pct * (95 - base), msg)
+
+        runner = ColmapRunner(
+            images_dir=str(images_dir),
+            output_dir=str(out),
+            rig_config_path=None,
+            mask_path=colmap_mask_path,
+            config=colmap_config,
+            on_progress=_colmap_progress,
+            cancel_check=self._check_cancel,
+        )
+        colmap_result = runner.run()
+        if not colmap_result.success:
+            raise RuntimeError(f"COLMAP failed: {colmap_result.error}")
+
+        # ===================================================================
+        # Stage 6: Write transforms.json + pointcloud.ply (95-100%)
+        # ===================================================================
+        sparse_dir = out / "sparse" / "0"
+        if not sparse_dir.is_dir():
+            sparse_dir = out / "sparse"
+
+        self._update("output", 95.0, "Writing fisheye transforms.json...")
+        from .transforms_writer import write_fisheye_transforms
+        try:
+            transforms_path = write_fisheye_transforms(
+                colmap_sparse_dir=sparse_dir,
+                images_root=images_dir,
+                output_dir=out,
+                masks_dir=out / "masks",
+                log_fn=logger.info,
+            )
+            dataset_path = str(transforms_path)
+        except Exception as exc:
+            logger.exception("Fisheye transforms output failed")
+            raise RuntimeError(
+                f"COLMAP succeeded but transforms.json export failed: {exc}"
+            ) from exc
+
+        self._update("complete", 100.0, "Fisheye reconstruction + transforms.json ready")
+        self._cleanup_fisheye_output(out, extracted_dir)
+
+        elapsed = time.time() - t0
+        return PipelineResult(
+            success=True,
+            dataset_path=dataset_path,
+            output_mode=cfg.output_mode,
+            num_source_frames=frame_count,
+            num_output_images=frame_count,
+            num_aligned_cameras=colmap_result.num_registered_images,
+            num_registered_frames=colmap_result.num_registered_frames,
+            num_complete_frames=colmap_result.num_complete_frames,
+            num_partial_frames=colmap_result.num_partial_frames,
+            views_per_frame=colmap_result.views_per_frame,
+            expected_images_by_view=colmap_result.expected_images_by_view,
+            registered_images_by_view=colmap_result.registered_images_by_view,
+            partial_frame_examples=colmap_result.partial_frame_examples,
+            dropped_frame_examples=colmap_result.dropped_frame_examples,
+            preset_signature=(
+                f"single_fisheye | family={cfg.camera_family or 'unknown'}"
+            ),
+            gpu_extraction=gpu_accel,
             elapsed_sec=elapsed,
         )
 

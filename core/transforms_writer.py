@@ -792,9 +792,10 @@ def write_native_propagated_transforms(
     mask_path_prefix: str = "masks",
     propagated_sparse_output_dir: str | Path | None = None,
     reconstruction_obj=None,
+    lenses: tuple[str, ...] = ("front", "back"),
     log_fn: Callable[..., object] = logger.info,
 ) -> Path:
-    """Export pinhole crops propagated from a native dual-fisheye solve.
+    """Export pinhole crops propagated from a native fisheye solve.
 
     Source poses come from the registered native lens image itself:
 
@@ -844,7 +845,7 @@ def write_native_propagated_transforms(
             "cannot export propagated pinhole crops"
         )
 
-    lens_camera_ids: dict[str, set[int]] = {"front": set(), "back": set()}
+    lens_camera_ids: dict[str, set[int]] = {lens: set() for lens in lenses}
     registered_images: list[tuple[int, object, str, str]] = []
     for img_id in reg_image_ids:
         image = recon.image(img_id)
@@ -858,7 +859,9 @@ def write_native_propagated_transforms(
         registered_images.append((img_id, image, lens, frame_name))
 
     if not registered_images:
-        raise RuntimeError("No front/back native images found in reconstruction")
+        raise RuntimeError(
+            f"No {'/'.join(lenses)} native images found in reconstruction"
+        )
 
     for lens, camera_ids in lens_camera_ids.items():
         if not camera_ids:
@@ -896,20 +899,39 @@ def write_native_propagated_transforms(
             lens, camera_id, int(cam.width), int(cam.height), params,
         )
 
-    calibration = DualFisheyeCalibration(
-        front=lens_calibs["front"],
-        back=lens_calibs["back"],
-        camera_model="Native dual fisheye COLMAP refined",
-        baseline_m=0.0,
-    )
-    reframer = FisheyeReframer(calibration)
+    if set(lenses) == {"front", "back"}:
+        calibration = DualFisheyeCalibration(
+            front=lens_calibs["front"],
+            back=lens_calibs["back"],
+            camera_model="Native dual fisheye COLMAP refined",
+            baseline_m=0.0,
+        )
+        reframer = FisheyeReframer(calibration)
+    else:
+        class _LensSetFisheyeReframer(FisheyeReframer):
+            def __init__(self, calibs: dict[str, FisheyeCalibration]):
+                self._lens_calibs = calibs
+                self._map_cache = {}
+
+            def _get_lens_calib(self, lens: str) -> FisheyeCalibration:
+                try:
+                    return self._lens_calibs[lens]
+                except KeyError as exc:
+                    raise ValueError(f"Unknown lens: {lens}") from exc
+
+        reframer = _LensSetFisheyeReframer(lens_calibs)
 
     views_by_lens = {
-        "front": list(view_config.views_for_lens("front")),
-        "back": list(view_config.views_for_lens("back")),
+        lens: list(view_config.views_for_lens(lens))
+        for lens in lenses
     }
-    if not views_by_lens["front"] or not views_by_lens["back"]:
-        raise RuntimeError("View config must contain front and back views")
+    missing_view_lenses = [lens for lens in lenses if not views_by_lens[lens]]
+    if missing_view_lenses:
+        if tuple(lenses) == ("front", "back"):
+            raise RuntimeError("View config must contain front and back views")
+        raise RuntimeError(
+            "View config must contain views for: " + ", ".join(missing_view_lenses)
+        )
 
     def _pinhole_intrinsics(view) -> dict:
         crop = int(view_config.crop_size)
@@ -1024,15 +1046,26 @@ def write_native_propagated_transforms(
     lens_counts = {
         lens: sum(1 for _i, _image, image_lens, _frame in registered_images
                   if image_lens == lens)
-        for lens in ("front", "back")
+        for lens in lenses
     }
-    log_fn(
-        "Wrote native propagated pinhole export: %d crops from %d native images "
-        "(front=%d, back=%d), %d masks, %s",
-        len(frames), len(registered_images),
-        lens_counts["front"], lens_counts["back"],
-        rendered_masks, transforms_path,
-    )
+    if tuple(lenses) == ("front", "back"):
+        log_fn(
+            "Wrote native propagated pinhole export: %d crops from %d native images "
+            "(front=%d, back=%d), %d masks, %s",
+            len(frames), len(registered_images),
+            lens_counts["front"], lens_counts["back"],
+            rendered_masks, transforms_path,
+        )
+    else:
+        lens_summary = ", ".join(
+            f"{lens}={lens_counts[lens]}" for lens in lenses
+        )
+        log_fn(
+            "Wrote native propagated pinhole export: %d crops from %d native images "
+            "(%s), %d masks, %s",
+            len(frames), len(registered_images), lens_summary,
+            rendered_masks, transforms_path,
+        )
     if missing_masks:
         log_fn("WARNING: %d native masks were missing", missing_masks)
 
