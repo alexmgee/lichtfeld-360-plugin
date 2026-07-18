@@ -521,7 +521,7 @@
           <label class="checkbox-label" for="guided_matching_cb">Guided matching</label>
         </div>
       </div>
-      <div class="setting-row setting-row--dropdown" style="z-index: 32;">
+      <div class="setting-row setting-row--dropdown" style="z-index: 32;" data-if="show_mapper_select">
         <span class="prop-label">Mapper</span>
         <select data-value="mapper_idx">
           <option value="0" selected>Incremental</option>

@@ -616,6 +616,14 @@ class Plugin360Panel(lf.ui.Panel):
         model.bind_func("ba_solver_note", self._get_ba_solver_note)
         model.bind_func("mapper_note", self._get_mapper_note)
         model.bind_func("show_mapper_note", lambda: bool(self._get_mapper_note()))
+        # ERP-native is spherical (EQUIRECTANGULAR); GLOMAP is upstream-wired
+        # for perspective cameras only, so the mapper is always Incremental
+        # there. Hide the choice rather than offer an option the pipeline
+        # ignores.
+        model.bind_func(
+            "show_mapper_select",
+            lambda: self._output_mode_idx != ERP_NATIVE_OUTPUT_MODE_IDX,
+        )
 
         # Sequential overlap (visible when Matcher = Sequential)
         model.bind("sequential_overlap_str", lambda: str(self._sequential_overlap), self._set_sequential_overlap)
@@ -2538,11 +2546,8 @@ class Plugin360Panel(lf.ui.Panel):
         mode = self._get_output_mode()
         if mode == "fisheye":
             return ""  # fisheye native doesn't use rig constraints
-        if mode == "erp_native":
-            # ERP-native always runs the incremental mapper
-            # (pipeline._erp_native_solve hardcodes it); the dropdown choice
-            # is ignored here.
-            return "ERP-native always uses the Incremental mapper — GLOMAP selection is ignored."
+        # erp_native never reaches here: the Mapper dropdown is hidden in that
+        # mode (show_mapper_select), so GLOMAP can't be selected.
         return ("GLOMAP lacks rig constraints — cameras will drift relative to "
                 "each other. Use Incremental mapper for rig-dependent modes.")
 
