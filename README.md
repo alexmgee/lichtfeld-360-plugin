@@ -132,6 +132,16 @@ The **Pinhole** option renders pinhole crops from the raw fisheye using the COLM
 
 The base runtime (OpenCV, numpy, pycolmap, ffmpeg) installs automatically. SAM 3 masking is optional and requires a one-time setup from inside the plugin.
 
+> [!NOTE]
+> **The first install downloads ~4.2 GB** — dominated by the CUDA builds of PyTorch (~2.8 GB) and COLMAP (~1.2 GB). The status line can sit on *"Syncing dependencies with uv..."* with no visible movement: dependency resolution alone takes ~40 s before any output, and the large downloads report no progress. Expect 10–30+ minutes on typical connections; the install is not frozen. If `download.pytorch.org` or GitHub release downloads are throttled in your region it can take much longer.
+>
+> To watch real progress (or rescue a stalled install): close LichtFeld Studio, end any leftover `uv.exe` in Task Manager, then run the sync in a terminal — uv shows progress bars there. When it finishes, restart LichtFeld Studio and click **Install** again; it completes in seconds.
+>
+> ```powershell
+> cd $env:USERPROFILE\.lichtfeld\plugins\lichtfeld-360-plugin
+> & "<LichtFeld Studio folder>\bin\uv.exe" sync
+> ```
+
 ### Manual
 
 ```bash
