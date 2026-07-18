@@ -228,7 +228,27 @@ All 6 combinations of extractor and matcher are supported. The required ONNX mod
 | Mapper | Description |
 |--------|-------------|
 | Incremental | Standard COLMAP incremental mapper. Supports rig constraints, which are required for pinhole-reframed 360° data where multiple virtual cameras share the same optical center. |
-| Global (GLOMAP) | COLMAP 4.1's global SfM mapper. Faster for large datasets but does not support rig constraints. A warning is shown when selected with rig-dependent output modes. |
+| Global (GLOMAP) | COLMAP 4.1's global SfM mapper. Faster for large datasets but does not support rig constraints. A warning is shown when selected with rig-dependent output modes. Its bundle adjustment always runs on Ceres-GPU (the Caspar backend is excluded here — it terminates prematurely under GLOMAP and yields a measurably worse solve). |
+
+The Mapper choice is hidden for **ERP (Native)**: equirectangular
+reconstruction is incremental-only, because COLMAP wires global mapping to
+perspective cameras only.
+
+### Bundle Adjustment (BA Solver)
+
+Bundle adjustment refines camera poses and 3D points. The `BA Solver` control
+picks the backend; all four run on the GPU except Ceres CPU.
+
+| Solver | Description |
+|--------|-------------|
+| Hybrid (default) | Ceres-GPU for the frequent local (per-step) refinements and Caspar for the global refinements. On camera models Caspar does not support — `OPENCV_FISHEYE` (fisheye) and `EQUIRECTANGULAR` (ERP native) — the global step uses Ceres-GPU instead. |
+| Caspar | Caspar for both local and global bundle adjustment. Supports `PINHOLE` / `SIMPLE_RADIAL` only; on other models it falls back to Ceres-GPU. Fast on large pinhole problems. |
+| Ceres GPU | Ceres with cuDSS GPU acceleration on both local and global bundle adjustment. |
+| Ceres CPU | Ceres on CPU only. Slowest — for debugging or comparison. |
+
+Caspar honors the pinhole rig constraints exactly (same-panorama cameras keep
+their fixed relative geometry), so the default Hybrid solver is safe for the
+reframed 360° pinhole modes.
 
 ### Match Limit
 

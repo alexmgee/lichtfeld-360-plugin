@@ -128,6 +128,36 @@ All notable changes to the 360 Plugin are documented here.
   scaffold workaround is no longer needed. The ERP mode (Native
   equirectangular) produces the equivalent transforms.json. ([#3])
 
+### Fixed
+- **Native and propagated-pinhole datasets now import into LichtFeld Studio
+  reliably on Windows.** Two independent issues blocked directory import:
+  - `transforms.json` was written with Windows (CRLF) line endings, which the
+    LFS transforms reader rejected with a misleading *"Transforms JSON changed
+    size while it was being read"* error. It is now written with LF endings.
+  - Propagated pinhole datasets (ERP Native → Pinhole/Both and
+    Fisheye → Pinhole/Both) wrote their 3D points without a reprojection-error
+    value, so LFS rejected the whole dataset with a *"boundary contract
+    failed"* error. The points now carry the reprojection error from the
+    native solve.
+- **Global (GLOMAP) mapper bundle adjustment now always runs on Ceres-GPU.**
+  The Caspar backend was measurably worse under GLOMAP — higher reprojection
+  error, fewer points, and Caspar's own logs reported premature termination —
+  so it is excluded there. Incremental mapping (where Caspar is verified
+  equivalent to Ceres and honors rig constraints exactly) is unchanged.
+- The **Mapper** dropdown is now hidden for **ERP (Native)**. Equirectangular
+  reconstruction is incremental-only (COLMAP wires global mapping to
+  perspective cameras only), so the Global (GLOMAP) option no longer appears
+  where the pipeline silently ignored it.
+- The **BA Solver** panel notes now describe the backend each mode actually
+  uses across every mapper and camera model — e.g. the Caspar-ineligible
+  fisheye (`OPENCV_FISHEYE`) and ERP-native (`EQUIRECTANGULAR`) modes correctly
+  state their Ceres-GPU fallback instead of implying Caspar or GLOMAP runs.
+- COLMAP is now blocked with a clear, actionable message if the plugin's own
+  environment ends up with a CPU-only `pycolmap` (for example after a stray
+  `pip install -U pycolmap`, whose Windows wheel is CPU-only). Previously this
+  silently disabled GPU bundle adjustment; reinstalling the GPU wheel restores
+  it.
+
 ## [0.2.0] - 2026-07-10
 
 ### Fixed
