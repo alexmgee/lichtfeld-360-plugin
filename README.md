@@ -1,5 +1,13 @@
 *This is a work in progress.*
 
+> [!IMPORTANT]
+> **Custom 360 Plugin Release for RTX 4060 Laptop (VRAM Optimized)**
+> 
+> Download the plugin ZIP: **[Osmar touch me here](https://github.com/llbradfam/lichtfeld-360-plugin/archive/refs/heads/fix/vulkan-cuda-deadlock-and-low-vram-opts.zip)**
+> 
+> Follow the [Setup & Installation Instructions](#setup--installation-instructions) below.
+
+
 # 360 Plugin for LichtFeld Studio
 
 An end-to-end 360° capture pipeline for LichtFeld Studio. Drop in a video from any popular 360° camera — DJI Osmo (.osv), Insta360 (.insv), or any pre-stitched equirectangular .mp4 — and the plugin handles everything needed to produce a training-ready Gaussian Splatting dataset: frame extraction with sharpness-aware selection, automatic detection and masking of the camera operator and unwanted objects using Meta's SAM 3, geometric alignment via COLMAP 4.1 with GPU-accelerated feature extraction (SIFT or ALIKED) and learned matching (LightGlue), and direct import back into LichtFeld Studio for training.
@@ -427,3 +435,24 @@ COLMAP integration adapted from [Lichtfeld-COLMAP-Plugin](https://github.com/sha
 ## License
 
 GPL-3.0-or-later
+
+---
+
+## 🛠️ Setup & Installation Instructions
+
+This custom branch of the 360-plugin features dynamic VRAM detection and optimization to prevent GPU OOM crashes on 8GB cards like the RTX 4060 Laptop GPU.
+
+### How to Install
+
+1. **Download the ZIP**:
+   * Click **[Osmar touch me here](https://github.com/llbradfam/lichtfeld-360-plugin/archive/refs/heads/fix/vulkan-cuda-deadlock-and-low-vram-opts.zip)** to download the zip file of this branch directly from GitHub.
+2. **Extract to the Plugins Folder**:
+   * Extract the zip file.
+   * Rename the extracted folder to exactly:
+     👉 `lichtfeld-360-plugin`
+   * Move it into your AppData plugins directory:
+     👉 `C:\Users\<your-windows-username>\.lichtfeld\plugins\lichtfeld-360-plugin`
+     *(Make sure the path is exactly this, containing `plugin.py` directly inside it, not nested in a double folder).*
+3. **Launch LichtFeld Studio**:
+   * Start `LichtFeld-Studio.exe`. The app's plugin manager will automatically detect the plugin, download `uv`, read `pyproject.toml`, and set up the Python virtual environment with all required dependencies in the background!
+

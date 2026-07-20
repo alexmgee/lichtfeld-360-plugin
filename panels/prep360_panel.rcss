@@ -456,7 +456,7 @@ body {
     top: 0;
     bottom: 0;
     width: 0%;
-    background: linear-gradient(90deg, rgba(84, 170, 255, 0.34), rgba(84, 170, 255, 0.14));
+    background-color: rgba(84, 170, 255, 60);
 }
 
 .scrub-field-display {
@@ -526,3 +526,65 @@ body {
     flex: 1;
     font-weight: bold;
 }
+
+/* ── Recommended Settings Guide Styles ──────────────────── */
+
+.help-box {
+    background-color: #1a1e24;
+    border-width: 1dp;
+    border-style: solid;
+    border-color: #2e353f;
+    border-radius: 4dp;
+    padding: 8dp;
+    margin-bottom: 10dp;
+    display: block;
+}
+
+.help-title {
+    font-weight: bold;
+    font-size: 13dp;
+    margin-bottom: 6dp;
+    display: block;
+}
+
+.help-table {
+    display: block;
+    margin-top: 4dp;
+}
+
+.help-row {
+    display: flex;
+    flex-direction: row;
+    padding: 4dp 0;
+    border-bottom-width: 1dp;
+    border-bottom-style: solid;
+    border-bottom-color: #232a35;
+}
+
+.help-row:last-child {
+    border-bottom-width: 0dp;
+}
+
+.help-cell {
+    font-size: 11dp;
+    color: #b0b8c4;
+    flex: 2;
+    text-align: left;
+    display: block;
+}
+
+.help-cell--label {
+    font-weight: bold;
+    color: #e2e8f0;
+    flex: 1;
+    min-width: 120dp;
+    display: block;
+}
+
+
+
+.highlight {
+    color: #ff9900;
+    font-weight: bold;
+}
+
