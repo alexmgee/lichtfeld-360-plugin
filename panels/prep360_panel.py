@@ -336,8 +336,10 @@ class Plugin360Panel(lf.ui.Panel):
         self._handle = None
         self._doc = None
 
-        # Section collapse state (all start expanded)
-        self._collapsed: set[str] = set()
+        # Section collapse state (all start expanded except guides)
+        self._collapsed: set[str] = {"help", "trainhelp"}
+
+
 
         # Video state
         self._video_loaded: bool = False
@@ -2615,9 +2617,12 @@ class Plugin360Panel(lf.ui.Panel):
         # constant_rigs constraint). Native fisheye is the only exempt mode.
         if mode != "fisheye" and self._mapper_idx != 0:
             self._mapper_idx = 0
+        # Automatically prefill/prepopulate settings for the current source mode
+        self._autopopulate_recommended_settings()
         # Refresh bindings after the changes.
         if self._handle:
             self._handle.dirty_all()
+
 
     def _set_processing_idx(self, val):
         """Bound to the collapsed Native/Pinhole Output Mode dropdown. Sets the
@@ -2675,6 +2680,47 @@ class Plugin360Panel(lf.ui.Panel):
     def _set_output_path(self, val):
         self._output_path = str(val)
 
+    def _autopopulate_recommended_settings(self) -> None:
+        """Automatically prefill/prepopulate settings based on projection and source mode (tripod vs video)."""
+        is_image_folder = (self._source_mode_idx == 2)
+        is_fisheye = (self._projection == "fisheye")
+
+        if is_image_folder:
+            # Tripod still photos (Image Folder) settings
+            self._extract_sharpness_idx = 0  # None
+            self._colmap_matcher_idx = 1     # Exhaustive
+            self._matcher_type_idx = 1       # LightGlue (for wide baseline robust matching)
+            self._guided_matching_enabled = True
+            self._loop_closure_enabled = True
+            self._output_size_idx = 2        # 1920px (default high quality)
+            self._jpeg_quality = 95
+        elif is_fisheye:
+            # Raw Dual-Lens video settings
+            self._extract_sharpness_idx = 2  # Better
+            self._blur_metric_idx = 0        # Tenengrad
+            self._colmap_matcher_idx = 0     # Sequential
+            self._matcher_type_idx = 1       # LightGlue (essential for dual lens alignment)
+            self._guided_matching_enabled = True
+            self._loop_closure_enabled = True
+            self._output_size_idx = 2        # 1920px
+            self._jpeg_quality = 90
+        else:
+            # Stitched ERP video settings
+            self._extract_sharpness_idx = 2  # Better
+            self._blur_metric_idx = 0        # Tenengrad
+            self._colmap_matcher_idx = 0     # Sequential
+            self._matcher_type_idx = 0       # Bruteforce (fastest)
+            self._guided_matching_enabled = True
+            self._loop_closure_enabled = True
+            self._output_size_idx = 2        # 1920px
+            self._jpeg_quality = 90
+
+        # Sync SIFT settings to match normal preset
+        self._sift_preset_idx = 0  # Normal
+
+        if self._handle:
+            self._handle.dirty_all()
+
     # ── Dual fisheye state setters ────────────────────────────
 
     def _set_source_mode(self, val):
@@ -2682,6 +2728,7 @@ class Plugin360Panel(lf.ui.Panel):
             idx = int(val)
             if 0 <= idx < len(SOURCE_MODES):
                 self._source_mode_idx = idx
+                self._autopopulate_recommended_settings()
         except (ValueError, TypeError):
             pass
 
@@ -3211,13 +3258,45 @@ class Plugin360Panel(lf.ui.Panel):
 
     # ── Pipeline execution ────────────────────────────────────
 
+    def _confirm_overwrite(self) -> bool:
+        if not self._output_path:
+            return True
+        from pathlib import Path
+        p = Path(self._output_path)
+        has_existing = (
+            (p / "transforms.json").exists()
+            or (p / "images").exists()
+            or (p / "masks").exists()
+            or (p / "front").exists()
+            or (p / "back").exists()
+            or (p / "colmap").exists()
+            or (p / "extracted").exists()
+            or (p / "metadata").exists()
+        )
+        if has_existing:
+            import ctypes
+            msg = (
+                "The selected output directory contains existing files or folders from a previous run.\n\n"
+                "Continuing will overwrite your previous output products (like transforms.json and images/masks).\n\n"
+                "If you want to keep them, click Cancel, and select a different output directory or move the files first.\n\n"
+                "Do you want to proceed anyway?"
+            )
+            # MB_OKCANCEL = 1, MB_ICONWARNING = 0x30, MB_SETFOREGROUND = 0x00010000, MB_TOPMOST = 0x00040000
+            res = ctypes.windll.user32.MessageBoxW(0, msg, "Warning: Existing Outputs Detected", 0x30 | 1 | 0x00010000 | 0x00040000)
+            return res == 1
+        return True
+
     def _on_run_pipeline(self, handle, event, args):
         del handle, event, args
+        if not self._confirm_overwrite():
+            return
         self._import_after = True
         self._start_pipeline()
 
     def _on_run_pipeline_only(self, handle, event, args):
         del handle, event, args
+        if not self._confirm_overwrite():
+            return
         self._import_after = False
         self._start_pipeline()
 
@@ -3817,6 +3896,78 @@ class Plugin360Panel(lf.ui.Panel):
                         is_dataset=True,
                         output_path=import_output_path,
                     )
+                    
+                    # Automatically apply training settings recommendations based on workflow
+                    try:
+                        opt_params = lf.optimization_params()
+                        ds_params = lf.dataset_params()
+                        if opt_params and opt_params.has_params() and ds_params and ds_params.has_params():
+                            # Determine system VRAM dynamically
+                            vram_gb = 8.0
+                            try:
+                                import torch
+                                if torch.cuda.is_available():
+                                    vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+                            except Exception:
+                                pass
+                            
+                            is_low_vram = (vram_gb < 12.0)
+                            is_image_folder = (self._source_mode_idx == 2)
+                            is_large_capture = False
+                            if self._video_info:
+                                is_large_capture = (self._video_info.width >= 3840 or self._video_info.height >= 1920)
+                            
+                            logger.info(f"[360] Detected GPU VRAM: {vram_gb:.2f} GB (Low VRAM Mode: {is_low_vram})")
+                            
+                            if is_image_folder:
+                                # Tripod still photos: lower grad threshold, lower reset interval
+                                opt_params.set("grad_threshold", 0.00015)
+                                opt_params.set("reset_every", 2000)
+                                opt_params.set("init_scaling", 1.5)
+                                if is_low_vram:
+                                    ds_params.set("cpu_cache", True)
+                                    ds_params.set("max_width", 1920)
+                                logger.info("[360] Auto-populated training settings for Tripod Still Photos.")
+                            elif is_low_vram:
+                                # Strict low VRAM (e.g. RTX 4060 Laptop 8GB) settings to prevent out of memory
+                                ds_params.set("cpu_cache", True)
+                                if is_large_capture or result.num_output_images > 800:
+                                    ds_params.set("max_width", 1024)
+                                    opt_params.set("stop_refine", 10000)
+                                    opt_params.set("grow_until_iter", 10000)
+                                    opt_params.set("grad_threshold", 0.0004)
+                                    opt_params.set("prune_opacity", 0.01)
+                                    logger.info("[360] Auto-populated STRICT VRAM optimization (1024px, CPU Cache) for low-VRAM GPU.")
+                                else:
+                                    ds_params.set("max_width", 1920)
+                                    opt_params.set("stop_refine", 15000)
+                                    opt_params.set("grow_until_iter", 15000)
+                                    opt_params.set("grad_threshold", 0.0002)
+                                    opt_params.set("prune_opacity", 0.005)
+                                    logger.info("[360] Auto-populated VRAM optimization (1920px, CPU Cache) for low-VRAM GPU.")
+                            elif is_large_capture or result.num_output_images > 1000:
+                                # Large/8K scene VRAM optimizations (high-end GPU)
+                                ds_params.set("max_width", 1920)
+                                ds_params.set("cpu_cache", True)
+                                opt_params.set("stop_refine", 10000)
+                                opt_params.set("grow_until_iter", 10000)
+                                opt_params.set("grad_threshold", 0.0004)
+                                opt_params.set("prune_opacity", 0.01)
+                                logger.info("[360] Auto-populated VRAM optimization training settings for Large Capture (high-end GPU).")
+                            else:
+                                # Standard video: default values, no cpu_cache unless requested (high-end GPU)
+                                opt_params.set("grad_threshold", 0.0002)
+                                opt_params.set("reset_every", 3000)
+                                opt_params.set("init_scaling", 1.0)
+                                opt_params.set("stop_refine", 15000)
+                                opt_params.set("grow_until_iter", 15000)
+                                opt_params.set("prune_opacity", 0.005)
+                                ds_params.set("max_width", 0)  # Full resolution
+                                ds_params.set("cpu_cache", False)
+                                logger.info("[360] Auto-populated training settings for Standard Video (high-end GPU).")
+                    except Exception as e:
+                        logger.warning("Failed to auto-populate training settings: %s", e)
+
                     self._processing_status = (
                         f"Import requested: {Path(dataset_base_path).name}"
                     )

@@ -340,9 +340,16 @@ class PairedExtractor:
     @staticmethod
     def _ensure_empty_output(path: Path) -> None:
         if path.exists() and any(path.iterdir()):
-            raise RuntimeError(
-                f"Refusing to overwrite non-empty paired extraction folder: {path}"
-            )
+            import shutil
+            logger.info("Cleaning up existing output folder: %s", path)
+            for child in path.iterdir():
+                try:
+                    if child.is_file() or child.is_symlink():
+                        child.unlink()
+                    elif child.is_dir():
+                        shutil.rmtree(str(child))
+                except OSError as exc:
+                    logger.warning("Failed to delete %s during cleanup: %s", child, exc)
 
     @staticmethod
     def _write_pair_image(path: Path, frame, config: PairedExtractorConfig) -> None:
@@ -1304,9 +1311,10 @@ class PairedExtractor:
         self._ensure_empty_output(back_out)
         manifest_path = out_root / "paired_extraction_manifest.json"
         if manifest_path.exists():
-            raise RuntimeError(
-                f"Refusing to overwrite existing paired extraction manifest: {manifest_path}"
-            )
+            try:
+                manifest_path.unlink()
+            except OSError as exc:
+                logger.warning("Failed to delete manifest %s: %s", manifest_path, exc)
         front_out.mkdir(parents=True, exist_ok=True)
         back_out.mkdir(parents=True, exist_ok=True)
 

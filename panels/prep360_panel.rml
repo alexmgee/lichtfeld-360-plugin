@@ -272,7 +272,7 @@
         </div>
         <div class="setting-row gpu-row__actions">
           <div data-if="show_gpu_row_button">
-            <button class="btn btn--primary btn--compact" data-event-click="gpu_primary_action" data-attr-disabled="gpu_busy">{{gpu_row_button_text}}</button>
+            <button class="btn btn--primary btn--compact" data-event-click="gpu_primary_action" data-attrif-disabled="gpu_busy">{{gpu_row_button_text}}</button>
           </div>
           <div data-if="show_gpu_copy_details">
             <button class="btn btn--secondary btn--compact" data-event-click="gpu_copy_details">Copy details</button>
@@ -282,7 +282,7 @@
       <div class="setting-row setting-row--aligned" data-class-row-disabled="extract_controls_disabled">
         <span class="setting-row__label-col">FPS</span>
         <div class="setting-row__control-col setting-row__control-col--slider">
-          <input type="range" class="setting-slider" data-value="extract_fps_str" min="0.1" max="5.0" step="0.1" data-attr-disabled="extract_controls_disabled" />
+          <input type="range" class="setting-slider" data-value="extract_fps_str" min="0.1" max="5.0" step="0.1" data-attrif-disabled="extract_controls_disabled" />
           <span class="slider-value">{{extract_fps_str}}</span>
         </div>
       </div>
@@ -296,7 +296,7 @@
       </div>
       <div class="setting-row setting-row--dropdown setting-row--dropdown-high" data-class-row-disabled="extract_controls_disabled">
         <span class="prop-label">Sharpness</span>
-        <select data-value="extract_sharpness_idx" data-attr-disabled="extract_controls_disabled">
+        <select data-value="extract_sharpness_idx" data-attrif-disabled="extract_controls_disabled">
           <option value="0">None</option>
           <option value="1">Basic</option>
           <option value="2">Better</option>
@@ -305,7 +305,7 @@
       </div>
       <div class="setting-row setting-row--dropdown" data-class-row-disabled="extract_controls_disabled">
         <span class="prop-label">Blur Metric</span>
-        <select data-value="blur_metric_idx" data-attr-disabled="extract_controls_disabled">
+        <select data-value="blur_metric_idx" data-attrif-disabled="extract_controls_disabled">
           <option value="0">Tenengrad</option>
           <option value="1">Laplacian</option>
         </select>
@@ -403,22 +403,22 @@
             </div>
           </div>
           <div class="inline-input-row hf-inline-actions" data-if="show_sam3_hf_inline_actions">
-            <button class="btn btn--secondary btn--compact" data-event-click="toggle_sam3_token_editor" data-attr-disabled="install_busy">{{sam3_change_token_button_text}}</button>
-            <button class="btn btn--secondary btn--compact" data-event-click="forget_hf_token" data-attr-disabled="install_busy">Forget Saved Token</button>
+            <button class="btn btn--secondary btn--compact" data-event-click="toggle_sam3_token_editor" data-attrif-disabled="install_busy">{{sam3_change_token_button_text}}</button>
+            <button class="btn btn--secondary btn--compact" data-event-click="forget_hf_token" data-attrif-disabled="install_busy">Forget Saved Token</button>
           </div>
         </div>
         <div class="setting-row" data-if="show_sam3_token_editor">
           <span class="prop-label">Token</span>
           <div class="inline-input-row">
             <input type="text" data-value="hf_token_input" />
-            <button class="btn btn--primary btn--compact" data-event-click="verify_hf_token" data-attr-disabled="install_busy">Verify Access</button>
+            <button class="btn btn--primary btn--compact" data-event-click="verify_hf_token" data-attrif-disabled="install_busy">Verify Access</button>
           </div>
         </div>
         <div class="setting-row" data-if="show_sam3_token_actions_row">
           <span class="prop-label"></span>
           <div class="inline-input-row">
-            <button class="btn btn--secondary btn--compact" data-event-click="toggle_sam3_token_editor" data-attr-disabled="install_busy">{{sam3_change_token_button_text}}</button>
-            <button class="btn btn--secondary btn--compact" data-event-click="forget_hf_token" data-attr-disabled="install_busy">Forget Saved Token</button>
+            <button class="btn btn--secondary btn--compact" data-event-click="toggle_sam3_token_editor" data-attrif-disabled="install_busy">{{sam3_change_token_button_text}}</button>
+            <button class="btn btn--secondary btn--compact" data-event-click="forget_hf_token" data-attrif-disabled="install_busy">Forget Saved Token</button>
           </div>
         </div>
         <div class="setting-row" data-if="show_sam3_token_editor_message">
@@ -426,11 +426,11 @@
         </div>
         <div class="setting-row" data-if="show_sam3_check_button">
           <span class="prop-label"></span>
-          <button class="btn btn--secondary btn--compact" data-event-click="check_sam3_setup" data-attr-disabled="install_busy">{{sam3_check_button_text}}</button>
+          <button class="btn btn--secondary btn--compact" data-event-click="check_sam3_setup" data-attrif-disabled="install_busy">{{sam3_check_button_text}}</button>
         </div>
         <div class="setting-row" data-if="show_sam3_install_button">
           <span class="prop-label"></span>
-          <button class="btn btn--primary" data-event-click="install_premium_tier" data-attr-disabled="sam3_install_disabled">{{sam3_install_button_text}}</button>
+          <button class="btn btn--primary" data-event-click="install_premium_tier" data-attrif-disabled="sam3_install_disabled">{{sam3_install_button_text}}</button>
         </div>
       </div>
 
@@ -486,7 +486,7 @@
         <span class="prop-label">Total Output</span>
         <span class="status-text status-muted">{{total_output_text}}</span>
         <div class="loop-closure-group" data-class-row-disabled="loop_closure_disabled">
-          <input type="checkbox" data-checked="loop_closure_enabled" id="loop_closure_cb" data-attr-disabled="loop_closure_disabled"/>
+          <input type="checkbox" data-checked="loop_closure_enabled" id="loop_closure_cb" data-attrif-disabled="loop_closure_disabled"/>
           <label class="checkbox-label" for="loop_closure_cb">Loop closure</label>
         </div>
       </div>
@@ -643,6 +643,175 @@
       <div class="setting-row">
         <span class="prop-label"></span>
         <span class="status-text status-muted">{{match_budget_text}}</span>
+      </div>
+    </div>
+
+    <!-- ── Section 6: Recommended Settings Guide ───────────── -->
+    <div class="section-header text-accent" id="hdr-help" data-event-click="toggle_section('help')">
+      <span class="section-arrow text-accent" id="arrow-help">&#x25B6;</span>
+      <span class="text-accent">Recommended Settings Guide</span>
+    </div>
+    <div class="section-content collapsed" id="sec-help">
+      <!-- TABLE 1: Stitched 360 Video -->
+      <div class="help-box">
+        <div class="help-title text-accent">Stitched 360 Video (Equirectangular / ERP)</div>
+        <div class="help-table">
+          <div class="help-row"><div class="help-cell help-cell--label">Output Mode</div><div class="help-cell"><span class="highlight">Native</span> (faster solve) or <span class="highlight">Pinhole</span></div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Keep frames &amp; masks</div><div class="help-cell"><span class="highlight">Checked</span> (saves extraction time on reruns)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">FPS</div><div class="help-cell"><span class="highlight">0.5 to 2.0</span> (aim for 500-1500 total frames)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Extract all frames</div><div class="help-cell"><span class="highlight">Unchecked</span> (keeps sharpness selection active)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Sharpness</div><div class="help-cell"><span class="highlight">Better</span> (filters out motion blur)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Blur Metric</div><div class="help-cell"><span class="highlight">Tenengrad</span> (standard edge-based sharpness)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Keep streams</div><div class="help-cell"><span class="highlight">N/A</span> (only active for raw dual-lens container)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Masking (SAM 3)</div><div class="help-cell"><span class="highlight">Enabled</span> (removes yourself/tripod from images)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Mask Prompts</div><div class="help-cell"><span class="highlight">person, tripod</span> (comma-separated list)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Reframe Preset</div><div class="help-cell"><span class="highlight">Medium (16 views)</span> (used if exporting pinholes)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Matcher (COLMAP)</div><div class="help-cell"><span class="highlight">Sequential</span> (standard video alignment)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Loop closure</div><div class="help-cell"><span class="highlight">Enabled</span> (highly recommended; locks loop drift)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">COLMAP Preset</div><div class="help-cell"><span class="highlight">Normal</span> (fast) or <span class="highlight">High</span> (precise)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Features</div><div class="help-cell"><span class="highlight">SIFT</span> (GPU-accelerated, robust)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Matcher Type</div><div class="help-cell"><span class="highlight">Bruteforce</span> (fastest) or <span class="highlight">LightGlue</span> (best loops)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Guided matching</div><div class="help-cell"><span class="highlight">Checked</span> (improves weak/similar feature links)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Mapper</div><div class="help-cell"><span class="highlight">Incremental</span> (default/safer) or <span class="highlight">Global</span></div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">BA Solver</div><div class="help-cell"><span class="highlight">Hybrid</span> (default auto) or <span class="highlight">Ceres GPU</span> (cuDSS)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Crop Size</div><div class="help-cell"><span class="highlight">1920 px</span> (high quality) or <span class="highlight">1280 px</span></div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Format</div><div class="help-cell"><span class="highlight">JPG</span> (standard/fast) or <span class="highlight">PNG</span> (large/lossless)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">JPEG Quality</div><div class="help-cell"><span class="highlight">90 to 95</span> (excellent quality-to-space ratio)</div></div>
+        </div>
+      </div>
+
+      <!-- TABLE 2: Raw Dual-Lens Video -->
+      <div class="help-box">
+        <div class="help-title text-accent">Raw 360 Video Dual Lens (.insv / .osv)</div>
+        <div class="help-table">
+          <div class="help-row"><div class="help-cell help-cell--label">Output Mode</div><div class="help-cell"><span class="highlight">N/A</span> (disabled/hidden; forces fisheye pipeline)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Keep frames &amp; masks</div><div class="help-cell"><span class="highlight">Checked</span> (saves extraction time on reruns)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">FPS</div><div class="help-cell"><span class="highlight">0.5 to 2.0</span> (aim for 500-1500 total frames)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Extract all frames</div><div class="help-cell"><span class="highlight">Unchecked</span> (keeps sharpness selection active)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Sharpness</div><div class="help-cell"><span class="highlight">Better</span> (filters out motion blur)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Blur Metric</div><div class="help-cell"><span class="highlight">Tenengrad</span> (standard edge-based sharpness)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Keep streams</div><div class="help-cell"><span class="highlight">Checked</span> (keeps demuxed lens videos for backup)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Masking (SAM 3)</div><div class="help-cell"><span class="highlight">Enabled</span> (removes yourself/tripod from images)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Mask Prompts</div><div class="help-cell"><span class="highlight">person, tripod</span> (comma-separated list)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Reframe Preset</div><div class="help-cell"><span class="highlight">Medium (16 views)</span> (used for final training output)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Matcher (COLMAP)</div><div class="help-cell"><span class="highlight">Sequential</span> (standard video alignment)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Loop closure</div><div class="help-cell"><span class="highlight">Enabled</span> (highly recommended; locks loop drift)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">COLMAP Preset</div><div class="help-cell"><span class="highlight">Normal</span> (fast) or <span class="highlight">High</span> (precise)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Features</div><div class="help-cell"><span class="highlight">SIFT</span> (GPU-accelerated, robust)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Matcher Type</div><div class="help-cell"><span class="highlight">LightGlue</span> (highly recommended for raw dual-lenses)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Guided matching</div><div class="help-cell"><span class="highlight">Checked</span> (improves alignment at lens boundary)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Mapper</div><div class="help-cell"><span class="highlight">Incremental</span> (default/safer) or <span class="highlight">Global</span></div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">BA Solver</div><div class="help-cell"><span class="highlight">Hybrid</span> (default auto) or <span class="highlight">Ceres GPU</span> (cuDSS)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Crop Size</div><div class="help-cell"><span class="highlight">1920 px</span> (high quality) or <span class="highlight">1280 px</span></div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Format</div><div class="help-cell"><span class="highlight">JPG</span> (standard/fast) or <span class="highlight">PNG</span> (large/lossless)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">JPEG Quality</div><div class="help-cell"><span class="highlight">90 to 95</span> (excellent quality-to-space ratio)</div></div>
+        </div>
+      </div>
+
+      <!-- TABLE 3: Tripod Still Photos -->
+      <div class="help-box">
+        <div class="help-title text-accent">Tripod Still Photos (Image Folder Mode)</div>
+        <div class="help-table">
+          <div class="help-row"><div class="help-cell help-cell--label">Output Mode</div><div class="help-cell"><span class="highlight">Native</span> (faster solve) or <span class="highlight">Pinhole</span></div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Keep frames &amp; masks</div><div class="help-cell"><span class="highlight">N/A</span> (disabled; images are not extracted from video)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">FPS</div><div class="help-cell"><span class="highlight">N/A</span> (disabled; using Image Folder source mode)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Extract all frames</div><div class="help-cell"><span class="highlight">N/A</span> (disabled; using Image Folder source mode)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Sharpness</div><div class="help-cell"><span class="highlight">None</span> (no motion blur to filter out of still photos)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Blur Metric</div><div class="help-cell"><span class="highlight">N/A</span> (disabled/not needed for still photos)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Keep streams</div><div class="help-cell"><span class="highlight">N/A</span> (only active for raw dual-lens video containers)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Masking (SAM 3)</div><div class="help-cell"><span class="highlight">Enabled</span> (removes tripod and shadows from images)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Mask Prompts</div><div class="help-cell"><span class="highlight">tripod, shadows</span> (comma-separated list)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Reframe Preset</div><div class="help-cell"><span class="highlight">Medium (16 views)</span> (only used if exporting pinhole)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Matcher (COLMAP)</div><div class="help-cell"><span class="highlight">Exhaustive</span> (compares all still positions together)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Loop closure</div><div class="help-cell"><span class="highlight">Enabled</span> (helps link distant tripod positions)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">COLMAP Preset</div><div class="help-cell"><span class="highlight">High</span> (recommended since you have fewer total images)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Features</div><div class="help-cell"><span class="highlight">SIFT</span> (use <span class="highlight">ALIKED</span> only if texture is extremely low)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Matcher Type</div><div class="help-cell"><span class="highlight">LightGlue</span> (highly recommended for wide-baseline steps)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Guided matching</div><div class="help-cell"><span class="highlight">Checked</span> (improves registration between positions)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Mapper</div><div class="help-cell"><span class="highlight">Incremental</span> (forces robust local bundle adjustment)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">BA Solver</div><div class="help-cell"><span class="highlight">Hybrid</span> (default auto) or <span class="highlight">Ceres GPU</span> (cuDSS)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Crop Size</div><div class="help-cell"><span class="highlight">1920 px</span> (highest detail output for still scans)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Format</div><div class="help-cell"><span class="highlight">JPG</span> (standard/fast) or <span class="highlight">PNG</span> (large/lossless)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">JPEG Quality</div><div class="help-cell"><span class="highlight">95</span> (highest visual fidelity for still scans)</div></div>
+        </div>
+      </div>
+
+      <!-- TEXT EXPLANATIONS (Bottom) -->
+      <div class="help-box">
+        <div class="help-title text-accent">Input Formats: Stitched vs. Dual-Lens</div>
+        <div class="help-table">
+          <div class="help-row">
+            <div class="help-cell help-cell--label">Stitched ERP</div>
+            <div class="help-cell">Stitched 2:1 widescreen `.mp4` from Studio. Set to <span class="highlight">Equirectangular</span>.</div>
+          </div>
+          <div class="help-row">
+            <div class="help-cell help-cell--label">Raw Dual-Lens</div>
+            <div class="help-cell">Unstitched circles straight from SD card `.insv`. Set to <span class="highlight">Fisheye</span>.</div>
+          </div>
+        </div>
+      </div>
+      <div class="help-box">
+        <div class="help-title text-accent">Why use Insta360 Studio first?</div>
+        <div class="help-table">
+          <div class="help-row">
+            <div class="help-cell help-cell--label">Stabilization</div>
+            <div class="help-cell"><span class="highlight">FlowState</span> locks the horizon flat, critical for solver success.</div>
+          </div>
+          <div class="help-row">
+            <div class="help-cell help-cell--label">Stitching</div>
+            <div class="help-cell"><span class="highlight">Optical Flow</span> dynamic seam blending reduces double-images.</div>
+          </div>
+        </div>
+      </div>
+      <div class="help-box">
+        <div class="help-title text-accent">Troubleshooting Alignment Issues</div>
+        <div class="help-table">
+          <div class="help-row">
+            <div class="help-cell help-cell--label">Broken Scene</div>
+            <div class="help-cell">Use <span class="highlight">LightGlue</span> matcher + check <span class="highlight">Guided matching</span>.</div>
+          </div>
+          <div class="help-row">
+            <div class="help-cell help-cell--label">Too Slow</div>
+            <div class="help-cell">Reduce the <span class="highlight">FPS</span> slider (aim for 500-1500 total frames).</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Section 7: Training Settings Guide ───────────── -->
+    <div class="section-header text-accent" id="hdr-trainhelp" data-event-click="toggle_section('trainhelp')">
+      <span class="section-arrow text-accent" id="arrow-trainhelp">&#x25B6;</span>
+      <span class="text-accent">Training Settings Guide</span>
+    </div>
+    <div class="section-content collapsed" id="sec-trainhelp">
+      <div class="help-box">
+        <div class="help-title text-accent">Large Site / VRAM Optimization (8K / 3+ Min)</div>
+        <div class="help-table">
+          <div class="help-row"><div class="help-cell help-cell--label">Max Width</div><div class="help-cell"><span class="highlight">1920</span> (crucial VRAM saver; downscales raw 8K)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Use CPU Cache</div><div class="help-cell"><span class="highlight">Checked</span> (keeps image cache in system RAM)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Stop Refine</div><div class="help-cell"><span class="highlight">10000 to 12000</span> (caps total Gaussian count early)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Grow Until</div><div class="help-cell"><span class="highlight">10000 to 12000</span> (stops point growth early)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Grad Threshold</div><div class="help-cell"><span class="highlight">0.0004 to 0.0006</span> (stricter splitting criteria)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Prune Opacity</div><div class="help-cell"><span class="highlight">0.01 to 0.015</span> (aggressively cleans transparent floaters)</div></div>
+        </div>
+      </div>
+      <div class="help-box">
+        <div class="help-title text-accent">Standard / Small Scene Settings</div>
+        <div class="help-table">
+          <div class="help-row"><div class="help-cell help-cell--label">Max Width</div><div class="help-cell"><span class="highlight">1920</span> (or 2048 for high detail)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Use CPU Cache</div><div class="help-cell"><span class="highlight">Checked</span> (always recommended)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Stop Refine</div><div class="help-cell"><span class="highlight">15000</span> (default splitting stop)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Grad Threshold</div><div class="help-cell"><span class="highlight">0.0002</span> (standard splitting sensitivity)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Prune Opacity</div><div class="help-cell"><span class="highlight">0.005</span> (standard opacity pruning limit)</div></div>
+        </div>
+      </div>
+      <div class="help-box">
+        <div class="help-title text-accent">Optimization &amp; General Rules</div>
+        <div class="help-table">
+          <div class="help-row"><div class="help-cell help-cell--label">Random Init</div><div class="help-cell"><span class="highlight">Unchecked</span> (forces loading COLMAP point cloud)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Use 16-bit Color</div><div class="help-cell"><span class="highlight">Unchecked</span> (only check if training raw HDR EXRs)</div></div>
+          <div class="help-row"><div class="help-cell help-cell--label">Enable Eval</div><div class="help-cell"><span class="highlight">Unchecked</span> (use all images for training detail)</div></div>
+        </div>
       </div>
     </div>
 

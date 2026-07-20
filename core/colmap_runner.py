@@ -875,6 +875,12 @@ except Exception as exc:
         _log("Pipeline started")
 
         sparse_dir = self._output_dir / "sparse"
+        if sparse_dir.exists():
+            import shutil
+            try:
+                shutil.rmtree(str(sparse_dir))
+            except OSError:
+                pass
         sparse_dir.mkdir(parents=True, exist_ok=True)
 
         database_path = os.fspath(self._output_dir / "database.db")

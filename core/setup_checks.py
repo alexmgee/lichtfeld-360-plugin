@@ -575,6 +575,10 @@ def _find_uv() -> str:
             return uv
     except Exception:
         pass
+    import os
+    local_uv = r"C:\Users\clmix\.local\bin\uv.exe"
+    if os.path.exists(local_uv):
+        return local_uv
     import shutil
     return shutil.which("uv") or ""
 
