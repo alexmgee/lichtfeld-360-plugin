@@ -382,7 +382,7 @@ class PipelineJob:
             try:
                 self._on_progress(stage, progress, status)
             except Exception:
-                pass
+                logger.exception("Pipeline progress callback failed")
 
     # -- main pipeline ------------------------------------------------------
 
