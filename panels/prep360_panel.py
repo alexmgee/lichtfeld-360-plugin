@@ -487,6 +487,7 @@ class Plugin360Panel(lf.ui.Panel):
         self._job: Optional[PipelineJob] = None
         self._pending_result: Optional[PipelineResult] = None
         self._pending_lock = threading.Lock()
+        self._ui_update_scheduled: bool = False
         self._setup_probe_started: bool = False
         self._setup_probe_pending: Optional[
             tuple[MaskingSetupState, Sam3SetupReport, bool]
@@ -3803,6 +3804,25 @@ class Plugin360Panel(lf.ui.Panel):
         "incremental": "mapping",
     }
 
+    def _request_ui_update(self) -> None:
+        with self._pending_lock:
+            if self._ui_update_scheduled:
+                return
+            self._ui_update_scheduled = True
+
+        def request_update():
+            with self._pending_lock:
+                self._ui_update_scheduled = False
+            if self._handle:
+                self._handle.request_update()
+
+        try:
+            lf.ui.schedule_on_ui_thread(request_update)
+        except Exception:
+            with self._pending_lock:
+                self._ui_update_scheduled = False
+            logger.exception("Failed to schedule pipeline UI update")
+
     def _on_pipeline_progress(self, stage: str, percent: float, message: str):
         now = time.time()
 
@@ -3874,6 +3894,7 @@ class Plugin360Panel(lf.ui.Panel):
                             self._timing_colmap_substage = substage_name
                             self._timing_colmap_substage_t0 = now
                         break
+        self._request_ui_update()
 
     def _on_pipeline_complete(self, result: PipelineResult):
         with self._pending_lock:
@@ -3887,6 +3908,7 @@ class Plugin360Panel(lf.ui.Panel):
                     s["substeps"][self._timing_colmap_substage] = now - self._timing_colmap_substage_t0
 
             self._pending_result = result
+        self._request_ui_update()
 
     # ── Main-thread result consumption ────────────────────────
 
